@@ -1,12 +1,15 @@
-now i am working on la-primitiva
-
-and i need also prediction page like euromillones
-
-but this is difference a bit 
-    main 6 numbers
-    bounuse number C
-    reintegro number R
-
-i have to make feature, history number, pair/trio model like euromillones
-
-so first give me your advice without coding
+make another simulation page for el-gordo
+when i click star icon redirect to simulation page
+make 4 tabs like euromillones
+and i will explain one by one
+Comparación
+    read whelling result(prediction ticket 3000) from previouse draw_id
+    model: el_gordo_simulations
+    and calculate someitems like euromillones and save result
+    make all like euromillones 
+Modelos (freq / gap / hot)
+    read data from el_gordo_draw_features
+    use all old data until current draw
+    same as euromillones
+Pool de candidatos
+Wheeling

@@ -49,6 +49,27 @@ from simulation.euromillones.wheeling import (
     generate_wheeling_tickets,
     compare_wheeling_with_result,
 )
+from simulation.el_gordo.candidate_pool import build_el_gordo_candidate_pool
+from simulation.el_gordo.frequency_model import (
+    predict_next_el_gordo_frequency_scores,
+    save_el_gordo_frequency_simulation_result,
+    train_all_el_gordo_frequency_models,
+)
+from simulation.el_gordo.gap_model import (
+    predict_next_el_gordo_gap_scores,
+    save_el_gordo_gap_simulation_result,
+    train_all_el_gordo_gap_models,
+)
+from simulation.el_gordo.hot_model import (
+    predict_next_el_gordo_hot_scores,
+    save_el_gordo_hot_simulation_result,
+    train_all_el_gordo_hot_models,
+)
+from simulation.el_gordo.simple_simulation import run_el_gordo_simple_simulation
+from simulation.el_gordo.wheeling import (
+    generate_el_gordo_wheeling_tickets,
+    compare_el_gordo_wheeling_with_result,
+)
 
 # Lottery slug -> game_id for loteriasyapuestas.es API (El Gordo = ELGR per site)
 GAME_IDS = {
@@ -1009,6 +1030,154 @@ def get_euromillones_frequency_simulation_history(
     return JSONResponse(content={"simulations": docs})
 
 
+@app.post("/api/el-gordo/simulation/frequency/train")
+def train_el_gordo_frequency_models():
+    """
+    Train / retrain El Gordo frequency-based models (main + clave).
+    """
+    try:
+        train_all_el_gordo_frequency_models()
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error training El Gordo frequency models: {e}")
+    return {"status": "ok"}
+
+
+@app.get("/api/el-gordo/simulation/frequency")
+def simulate_el_gordo_frequency(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description=(
+            "Optional draw_id; if provided, simulate as of the draw after this one."
+        ),
+    )
+):
+    """
+    Run El Gordo frequency-based simulation for the next draw.
+    """
+    try:
+        scores = predict_next_el_gordo_frequency_scores(cutoff_draw_id=cutoff_draw_id)
+        sim_id = save_el_gordo_frequency_simulation_result(scores)
+    except RuntimeError as e:
+        raise HTTPException(500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error running El Gordo frequency simulation: {e}")
+
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db["el_gordo_simulations"]
+    from bson import ObjectId  # type: ignore[import-not-found]
+
+    doc = coll.find_one({"_id": ObjectId(sim_id)})
+    if not doc:
+        raise HTTPException(500, detail="Saved El Gordo frequency simulation not found")
+
+    public = _doc_to_json(doc)
+    public["simulation_id"] = sim_id
+    return JSONResponse(content=public)
+
+
+@app.get("/api/el-gordo/simulation/frequency/history")
+def get_el_gordo_frequency_simulation_history(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="Optional draw_id to filter El Gordo simulations by cutoff_draw_id.",
+    ),
+    limit: int = Query(
+        1,
+        ge=1,
+        le=50,
+        description="Maximum number of simulation records to return.",
+    ),
+):
+    """
+    Return saved El Gordo frequency simulations.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db["el_gordo_simulations"]
+    query: dict = {}
+    if cutoff_draw_id:
+        query["cutoff_draw_id"] = cutoff_draw_id
+
+    cursor = coll.find(query).sort("created_at", -1).limit(limit)
+    docs = [_doc_to_json(doc) for doc in cursor]
+    return JSONResponse(content={"simulations": docs})
+
+
+@app.get("/api/el-gordo/simulation/simple")
+def simulate_el_gordo_simple(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description=(
+            "Optional draw_id; if provided, simulate El Gordo as of the draw after this one."
+        ),
+    )
+):
+    """
+    Run a simple El Gordo simulation (frequency / gap / hot-cold) for the next draw.
+
+    This uses `el_gordo_draw_features` to compute per-number scores and stores the result
+    in `el_gordo_simulations` so that the candidate pool and wheeling engines can reuse it.
+    """
+    try:
+        sim_doc = run_el_gordo_simple_simulation(cutoff_draw_id=cutoff_draw_id)
+    except RuntimeError as e:
+        raise HTTPException(400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error running El Gordo simulation: {e}")
+
+    return JSONResponse(content=_doc_to_json(sim_doc))
+
+
+@app.post("/api/el-gordo/simulation/gap/train")
+def train_el_gordo_gap_models():
+    """
+    Train / retrain El Gordo gap-based models (main + clave).
+    """
+    try:
+        train_all_el_gordo_gap_models()
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error training El Gordo gap models: {e}")
+    return {"status": "ok"}
+
+
+@app.get("/api/el-gordo/simulation/gap")
+def simulate_el_gordo_gap(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description=(
+            "Optional draw_id; if provided, simulate as of the draw after this one."
+        ),
+    )
+):
+    """
+    Run El Gordo gap-based simulation for the next draw.
+    """
+    try:
+        scores = predict_next_el_gordo_gap_scores(cutoff_draw_id=cutoff_draw_id)
+        sim_id = save_el_gordo_gap_simulation_result(scores)
+    except RuntimeError as e:
+        raise HTTPException(500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error running El Gordo gap simulation: {e}")
+
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db["el_gordo_simulations"]
+    from bson import ObjectId  # type: ignore[import-not-found]
+
+    doc = coll.find_one({"_id": ObjectId(sim_id)})
+    if not doc:
+        raise HTTPException(500, detail="Saved El Gordo gap simulation not found")
+
+    public = _doc_to_json(doc)
+    public["simulation_id"] = sim_id
+    return JSONResponse(content=public)
+
+
 @app.post("/api/euromillones/simulation/gap/train")
 def train_euromillones_gap_models():
     """
@@ -1093,6 +1262,53 @@ def simulate_euromillones_hot(
     doc = coll.find_one({"_id": ObjectId(sim_id)})
     if not doc:
         raise HTTPException(500, detail="Saved hot/cold simulation not found")
+
+    public = _doc_to_json(doc)
+    public["simulation_id"] = sim_id
+    return JSONResponse(content=public)
+
+
+@app.post("/api/el-gordo/simulation/hot/train")
+def train_el_gordo_hot_models():
+    """
+    Train / retrain El Gordo hot/cold-based models (main + clave).
+    """
+    try:
+        train_all_el_gordo_hot_models()
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error training El Gordo hot/cold models: {e}")
+    return {"status": "ok"}
+
+
+@app.get("/api/el-gordo/simulation/hot")
+def simulate_el_gordo_hot(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description=(
+            "Optional draw_id; if provided, simulate as of the draw after this one."
+        ),
+    )
+):
+    """
+    Run El Gordo hot/cold-based simulation for the next draw.
+    """
+    try:
+        scores = predict_next_el_gordo_hot_scores(cutoff_draw_id=cutoff_draw_id)
+        sim_id = save_el_gordo_hot_simulation_result(scores)
+    except RuntimeError as e:
+        raise HTTPException(500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error running El Gordo hot/cold simulation: {e}")
+
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db["el_gordo_simulations"]
+    from bson import ObjectId  # type: ignore[import-not-found]
+
+    doc = coll.find_one({"_id": ObjectId(sim_id)})
+    if not doc:
+        raise HTTPException(500, detail="Saved El Gordo hot/cold simulation not found")
 
     public = _doc_to_json(doc)
     public["simulation_id"] = sim_id
@@ -1193,6 +1409,93 @@ def get_euromillones_candidate_pool(
     return JSONResponse(content=pool)
 
 
+@app.get("/api/el-gordo/simulation/candidate-pool")
+def get_el_gordo_candidate_pool(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description=(
+            "Optional draw_id; if provided, candidate pool is built from the "
+            "latest El Gordo simulation document for this cutoff."
+        ),
+    ),
+    k_main: int = Query(
+        20,
+        ge=1,
+        le=54,
+        description="Tamaño del pool de números principales (1–54).",
+    ),
+    k_clave: int = Query(
+        6,
+        ge=1,
+        le=10,
+        description="Tamaño del pool de números clave (0–9).",
+    ),
+    w_freq_main: float = Query(
+        0.4,
+        ge=0.0,
+        le=1.0,
+        description="Peso de frecuencia para números principales.",
+    ),
+    w_gap_main: float = Query(
+        0.3,
+        ge=0.0,
+        le=1.0,
+        description="Peso de gap para números principales.",
+    ),
+    w_hot_main: float = Query(
+        0.3,
+        ge=0.0,
+        le=1.0,
+        description="Peso hot/cold para números principales.",
+    ),
+    w_freq_clave: float = Query(
+        0.4,
+        ge=0.0,
+        le=1.0,
+        description="Peso de frecuencia para número clave.",
+    ),
+    w_gap_clave: float = Query(
+        0.3,
+        ge=0.0,
+        le=1.0,
+        description="Peso de gap para número clave.",
+    ),
+    w_hot_clave: float = Query(
+        0.3,
+        ge=0.0,
+        le=1.0,
+        description="Peso hot/cold para número clave.",
+    ),
+):
+    """
+    Build an El Gordo candidate pool for the wheeling engine.
+    """
+    try:
+        pool = build_el_gordo_candidate_pool(
+            cutoff_draw_id=cutoff_draw_id,
+            k_main=k_main,
+            k_clave=k_clave,
+            main_weights={
+                "freq": w_freq_main,
+                "gap": w_gap_main,
+                "hot": w_hot_main,
+            },
+            clave_weights={
+                "freq": w_freq_clave,
+                "gap": w_gap_clave,
+                "hot": w_hot_clave,
+            },
+        )
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error building El Gordo candidate pool: {e}")
+
+    return JSONResponse(content=pool)
+
+
 @app.post("/api/euromillones/simulation/wheeling")
 def create_euromillones_wheeling_tickets(
     cutoff_draw_id: str = Query(
@@ -1220,6 +1523,71 @@ def create_euromillones_wheeling_tickets(
         raise HTTPException(400, detail=str(e))
     except Exception as e:
         raise HTTPException(500, detail=f"Error generando boletos de wheeling: {e}")
+
+    return JSONResponse(content=result)
+
+
+@app.post("/api/el-gordo/simulation/wheeling")
+def create_el_gordo_wheeling_tickets(
+    cutoff_draw_id: str = Query(
+        ...,
+        description="id_sorteo que identifica el sorteo de referencia para el wheeling.",
+    ),
+    n_tickets: int = Query(
+        20,
+        ge=1,
+        le=3000,
+        description="Número de boletos a mostrar (se calculan hasta 3000 y se guardan todos).",
+    ),
+):
+    """
+    Generar boletos de El Gordo usando el pool de candidatos guardado.
+    """
+    try:
+        result = generate_el_gordo_wheeling_tickets(
+            cutoff_draw_id=cutoff_draw_id,
+            n_tickets=n_tickets,
+        )
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            500, detail=f"Error generando boletos de wheeling de El Gordo: {e}"
+        )
+
+    return JSONResponse(content=result)
+
+
+@app.get("/api/el-gordo/simulation/wheeling/compare")
+def compare_el_gordo_wheeling(
+    result_draw_id: str = Query(
+        ...,
+        description=(
+            "id_sorteo del sorteo real; se compara contra el wheeling "
+            "generado para el sorteo anterior."
+        ),
+    ),
+    n_tickets: Optional[int] = Query(
+        None,
+        description="Si se indica, solo se comparan los primeros N boletos (ej. 10, 20, 3000).",
+        ge=1,
+        le=3000,
+    ),
+):
+    """
+    Comparar los boletos de wheeling de El Gordo generados para un cutoff_draw_id con el
+    sorteo real inmediatamente posterior, usando las categorías oficiales de premios.
+    """
+    try:
+        result = compare_el_gordo_wheeling_with_result(
+            result_draw_id=result_draw_id, n_tickets=n_tickets
+        )
+    except RuntimeError as e:
+        raise HTTPException(400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error comparando resultados de wheeling de El Gordo: {e}")
 
     return JSONResponse(content=result)
 

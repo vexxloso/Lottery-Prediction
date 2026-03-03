@@ -151,7 +151,6 @@ export function SimulationPage() {
   }, [slug, drawId]);
 
   const runAllSimulation = async () => {
-    if (slug !== 'euromillones') return;
     try {
       setSimLoading(true);
       setSimError('');
@@ -171,42 +170,65 @@ export function SimulationPage() {
         params.set('cutoff_draw_id', drawId);
       }
 
-      // 1) Train + simulate frequency
-      await callJson(`${API_URL}/api/euromillones/simulation/frequency/train`, {
-        method: 'POST',
-      });
-      await callJson(
-        `${API_URL}/api/euromillones/simulation/frequency?${params.toString()}`,
-      );
+      if (slug === 'euromillones') {
+        // 1) Train + simulate frequency
+        await callJson(`${API_URL}/api/euromillones/simulation/frequency/train`, {
+          method: 'POST',
+        });
+        await callJson(
+          `${API_URL}/api/euromillones/simulation/frequency?${params.toString()}`,
+        );
 
-      // 2) Train + simulate gap
-      await callJson(`${API_URL}/api/euromillones/simulation/gap/train`, {
-        method: 'POST',
-      });
-      await callJson(`${API_URL}/api/euromillones/simulation/gap?${params.toString()}`);
+        // 2) Train + simulate gap
+        await callJson(`${API_URL}/api/euromillones/simulation/gap/train`, {
+          method: 'POST',
+        });
+        await callJson(
+          `${API_URL}/api/euromillones/simulation/gap?${params.toString()}`,
+        );
 
-      // 3) Train + simulate hot/cold (final doc returned)
-      await callJson(`${API_URL}/api/euromillones/simulation/hot/train`, {
-        method: 'POST',
-      });
-      const finalData = await callJson(
-        `${API_URL}/api/euromillones/simulation/hot?${params.toString()}`,
-      );
+        // 3) Train + simulate hot/cold (final doc returned)
+        await callJson(`${API_URL}/api/euromillones/simulation/hot/train`, {
+          method: 'POST',
+        });
+        const finalData = await callJson(
+          `${API_URL}/api/euromillones/simulation/hot?${params.toString()}`,
+        );
 
-      setSimResult({
-        mains: (finalData.mains ?? []) as {
-          number: number;
-          freq?: number;
-          gap?: number;
-          hot?: number;
-        }[],
-        stars: (finalData.stars ?? []) as {
-          number: number;
-          freq?: number;
-          gap?: number;
-          hot?: number;
-        }[],
-      });
+        setSimResult({
+          mains: (finalData.mains ?? []) as {
+            number: number;
+            freq?: number;
+            gap?: number;
+            hot?: number;
+          }[],
+          stars: (finalData.stars ?? []) as {
+            number: number;
+            freq?: number;
+            gap?: number;
+            hot?: number;
+          }[],
+        });
+      } else if (slug === 'el-gordo') {
+        const finalData = await callJson(
+          `${API_URL}/api/el-gordo/simulation/simple?${params.toString()}`,
+        );
+
+        setSimResult({
+          mains: (finalData.mains ?? []) as {
+            number: number;
+            freq?: number;
+            gap?: number;
+            hot?: number;
+          }[],
+          stars: (finalData.claves ?? []) as {
+            number: number;
+            freq?: number;
+            gap?: number;
+            hot?: number;
+          }[],
+        });
+      }
     } catch (e) {
       setSimError(
         e instanceof Error ? e.message : 'Error al ejecutar simulaciones (todas)',
@@ -390,13 +412,17 @@ export function SimulationPage() {
         <nav className="resultados-breadcrumb" aria-label="Ruta de navegación">
           <Link to="/">inicio</Link>
           {' > '}
-          <Link to="/resultados/euromillones?tab=prediction">Predicción Euromillones</Link>
+          <Link to={`/resultados/${slug}?tab=prediction`}>Predicción {config.name}</Link>
           {' > '}
           <span>Simulación</span>
         </nav>
 
-        {slug === 'euromillones' && (
-          <div className="resultados-tabs" role="tablist" aria-label="Simulación Euromillones">
+        {(slug === 'euromillones' || slug === 'el-gordo') && (
+          <div
+            className="resultados-tabs"
+            role="tablist"
+            aria-label={`Simulación ${config.name}`}
+          >
             <button
               type="button"
               className={`resultados-tab ${view === 'compare' ? 'resultados-tab--active' : ''}`}
@@ -757,7 +783,7 @@ export function SimulationPage() {
           </section>
         )}
 
-        {slug === 'euromillones' && view === 'sim' && (
+        {view === 'sim' && (
           <>
             <section
               className="card resultados-features-card"

@@ -42,10 +42,12 @@ function ElGordoFeaturesTableRow({
   row,
   onShowChart,
   onShowGapChart,
+  onSimulate,
 }: {
   row: ElGordoFeatureRow;
   onShowChart: (row: ElGordoFeatureRow) => void;
   onShowGapChart: (row: ElGordoFeatureRow) => void;
+  onSimulate: (row: ElGordoFeatureRow) => void;
 }) {
   return (
     <tr>
@@ -81,6 +83,16 @@ function ElGordoFeaturesTableRow({
           title="Ver gráfico de gaps"
         >
           <img src="/images/gape.svg" alt="" className="resultados-features-icon" />
+        </button>
+        <button
+          type="button"
+          className="resultados-features-iconbtn"
+          style={{ marginLeft: 8 }}
+          onClick={() => onSimulate(row)}
+          aria-label="Simular con esta predicción"
+          title="Simular con esta predicción"
+        >
+          <img src="/images/start.svg" alt="" className="resultados-features-icon" />
         </button>
       </td>
     </tr>
@@ -227,6 +239,14 @@ export function ElGordoFeaturesPanel() {
                     setGapPointsClave(null);
                     setGapError('');
                     void loadGapsForDate(String(r.draw_date ?? '').split(' ')[0]);
+                  }}
+                  onSimulate={(r) => {
+                    const date = String(r.draw_date ?? '').split(' ')[0];
+                    navigate(
+                      `/simulacion/el-gordo/${encodeURIComponent(r.draw_id)}?date=${encodeURIComponent(
+                        date,
+                      )}`,
+                    );
                   }}
                 />
               ))}
