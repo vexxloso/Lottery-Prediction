@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import type { LotterySlug } from './types';
 import { LOTTERY_CONFIG } from './types';
 import { useDraws } from './useDraws';
@@ -114,6 +114,9 @@ export function ResultadosPage({ lottery }: ResultadosPageProps) {
   const config = LOTTERY_CONFIG[lottery];
   const themeClass = `resultados-theme-${config.theme}`;
   const [expandedDrawId, setExpandedDrawId] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const pageParam = searchParams.get('page');
+  const pageFromUrl = pageParam ? Math.max(1, Number(pageParam) || 1) : 1;
   const {
     draws,
     total,
@@ -128,9 +131,36 @@ export function ResultadosPage({ lottery }: ResultadosPageProps) {
     totalPages,
     nextPage,
     prevPage,
+    setPage,
   } = useDraws(lottery);
 
   const latestJackpot = draws.length > 0 ? draws[0].premio_bote : '';
+
+  useEffect(() => {
+    if (pageFromUrl !== currentPage) {
+      setPage(pageFromUrl);
+    }
+  }, [pageFromUrl, currentPage, setPage]);
+
+  const updatePageInUrl = (page: number) => {
+    const params = new URLSearchParams(searchParams);
+    params.set('page', String(page));
+    setSearchParams(params, { replace: true });
+  };
+
+  const handlePrevPage = () => {
+    if (currentPage <= 1) return;
+    const newPage = currentPage - 1;
+    setPage(newPage);
+    updatePageInUrl(newPage);
+  };
+
+  const handleNextPage = () => {
+    if (currentPage >= totalPages) return;
+    const newPage = currentPage + 1;
+    setPage(newPage);
+    updatePageInUrl(newPage);
+  };
 
   return (
     <div className={`resultados-page ${themeClass}`}>
@@ -178,7 +208,7 @@ export function ResultadosPage({ lottery }: ResultadosPageProps) {
 
         {total > 0 && (
           <div className="resultados-pagination">
-            <button type="button" disabled={currentPage <= 1} onClick={prevPage}>
+            <button type="button" disabled={currentPage <= 1} onClick={handlePrevPage}>
               Anterior
             </button>
             <span>
@@ -187,7 +217,7 @@ export function ResultadosPage({ lottery }: ResultadosPageProps) {
             <button
               type="button"
               disabled={currentPage >= totalPages}
-              onClick={nextPage}
+              onClick={handleNextPage}
             >
               Siguiente
             </button>
@@ -203,6 +233,7 @@ export function ResultadosPage({ lottery }: ResultadosPageProps) {
             onSubmit={(e) => {
               e.preventDefault();
               search();
+              updatePageInUrl(1);
             }}
           >
             <label htmlFor="resultados-desde">Desde</label>

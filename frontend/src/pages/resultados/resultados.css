@@ -24,6 +24,10 @@
   animation: fadeIn 0.35s ease-out;
 }
 
+.resultados-page-sidebar {
+  min-width: 0;
+}
+
 @media (max-width: 900px) {
   .resultados-page {
     grid-template-columns: 1fr;
@@ -136,6 +140,24 @@
 .resultados-ball.star {
   background: var(--resultados-star-bg);
   color: var(--resultados-star-text, var(--resultados-ball-text));
+}
+
+/* Compact balls/stars for simulation Boletos table */
+.resultados-sim-balls.resultados-balls {
+  gap: 4px;
+  flex-wrap: nowrap;
+}
+.resultados-sim-balls .resultados-ball {
+  width: 26px;
+  height: 26px;
+  font-size: 0.75rem;
+}
+.resultados-sim-balls .resultados-ball-star-wrap {
+  width: 26px;
+  height: 26px;
+}
+.resultados-sim-balls .resultados-star-num {
+  font-size: 0.7rem;
 }
 
 .resultados-ball.complementario,

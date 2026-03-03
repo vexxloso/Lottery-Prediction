@@ -78,40 +78,95 @@ def _load_last_state(client: MongoClient):
 
     main_freq_array: List[int] = last_doc.get("main_frequency_counts") or []
     star_freq_array: List[int] = last_doc.get("star_frequency_counts") or []
-    main_gap_array: List[int | None] = last_doc.get("main_gap_draws") or []
-    star_gap_array: List[int | None] = last_doc.get("star_gap_draws") or []
 
     if len(main_freq_array) != (MAIN_MAX - MAIN_MIN + 1):
         raise RuntimeError("main_frequency_counts length mismatch in last feature row")
     if len(star_freq_array) != (STAR_MAX - STAR_MIN + 1):
         raise RuntimeError("star_frequency_counts length mismatch in last feature row")
-    if len(main_gap_array) != len(main_freq_array):
-        raise RuntimeError("main_gap_draws length mismatch in last feature row")
-    if len(star_gap_array) != len(star_freq_array):
-        raise RuntimeError("star_gap_draws length mismatch in last feature row")
 
-    # Reconstruct freq_all and last_seen_index from arrays and draw_index
+    # Try to read gap arrays; if missing or invalid, we will reconstruct
+    raw_main_gap_array = last_doc.get("main_gap_draws")
+    raw_star_gap_array = last_doc.get("star_gap_draws")
+
+    has_valid_main_gaps = isinstance(raw_main_gap_array, list) and len(raw_main_gap_array) == len(
+        main_freq_array
+    )
+    has_valid_star_gaps = isinstance(raw_star_gap_array, list) and len(raw_star_gap_array) == len(
+        star_freq_array
+    )
+
+    db = client[MONGO_DB]
+
+    # Reconstruct freq_all from arrays
     main_freq_all: Dict[int, int] = {}
-    main_last_seen_index: Dict[int, int] = {}
     for offset, freq in enumerate(main_freq_array):
         n = MAIN_MIN + offset
         main_freq_all[n] = int(freq)
-        gap = main_gap_array[offset]
-        if gap is None:
-            main_last_seen_index[n] = -1
-        else:
-            main_last_seen_index[n] = draw_index - int(gap)
 
     star_freq_all: Dict[int, int] = {}
-    star_last_seen_index: Dict[int, int] = {}
     for offset, freq in enumerate(star_freq_array):
         s = STAR_MIN + offset
         star_freq_all[s] = int(freq)
-        gap = star_gap_array[offset]
-        if gap is None:
+
+    # Reconstruct last_seen_index
+    main_last_seen_index: Dict[int, int] = {}
+    star_last_seen_index: Dict[int, int] = {}
+
+    if has_valid_main_gaps and has_valid_star_gaps:
+        # Fast path: derive last_seen_index directly from stored gaps
+        main_gap_array: List[int | None] = raw_main_gap_array  # type: ignore[assignment]
+        star_gap_array: List[int | None] = raw_star_gap_array  # type: ignore[assignment]
+
+        for offset, gap in enumerate(main_gap_array):
+            n = MAIN_MIN + offset
+            if gap is None:
+                main_last_seen_index[n] = -1
+            else:
+                main_last_seen_index[n] = draw_index - int(gap)
+
+        for offset, gap in enumerate(star_gap_array):
+            s = STAR_MIN + offset
+            if gap is None:
+                star_last_seen_index[s] = -1
+            else:
+                star_last_seen_index[s] = draw_index - int(gap)
+    else:
+        # Compatibility path for legacy rows that don't store gap arrays:
+        # reconstruct last_seen_index from euromillones_number_history.
+        num_hist = db[NUMBER_HISTORY_COLLECTION]
+
+        # Initialize with -1 (never seen)
+        for n in range(MAIN_MIN, MAIN_MAX + 1):
+            main_last_seen_index[n] = -1
+        for s in range(STAR_MIN, STAR_MAX + 1):
             star_last_seen_index[s] = -1
-        else:
-            star_last_seen_index[s] = draw_index - int(gap)
+
+        # For each number, look at its last appearance draw_index <= current draw_index
+        main_docs = num_hist.find({"type": "main"})
+        for doc in main_docs:
+            number = int(doc.get("number", 0))
+            if not (MAIN_MIN <= number <= MAIN_MAX):
+                continue
+            appearances = doc.get("appearances") or []
+            last_idx = -1
+            for appo in appearances:
+                idx = int(appo.get("draw_index", -1))
+                if idx <= draw_index and idx > last_idx:
+                    last_idx = idx
+            main_last_seen_index[number] = last_idx
+
+        star_docs = num_hist.find({"type": "star"})
+        for doc in star_docs:
+            number = int(doc.get("number", 0))
+            if not (STAR_MIN <= number <= STAR_MAX):
+                continue
+            appearances = doc.get("appearances") or []
+            last_idx = -1
+            for appo in appearances:
+                idx = int(appo.get("draw_index", -1))
+                if idx <= draw_index and idx > last_idx:
+                    last_idx = idx
+            star_last_seen_index[number] = last_idx
 
     return (
         last_doc,

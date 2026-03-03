@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Drawer } from 'antd';
 import {
   ResponsiveContainer,
@@ -99,6 +100,8 @@ export function ElGordoFeaturesPanel() {
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [historyMain, setHistoryMain] = useState<{ number: number; dates: string[] }[] | null>(null);
   const [historyClave, setHistoryClave] = useState<{ number: number; dates: string[] }[] | null>(null);
+
+  const navigate = useNavigate();
 
   const closeModal = () => {
     setSelectedRow(null);

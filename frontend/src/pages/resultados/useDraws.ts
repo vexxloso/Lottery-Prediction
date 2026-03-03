@@ -66,6 +66,14 @@ export function useDraws(lottery: string) {
     setSkip((s) => Math.max(0, s - PAGE_SIZE));
   }, []);
 
+  const setPage = useCallback((page: number) => {
+    if (!Number.isFinite(page) || page < 1) {
+      setSkip(0);
+      return;
+    }
+    setSkip((page - 1) * PAGE_SIZE);
+  }, []);
+
   return {
     draws,
     total,
@@ -82,6 +90,7 @@ export function useDraws(lottery: string) {
     currentPage,
     nextPage,
     prevPage,
+    setPage,
     refetch: fetchDraws,
   };
 }

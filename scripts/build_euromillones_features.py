@@ -165,6 +165,10 @@ def _build_features(draws: List[Draw]) -> None:
     # Same for lucky stars
     star_freq_all: Dict[int, int] = {s: 0 for s in range(STAR_MIN, STAR_MAX + 1)}
 
+    # Last draw index where each number/star appeared (for gap arrays)
+    main_last_seen: Dict[int, int] = {n: -1 for n in range(MAIN_MIN, MAIN_MAX + 1)}
+    star_last_seen: Dict[int, int] = {s: -1 for s in range(STAR_MIN, STAR_MAX + 1)}
+
     total_draws = len(draws)
     print(f"Building per-draw features from {total_draws} Euromillones draws...")
 
@@ -192,6 +196,17 @@ def _build_features(draws: List[Draw]) -> None:
         # Frequency arrays for all numbers, based only on previous draws
         main_freq_array = [main_freq_all[n] for n in range(MAIN_MIN, MAIN_MAX + 1)]
         star_freq_array = [star_freq_all[s] for s in range(STAR_MIN, STAR_MAX + 1)]
+
+        # Gap arrays: draws since previous appearance, based only on previous draws
+        main_gap_array: List[int | None] = []
+        for n in range(MAIN_MIN, MAIN_MAX + 1):
+            last = main_last_seen[n]
+            main_gap_array.append(None if last == -1 else idx - last)
+
+        star_gap_array: List[int | None] = []
+        for s in range(STAR_MIN, STAR_MAX + 1):
+            last = star_last_seen[s]
+            star_gap_array.append(None if last == -1 else idx - last)
 
         # Hot / cold numbers (up to 5), based only on previous draws
         if idx > 0:
@@ -246,6 +261,9 @@ def _build_features(draws: List[Draw]) -> None:
             # Frequency counts (every 50 main numbers and lucky stars, BEFORE this draw)
             "main_frequency_counts": main_freq_array,
             "star_frequency_counts": star_freq_array,
+            # Gaps in draws since previous appearance, BEFORE this draw
+            "main_gap_draws": main_gap_array,
+            "star_gap_draws": star_gap_array,
         }
 
         target.update_one(
@@ -254,14 +272,16 @@ def _build_features(draws: List[Draw]) -> None:
             upsert=True,
         )
 
-        # After saving the feature doc, update lifetime frequencies with this draw
+        # After saving the feature doc, update lifetime frequencies and last_seen with this draw
         for n in draw.main_numbers:
             if MAIN_MIN <= n <= MAIN_MAX:
                 main_freq_all[n] += 1
+                main_last_seen[n] = idx
 
         for s in draw.star_numbers:
             if STAR_MIN <= s <= STAR_MAX:
                 star_freq_all[s] += 1
+                star_last_seen[s] = idx
 
         if (idx + 1) % 50 == 0 or idx == total_draws - 1:
             print(f"  Processed {idx + 1} / {total_draws} draws")

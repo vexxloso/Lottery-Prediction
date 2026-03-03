@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { ResultadosPage } from './ResultadosPage';
 import { ElGordoApuestasPanel } from './ElGordoApuestasPanel';
 import { ElGordoFeaturesPanel } from './ElGordoFeaturesPanel';
@@ -6,7 +6,16 @@ import { ElGordoFeaturesPanel } from './ElGordoFeaturesPanel';
 type ElGordoTab = 'results' | 'prediction' | 'grafico';
 
 export function ResultadosElGordo() {
-  const [activeTab, setActiveTab] = useState<ElGordoTab>('results');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = (searchParams.get('tab') as ElGordoTab | null) ?? 'results';
+  const activeTab: ElGordoTab =
+    tabParam === 'prediction' || tabParam === 'grafico' ? tabParam : 'results';
+
+  const setActiveTab = (tab: ElGordoTab) => {
+    const params = new URLSearchParams(searchParams);
+    params.set('tab', tab);
+    setSearchParams(params, { replace: true });
+  };
 
   return (
     <div className="resultados-euromillones-layout">

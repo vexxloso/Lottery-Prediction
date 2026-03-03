@@ -10,6 +10,7 @@ import os
 import re
 import sys
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -27,6 +28,27 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+
+from simulation.euromillones.frequency_model import (
+    predict_next_frequency_scores,
+    save_frequency_simulation_result,
+    train_all_frequency_models,
+)
+from simulation.euromillones.gap_model import (
+    predict_next_gap_scores,
+    save_gap_simulation_result,
+    train_all_gap_models,
+)
+from simulation.euromillones.hot_model import (
+    predict_next_hot_scores,
+    save_hot_simulation_result,
+    train_all_hot_models,
+)
+from simulation.euromillones.candidate_pool import build_candidate_pool
+from simulation.euromillones.wheeling import (
+    generate_wheeling_tickets,
+    compare_wheeling_with_result,
+)
 
 # Lottery slug -> game_id for loteriasyapuestas.es API (El Gordo = ELGR per site)
 GAME_IDS = {
@@ -451,6 +473,10 @@ def debug_euromillones_one():
 def get_euromillones_features(
     limit: int = Query(50, ge=1, le=200),
     skip: int = Query(0, ge=0),
+    draw_id: str | None = Query(
+        None,
+        description="Optional: filter by draw_id to get a specific feature row.",
+    ),
 ):
     """
     Return per-draw Euromillones feature rows from `euromillones_draw_features`.
@@ -466,8 +492,14 @@ def get_euromillones_features(
         raise HTTPException(500, detail="Database not connected")
 
     coll = db["euromillones_draw_features"]
-    total = coll.count_documents({})
 
+    if draw_id:
+        cursor = coll.find({"draw_id": draw_id})
+        docs = [_doc_to_json(doc) for doc in cursor]
+        total = len(docs)
+        return JSONResponse(content={"features": docs, "total": total})
+
+    total = coll.count_documents({})
     cursor = coll.find().sort("draw_date", -1).skip(skip).limit(limit)
     docs = [_doc_to_json(doc) for doc in cursor]
 
@@ -478,6 +510,10 @@ def get_euromillones_features(
 def get_la_primitiva_features(
     limit: int = Query(50, ge=1, le=200),
     skip: int = Query(0, ge=0),
+    draw_id: str | None = Query(
+        None,
+        description="Optional: filter by draw_id to get a specific feature row.",
+    ),
 ):
     """
     Return per-draw La Primitiva feature rows from `la_primitiva_draw_features`.
@@ -493,8 +529,14 @@ def get_la_primitiva_features(
         raise HTTPException(500, detail="Database not connected")
 
     coll = db["la_primitiva_draw_features"]
-    total = coll.count_documents({})
 
+    if draw_id:
+        cursor = coll.find({"draw_id": draw_id})
+        docs = [_doc_to_json(doc) for doc in cursor]
+        total = len(docs)
+        return JSONResponse(content={"features": docs, "total": total})
+
+    total = coll.count_documents({})
     cursor = coll.find().sort("draw_date", -1).skip(skip).limit(limit)
     docs = [_doc_to_json(doc) for doc in cursor]
 
@@ -505,6 +547,10 @@ def get_la_primitiva_features(
 def get_el_gordo_features(
     limit: int = Query(50, ge=1, le=200),
     skip: int = Query(0, ge=0),
+    draw_id: str | None = Query(
+        None,
+        description="Optional: filter by draw_id to get a specific feature row.",
+    ),
 ):
     """
     Return per-draw El Gordo feature rows from `el_gordo_draw_features`.
@@ -520,8 +566,14 @@ def get_el_gordo_features(
         raise HTTPException(500, detail="Database not connected")
 
     coll = db["el_gordo_draw_features"]
-    total = coll.count_documents({})
 
+    if draw_id:
+        cursor = coll.find({"draw_id": draw_id})
+        docs = [_doc_to_json(doc) for doc in cursor]
+        total = len(docs)
+        return JSONResponse(content={"features": docs, "total": total})
+
+    total = coll.count_documents({})
     cursor = coll.find().sort("draw_date", -1).skip(skip).limit(limit)
     docs = [_doc_to_json(doc) for doc in cursor]
 
@@ -872,6 +924,336 @@ def get_euromillones_number_history():
             target.append({"number": number, "dates": dates})
 
     return JSONResponse(content={"main": main, "star": star})
+
+
+@app.post("/api/euromillones/simulation/frequency/train")
+def train_euromillones_frequency_models():
+    """
+    Train / retrain Euromillones frequency-based models (main + stars).
+
+    This can be triggered from the UI. It runs synchronously and may take
+    some seconds depending on history size.
+    """
+    try:
+        train_all_frequency_models()
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error training frequency models: {e}")
+    return {"status": "ok"}
+
+
+@app.get("/api/euromillones/simulation/frequency")
+def simulate_euromillones_frequency(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="Optional draw_id; if provided, simulate as of the draw after this one.",
+    )
+):
+    """
+    Run Euromillones frequency-based simulation for the next draw.
+
+    Returns probability per number for mains (1–50) and stars (1–12),
+    sorted descending by probability.
+    """
+    try:
+        scores = predict_next_frequency_scores(cutoff_draw_id=cutoff_draw_id)
+        sim_id = save_frequency_simulation_result(scores)
+    except RuntimeError as e:
+        raise HTTPException(500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error running frequency simulation: {e}")
+
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db["euromillones_simulations"]
+    from bson import ObjectId  # type: ignore[import-not-found]
+
+    doc = coll.find_one({"_id": ObjectId(sim_id)})
+    if not doc:
+        raise HTTPException(500, detail="Saved frequency simulation not found")
+
+    public = _doc_to_json(doc)
+    public["simulation_id"] = sim_id
+    return JSONResponse(content=public)
+
+
+@app.get("/api/euromillones/simulation/frequency/history")
+def get_euromillones_frequency_simulation_history(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="Optional draw_id to filter simulations by cutoff_draw_id.",
+    ),
+    limit: int = Query(
+        1,
+        ge=1,
+        le=50,
+        description="Maximum number of simulation records to return.",
+    ),
+):
+    """
+    Return saved Euromillones frequency simulations.
+
+    If cutoff_draw_id is provided, only simulations for that draw are returned,
+    ordered from newest to oldest.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db["euromillones_simulations"]
+    query: dict = {}
+    if cutoff_draw_id:
+        query["cutoff_draw_id"] = cutoff_draw_id
+
+    cursor = coll.find(query).sort("created_at", -1).limit(limit)
+    docs = [_doc_to_json(doc) for doc in cursor]
+    return JSONResponse(content={"simulations": docs})
+
+
+@app.post("/api/euromillones/simulation/gap/train")
+def train_euromillones_gap_models():
+    """
+    Train / retrain Euromillones gap-based models (main + stars).
+    """
+    try:
+        train_all_gap_models()
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error training gap models: {e}")
+    return {"status": "ok"}
+
+
+@app.get("/api/euromillones/simulation/gap")
+def simulate_euromillones_gap(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="Optional draw_id; if provided, simulate as of the draw after this one.",
+    )
+):
+    """
+    Run Euromillones gap-based simulation for the next draw.
+    """
+    try:
+        scores = predict_next_gap_scores(cutoff_draw_id=cutoff_draw_id)
+        sim_id = save_gap_simulation_result(scores)
+    except RuntimeError as e:
+        raise HTTPException(500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error running gap simulation: {e}")
+
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db["euromillones_simulations"]
+    from bson import ObjectId  # type: ignore[import-not-found]
+
+    doc = coll.find_one({"_id": ObjectId(sim_id)})
+    if not doc:
+        raise HTTPException(500, detail="Saved gap simulation not found")
+
+    public = _doc_to_json(doc)
+    public["simulation_id"] = sim_id
+    return JSONResponse(content=public)
+
+
+@app.post("/api/euromillones/simulation/hot/train")
+def train_euromillones_hot_models():
+    """
+    Train / retrain Euromillones hot/cold-based models (main + stars).
+    """
+    try:
+        train_all_hot_models()
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error training hot/cold models: {e}")
+    return {"status": "ok"}
+
+
+@app.get("/api/euromillones/simulation/hot")
+def simulate_euromillones_hot(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="Optional draw_id; if provided, simulate as of the draw after this one.",
+    )
+):
+    """
+    Run Euromillones hot/cold-based simulation for the next draw.
+    """
+    try:
+        scores = predict_next_hot_scores(cutoff_draw_id=cutoff_draw_id)
+        sim_id = save_hot_simulation_result(scores)
+    except RuntimeError as e:
+        raise HTTPException(500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error running hot/cold simulation: {e}")
+
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db["euromillones_simulations"]
+    from bson import ObjectId  # type: ignore[import-not-found]
+
+    doc = coll.find_one({"_id": ObjectId(sim_id)})
+    if not doc:
+        raise HTTPException(500, detail="Saved hot/cold simulation not found")
+
+    public = _doc_to_json(doc)
+    public["simulation_id"] = sim_id
+    return JSONResponse(content=public)
+
+
+@app.get("/api/euromillones/simulation/candidate-pool")
+def get_euromillones_candidate_pool(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description=(
+            "Optional draw_id; if provided, candidate pool is built from the "
+            "latest simulation document for this cutoff."
+        ),
+    ),
+    k_main: int = Query(
+        20,
+        ge=1,
+        le=50,
+        description="Size of main-number candidate pool.",
+    ),
+    k_star: int = Query(
+        6,
+        ge=1,
+        le=12,
+        description="Size of star-number candidate pool.",
+    ),
+    w_freq_main: float = Query(
+        0.4,
+        ge=0.0,
+        le=1.0,
+        description="Weight of frequency probability for main numbers.",
+    ),
+    w_gap_main: float = Query(
+        0.3,
+        ge=0.0,
+        le=1.0,
+        description="Weight of gap probability for main numbers.",
+    ),
+    w_hot_main: float = Query(
+        0.3,
+        ge=0.0,
+        le=1.0,
+        description="Weight of hot/cold probability for main numbers.",
+    ),
+    w_freq_star: float = Query(
+        0.5,
+        ge=0.0,
+        le=1.0,
+        description="Weight of frequency probability for star numbers.",
+    ),
+    w_gap_star: float = Query(
+        0.25,
+        ge=0.0,
+        le=1.0,
+        description="Weight of gap probability for star numbers.",
+    ),
+    w_hot_star: float = Query(
+        0.25,
+        ge=0.0,
+        le=1.0,
+        description="Weight of hot/cold probability for star numbers.",
+    ),
+):
+    """
+    Build a Euromillones candidate pool for the wheeling engine.
+
+    Uses the unified `euromillones_simulations` document (freq/gap/hot per number)
+    and combines them into a single score per number using the provided weights.
+
+    Default configuration:
+      mains: freq=0.4, gap=0.3, hot=0.3, k_main=20
+      stars: freq=0.5, gap=0.25, hot=0.25, k_star=6
+    """
+    try:
+        pool = build_candidate_pool(
+            cutoff_draw_id=cutoff_draw_id,
+            k_main=k_main,
+            k_star=k_star,
+            main_weights={
+                "freq": w_freq_main,
+                "gap": w_gap_main,
+                "hot": w_hot_main,
+            },
+            star_weights={
+                "freq": w_freq_star,
+                "gap": w_gap_star,
+                "hot": w_hot_star,
+            },
+        )
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error building candidate pool: {e}")
+
+    return JSONResponse(content=pool)
+
+
+@app.post("/api/euromillones/simulation/wheeling")
+def create_euromillones_wheeling_tickets(
+    cutoff_draw_id: str = Query(
+        ...,
+        description="Draw_id que identifica el sorteo de referencia para el wheeling.",
+    ),
+    n_tickets: int = Query(
+        20,
+        ge=1,
+        le=3000,
+        description="Número de boletos a mostrar (se calculan hasta 3000 y se guardan todos).",
+    ),
+):
+    """
+    Generar boletos de Euromillones usando el pool de candidatos guardado.
+    """
+    try:
+        result = generate_wheeling_tickets(
+            cutoff_draw_id=cutoff_draw_id,
+            n_tickets=n_tickets,
+        )
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error generando boletos de wheeling: {e}")
+
+    return JSONResponse(content=result)
+
+
+@app.get("/api/euromillones/simulation/wheeling/compare")
+def compare_euromillones_wheeling(
+    result_draw_id: str = Query(
+        ...,
+        description=(
+            "id_sorteo del sorteo real; se compara contra el wheeling "
+            "generado para el sorteo anterior."
+        ),
+    ),
+    n_tickets: Optional[int] = Query(
+        None,
+        description="Si se indica, solo se comparan los primeros N boletos (ej. 10, 20, 3000).",
+        ge=1,
+        le=3000,
+    ),
+):
+    """
+    Comparar los boletos de wheeling generados para un cutoff_draw_id con el sorteo real
+    inmediatamente posterior, usando las categorías oficiales de premios.
+    """
+    try:
+        result = compare_wheeling_with_result(
+            result_draw_id=result_draw_id, n_tickets=n_tickets
+        )
+    except RuntimeError as e:
+        raise HTTPException(400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error comparando resultados de wheeling: {e}")
+
+    return JSONResponse(content=result)
 
 
 @app.get("/api/la-primitiva/number-history")

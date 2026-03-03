@@ -1,0 +1,89 @@
+You are an expert Python developer and lottery quant.  
+I have EuroMillions historical draw data from 2004 to today, including:
+
+- main numbers and star numbers  
+- hot/cold analysis  
+- number gap statistics  
+- pair frequency  
+- tier / distribution history  
+
+I want you to build a **fully automatic end-to-end system** that does the following:
+
+1. **Data Preparation**
+   - Load raw draws CSV and clean the data  
+   - Ensure numbers are 1–50, stars 1–12  
+   - Store in a database (SQLite is fine)  
+
+2. **Feature Engineering**
+   - For each number in each draw, compute:
+       - frequency over last 10, 30, 100 draws  
+       - gap since last appearance  
+       - pair strength  
+       - tier balance (low, mid, high)  
+       - odd/even ratio  
+       - star dependency score  
+   - Save features to a table or CSV  
+
+3. **Number Scoring AI**
+   - Train a CPU-friendly ML model (RandomForest or GradientBoosting)  
+   - Predict probability a number appears in the next 5 draws  
+   - Do not try to predict jackpot, only number likelihood  
+   - Save the model and prediction scores  
+
+4. **Candidate Pool Generator**
+   - Generate multiple candidate pools using number probabilities and historical patterns:
+       - Pool A: mostly hot numbers  
+       - Pool B: gap rebound numbers  
+       - Pool C: cold comeback numbers  
+   - Save candidate pools in a JSON / CSV file  
+
+5. **Wheeling Engine**
+   - For each candidate pool, generate a set of tickets (e.g., 20 tickets per pool)  
+   - Each ticket: 5 main numbers + 2 stars  
+   - Apply constraints:
+       - N  maximize coverage of the pool  
+       - balance odd/even numbers  
+       - balance tiers (low/mid/high)  
+       - minimize repeated pairs across tickets  
+   - Save the ticket sets  
+
+6. **Monte Carlo Simulation Engine**
+   - Simulate at least 100,000 draws using realistic random draws  
+   - For each ticket set:
+       - Count jackpot hits  
+       - Count partial prize hits (category 3,4,5, reintegro)  
+       - Calculate total recovery and ROI  
+   - Save results  
+
+7. **Real Draw Comparison**
+   - When a new draw occurs:
+       - Compare previously generated tickets vs actual winning numbers  
+       - Record: jackpot hits, partial prizes, total recovered money  
+       - Save comparison to database  
+
+8. **Learning / Retraining Loop**
+   - Append new draw to historical data  
+   - Rebuild features  
+   - Retrain number scoring model  
+   - Generate new candidate pools  
+   - Generate new wheeling tickets for next draw  
+   - Repeat automatically  
+
+9. **Automation**
+   - Create a single pipeline script to run all steps automatically  
+   - Schedule to run after every EuroMillions draw (Tuesday + Friday)  
+   - Ensure all intermediate data, predictions, and simulation results are saved for historical analysis  
+
+10. **Output**
+   - Final generated tickets for the next draw  
+   - Historical comparison of all predictions vs real results  
+   - ROI and recovery statistics for each strategy  
+
+**Requirements:**
+- CPU friendly (no GPU needed)  
+- Multiprocessing for simulations is fine  
+- Use Pandas, NumPy, scikit-learn, SQLAlchemy  
+- Optional: use Optuna for hyperparameter optimization  
+- Code should be modular with folders: data/, features/, models/, strategies/, wheels/, simulation/, tickets/, results/, pipeline/  
+
+Generate complete Python code for this system with comments and folder structure, ready to run in Cursor. Make sure the system is fully end-to-end and continuous learning.

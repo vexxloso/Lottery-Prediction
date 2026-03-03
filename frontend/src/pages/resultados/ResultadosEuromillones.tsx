@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { ResultadosPage } from './ResultadosPage';
 import { EuromillonesFeaturesPanel } from './EuromillonesFeaturesPanel';
 import { EuromillonesApuestasPanel } from './EuromillonesApuestasPanel';
@@ -6,7 +6,16 @@ import { EuromillonesApuestasPanel } from './EuromillonesApuestasPanel';
 type EuromillonesTab = 'results' | 'prediction' | 'grafico';
 
 export function ResultadosEuromillones() {
-  const [activeTab, setActiveTab] = useState<EuromillonesTab>('results');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = (searchParams.get('tab') as EuromillonesTab | null) ?? 'results';
+  const activeTab: EuromillonesTab =
+    tabParam === 'prediction' || tabParam === 'grafico' ? tabParam : 'results';
+
+  const setActiveTab = (tab: EuromillonesTab) => {
+    const params = new URLSearchParams(searchParams);
+    params.set('tab', tab);
+    setSearchParams(params, { replace: true });
+  };
 
   return (
     <div className="resultados-euromillones-layout">

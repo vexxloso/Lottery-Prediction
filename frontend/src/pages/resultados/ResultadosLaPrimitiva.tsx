@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { ResultadosPage } from './ResultadosPage';
 import { LaPrimitivaApuestasPanel } from './LaPrimitivaApuestasPanel';
 import { LaPrimitivaFeaturesPanel } from './LaPrimitivaFeaturesPanel';
@@ -6,7 +6,16 @@ import { LaPrimitivaFeaturesPanel } from './LaPrimitivaFeaturesPanel';
 type LaPrimitivaTab = 'results' | 'prediction' | 'grafico';
 
 export function ResultadosLaPrimitiva() {
-  const [activeTab, setActiveTab] = useState<LaPrimitivaTab>('results');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = (searchParams.get('tab') as LaPrimitivaTab | null) ?? 'results';
+  const activeTab: LaPrimitivaTab =
+    tabParam === 'prediction' || tabParam === 'grafico' ? tabParam : 'results';
+
+  const setActiveTab = (tab: LaPrimitivaTab) => {
+    const params = new URLSearchParams(searchParams);
+    params.set('tab', tab);
+    setSearchParams(params, { replace: true });
+  };
 
   return (
     <div className="resultados-euromillones-layout">

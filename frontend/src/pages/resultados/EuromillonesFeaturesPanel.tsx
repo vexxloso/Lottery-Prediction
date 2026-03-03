@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Drawer } from 'antd';
 import {
   ResponsiveContainer,
@@ -41,10 +42,12 @@ function EuromillonesFeaturesTableRow({
   row,
   onShowChart,
   onShowGapChart,
+  onSimulate,
 }: {
   row: EuromillonesFeatureRow;
   onShowChart: (row: EuromillonesFeatureRow) => void;
   onShowGapChart: (row: EuromillonesFeatureRow) => void;
+  onSimulate: (row: EuromillonesFeatureRow) => void;
 }) {
   return (
     <tr>
@@ -92,6 +95,16 @@ function EuromillonesFeaturesTableRow({
         >
           <img src="/images/gape.svg" alt="" className="resultados-features-icon" />
         </button>
+        <button
+          type="button"
+          className="resultados-features-iconbtn"
+          style={{ marginLeft: 8 }}
+          onClick={() => onSimulate(row)}
+          aria-label="Simular con esta predicción"
+          title="Simular con esta predicción"
+        >
+          <img src="/images/start.svg" alt="" className="resultados-features-icon" />
+        </button>
       </td>
     </tr>
   );
@@ -108,6 +121,8 @@ export function EuromillonesFeaturesPanel() {
     nextPage,
     prevPage,
   } = useEuromillonesFeatures();
+
+  const navigate = useNavigate();
 
   const [selectedRow, setSelectedRow] = useState<EuromillonesFeatureRow | null>(null);
   const [modalType, setModalType] = useState<'none' | 'freq' | 'gap'>('none');
@@ -261,6 +276,14 @@ export function EuromillonesFeaturesPanel() {
                     setGapError('');
                     const endDateStr = String(r.draw_date ?? '').split(' ')[0];
                     void loadGapsForDate(endDateStr);
+                  }}
+                  onSimulate={(r) => {
+                    const date = String(r.draw_date ?? '').split(' ')[0];
+                    navigate(
+                      `/simulacion/euromillones/${encodeURIComponent(r.draw_id)}?date=${encodeURIComponent(
+                        date,
+                      )}`,
+                    );
                   }}
                 />
               ))}
