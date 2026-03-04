@@ -1,0 +1,13 @@
+I want an AI-driven betting strategy system (LSTM/RNN, GA, Bayesian, neuro-symbolic, Monte Carlo, ensemble).
+Core flow is iterative backtesting per draw:
+    Train/generate after draw N
+    Evaluate on real draw N+1
+    Report “if you placed X bets, this would be the winnings”
+    Include jackpot + smaller prize categories + total recovered amount.
+Main objective is improving odds and especially consistent small-prize returns, not just jackpot chasing.
+I want the system to suggest required bet volume (10…3000+), while final decision remains yours.
+Includes large-scale simulation and historical performance tracking over time.
+
+
+
+If consistent small-profit strategy existed, the lottery would collapse instantly.

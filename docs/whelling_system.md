@@ -1,3 +1,4 @@
+
 | Wheeling System                      | What It Means                                                 | Tickets Needed | Cost | Coverage Strength | Partial Prize Focus | Best For                                        |
 | ------------------------------------ | ------------------------------------------------------------- | -------------- | ---- | ----------------- | ------------------- | ----------------------------------------------- |
 | **Full Wheel**                       | Plays every possible combination from your chosen numbers     | Very High      | $$$$ | ⭐⭐⭐⭐⭐ Strongest   | Medium              | Maximum jackpot chance                          |
@@ -6,3 +7,5 @@
 | **Key Number Wheel**                 | Certain numbers appear more often                             | Low / Medium   | $$   | ⭐⭐⭐ Depends       | ⭐⭐⭐ Medium          | When you strongly believe some numbers will win |
 | **Random Wheel**                     | Computer randomly generates combinations                      | Low            | $    | ⭐⭐ Weak           | ⭐⭐ Low              | Casual play                                     |
 | **Guarantee Wheel (Coverage Wheel)** | Guarantees minimum matches if winning numbers are inside pool | Medium         | $$$  | ⭐⭐⭐⭐⭐ Very Strong | ⭐⭐⭐⭐ High           | Strategic serious players                       |
+
+

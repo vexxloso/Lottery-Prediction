@@ -1,15 +1,34 @@
-make another simulation page for el-gordo
-when i click star icon redirect to simulation page
-make 4 tabs like euromillones
-and i will explain one by one
-Comparación
-    read whelling result(prediction ticket 3000) from previouse draw_id
-    model: el_gordo_simulations
-    and calculate someitems like euromillones and save result
-    make all like euromillones 
-Modelos (freq / gap / hot)
-    read data from el_gordo_draw_features
-    use all old data until current draw
-    same as euromillones
-Pool de candidatos
-Wheeling
+feature model: euromillones model
+id_sorteo: id_sorteo
+pre_id_sorteo: pre draw id_sorteo(first none ) 
+fecha_sorteo: fecha_sorteo
+main_number: frist 5 number from number
+star_number: last 2 number from number
+main_dx: calculate main_dx with main_number
+star_dx: calculate star_dx with star_number
+dia_semana: dia_semana
+frequency[50+12]: calculate with pre main_frequency  
+gap[50+12]: if appeare 1 no 0 so this is maybe 10000100101 like this array
+
+i am ging to create like this euromillones_feature model from euromillones model
+give me you advice and algorithm
+
+
+on frontend calculate hot/cold 5 main number with frequency
+            calculate hot/cold 5 star number with frequency
+and display table 
+this is table items you have to display
+    Fecha: weekday + date -> martes - 03/03/2026
+    Resultado: mains + estrellas -> 27 24 39 42 14 (10 6)
+    Hot mains: 	44 42 23 19 29
+    Cold mains: 5 number
+    Hot stars: 5 number
+    Cold stars: 5 number
+    Todo:(after i will add)
+
+
+on todo add icon like this image
+you can find image in public/images/ frequency.svg and gape.svg
+
+when i click frequency icon i will show frequency chart
+when i click gap icon i will show gap chart

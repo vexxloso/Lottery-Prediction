@@ -1,5 +1,5 @@
 import { useEffect, useState, type ChangeEvent } from 'react';
-import { useSearchParams, useParams, Link, useNavigate } from 'react-router-dom';
+import { useSearchParams, useParams, Link } from 'react-router-dom';
 import { Drawer } from 'antd';
 import type { LotterySlug } from './resultados/types';
 import { LOTTERY_CONFIG } from './resultados/types';
@@ -15,15 +15,21 @@ import {
   Legend,
 } from 'recharts';
 
-interface RouteParams {
-  lottery?: string;
-  drawId?: string;
+interface EuromillonesFeatureRow {
+  id_sorteo: string;
+  pre_id_sorteo?: string | null;
+  fecha_sorteo?: string;
+  dia_semana?: string;
+  main_number?: number[];
+  star_number?: number[];
+  frequency?: Array<number | null>;
+  gap?: Array<number | null>;
+  presence_mask?: number[];
 }
 
 export function SimulationPage() {
-  const { lottery, drawId } = useParams<RouteParams>();
+  const { lottery, drawId } = useParams<'lottery' | 'drawId'>();
   const [searchParams, setSearchParams] = useSearchParams();
-  const date = searchParams.get('date') ?? '';
   const viewParam = searchParams.get('view');
   const view: 'compare' | 'sim' | 'pool' | 'wheel' | 'pred' =
     viewParam === 'sim' ||
@@ -60,13 +66,13 @@ export function SimulationPage() {
   const [poolError, setPoolError] = useState('');
   const [candidatePool, setCandidatePool] = useState<any | null>(null);
   const [poolExpanded, setPoolExpanded] = useState(true);
-  const [wheelLoading, setWheelLoading] = useState(false);
+  const [wheelLoading] = useState(false);
   const [wheelError, setWheelError] = useState('');
   const [wheelTickets, setWheelTickets] = useState<{ mains: number[]; stars: number[] }[] | null>(
     null,
   );
   const [wheelCount, setWheelCount] = useState(20);
-  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareLoading] = useState(false);
   const [compareError, setCompareError] = useState('');
   const [compareResult, setCompareResult] = useState<any | null>(null);
   const [compareTicketCount, setCompareTicketCount] = useState(10);
@@ -75,11 +81,9 @@ export function SimulationPage() {
   const [compareGraphPoints, setCompareGraphPoints] = useState<
     { tickets: number; total: number; cost: number; earning: number }[]
   >([]);
-  const [predictionCompareLoading, setPredictionCompareLoading] = useState(false);
-  const [predictionCompareError, setPredictionCompareError] = useState('');
-  const [predictionCompare, setPredictionCompare] = useState<any | null>(null);
-
-  const navigate = useNavigate();
+  const [featureRowsLoading, setFeatureRowsLoading] = useState(false);
+  const [featureRowsError, setFeatureRowsError] = useState('');
+  const [featureRows, setFeatureRows] = useState<EuromillonesFeatureRow[]>([]);
 
   const TICKET_BUDGET_EUR = 2.5;
 
@@ -156,36 +160,33 @@ export function SimulationPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, drawId]);
 
-  // Load Euromillones prediction vs result metrics (freq/gap/hot vs real draw)
+  // Load Euromillones feature-model rows for Prediction tab
   useEffect(() => {
-    const loadPredictionCompare = async () => {
-      if (slug !== 'euromillones' || !drawId || view !== 'pred') return;
+    const loadFeatureRows = async () => {
+      if (slug !== 'euromillones' || view !== 'pred') return;
       try {
-        setPredictionCompareLoading(true);
-        setPredictionCompareError('');
-
+        setFeatureRowsLoading(true);
+        setFeatureRowsError('');
+        setFeatureRows([]);
         const params = new URLSearchParams();
-        params.set('result_draw_id', drawId);
-        const res = await fetch(
-          `${API_URL}/api/euromillones/simulation/prediction/compare?${params.toString()}`,
-        );
+        params.set('limit', '50');
+        if (drawId) {
+          params.set('draw_id', drawId);
+        }
+        const res = await fetch(`${API_URL}/api/euromillones/feature-model?${params.toString()}`);
         const data = await res.json();
         if (!res.ok) {
-          setPredictionCompare(null);
-          setPredictionCompareError(data.detail ?? res.statusText);
+          setFeatureRowsError(data.detail ?? res.statusText);
           return;
         }
-        setPredictionCompare(data);
+        setFeatureRows((data.features ?? []) as EuromillonesFeatureRow[]);
       } catch (e) {
-        setPredictionCompare(null);
-        setPredictionCompareError(
-          e instanceof Error ? e.message : 'Error al comparar predicción con resultado real',
-        );
+        setFeatureRowsError(e instanceof Error ? e.message : 'Error al cargar euromillones_feature');
       } finally {
-        setPredictionCompareLoading(false);
+        setFeatureRowsLoading(false);
       }
     };
-    void loadPredictionCompare();
+    void loadFeatureRows();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, drawId, view, API_URL]);
 
@@ -792,59 +793,62 @@ export function SimulationPage() {
             style={{ marginTop: 'var(--space-lg)', width: '100%' }}
           >
             <h3 style={{ marginTop: 0, marginBottom: '0.75rem' }}>
-              Predicción vs resultado real
+              Euromillones Feature Model
             </h3>
-            {predictionCompareLoading && (
-              <p style={{ margin: 0 }}>Calculando métricas de predicción…</p>
+            {featureRowsLoading && <p style={{ margin: 0 }}>Cargando datos de euromillones_feature…</p>}
+            {!featureRowsLoading && featureRowsError && (
+              <p style={{ margin: 0, color: 'var(--color-error)' }}>{featureRowsError}</p>
             )}
-            {!predictionCompareLoading && predictionCompareError && !predictionCompare && (
-              <p style={{ margin: 0, color: 'var(--color-error)' }}>{predictionCompareError}</p>
+            {!featureRowsLoading && !featureRowsError && featureRows.length === 0 && (
+              <p style={{ margin: 0 }}>No hay filas en euromillones_feature.</p>
             )}
-            {!predictionCompareLoading && predictionCompare && predictionCompare.metrics && (
+            {!featureRowsLoading && !featureRowsError && featureRows.length > 0 && (
               <div className="resultados-features-table-wrap">
-                {(() => {
-                  const m = predictionCompare.metrics;
-                  const kMain = m.top_k_main ?? 10;
-                  const kStar = m.top_k_star ?? 6;
-                  const main = m.main ?? {};
-                  const star = m.star ?? {};
-                  return (
-                    <table className="resultados-features-table">
-                      <thead>
-                        <tr>
-                          <th>Modelo</th>
-                          <th>
-                            Top {kMain} números principales
-                            <br />
-                            (aciertos / 5)
-                          </th>
-                          <th>
-                            Top {kStar} estrellas
-                            <br />
-                            (aciertos / 2)
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <tr>
-                          <td>Frecuencia</td>
-                          <td>{main.freq_topk_hits ?? 0} / 5</td>
-                          <td>{star.freq_topk_hits ?? 0} / 2</td>
-                        </tr>
-                        <tr>
-                          <td>Gap</td>
-                          <td>{main.gap_topk_hits ?? 0} / 5</td>
-                          <td>{star.gap_topk_hits ?? 0} / 2</td>
-                        </tr>
-                        <tr>
-                          <td>Hot/Cold</td>
-                          <td>{main.hot_topk_hits ?? 0} / 5</td>
-                          <td>{star.hot_topk_hits ?? 0} / 2</td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  );
-                })()}
+                <table className="resultados-features-table">
+                  <thead>
+                    <tr>
+                      <th>id_sorteo</th>
+                      <th>pre_id_sorteo</th>
+                      <th>fecha_sorteo</th>
+                      <th>dia_semana</th>
+                      <th>main_number</th>
+                      <th>star_number</th>
+                      <th>frequency (62)</th>
+                      <th>gap (62)</th>
+                      <th>presence_mask (62)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {featureRows.map((row) => (
+                      <tr key={row.id_sorteo}>
+                        <td>{row.id_sorteo}</td>
+                        <td>{row.pre_id_sorteo ?? '—'}</td>
+                        <td>{row.fecha_sorteo ?? '—'}</td>
+                        <td>{row.dia_semana ?? '—'}</td>
+                        <td>{(row.main_number ?? []).join(' - ')}</td>
+                        <td>{(row.star_number ?? []).join(' - ')}</td>
+                        <td>
+                          <code style={{ fontSize: '0.72rem' }}>
+                            {(row.frequency ?? []).slice(0, 20).join(',')}
+                            {(row.frequency ?? []).length > 20 ? ', ...' : ''}
+                          </code>
+                        </td>
+                        <td>
+                          <code style={{ fontSize: '0.72rem' }}>
+                            {(row.gap ?? []).slice(0, 20).map((v) => (v == null ? 'null' : String(v))).join(',')}
+                            {(row.gap ?? []).length > 20 ? ', ...' : ''}
+                          </code>
+                        </td>
+                        <td>
+                          <code style={{ fontSize: '0.72rem' }}>
+                            {(row.presence_mask ?? []).slice(0, 20).join(',')}
+                            {(row.presence_mask ?? []).length > 20 ? ', ...' : ''}
+                          </code>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </section>
@@ -1376,7 +1380,7 @@ export function SimulationPage() {
                   Números principales
                 </p>
                 <div className="resultados-balls" style={{ marginBottom: '0.75rem' }}>
-                  {(compareResult.result_main_numbers || []).map((n, i) => (
+                  {(compareResult.result_main_numbers || []).map((n: number, i: number) => (
                     <span key={i} className="resultados-ball">
                       {String(n).padStart(2, '0')}
                     </span>
@@ -1386,7 +1390,7 @@ export function SimulationPage() {
                   Estrellas
                 </p>
                 <div className="resultados-balls">
-                  {(compareResult.result_star_numbers || []).map((n, i) => (
+                  {(compareResult.result_star_numbers || []).map((n: number, i: number) => (
                     <span key={i} className="resultados-ball-star-wrap" title="Estrella">
                       <img src="/images/start.svg" alt="" className="resultados-star-img" aria-hidden />
                       <span className="resultados-star-num">{String(n).padStart(2, '0')}</span>

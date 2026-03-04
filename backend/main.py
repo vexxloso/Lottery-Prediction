@@ -686,6 +686,34 @@ def get_euromillones_features(
     return JSONResponse(content={"features": docs, "total": total})
 
 
+@app.get("/api/euromillones/feature-model")
+def get_euromillones_feature_model(
+    limit: int = Query(50, ge=1, le=200),
+    skip: int = Query(0, ge=0),
+    draw_id: str | None = Query(
+        None,
+        description="Optional: filter by id_sorteo to get one feature row.",
+    ),
+):
+    """
+    Return rows from `euromillones_feature` (new feature model).
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db["euromillones_feature"]
+
+    if draw_id:
+        cursor = coll.find({"id_sorteo": draw_id})
+        docs = [_doc_to_json(doc) for doc in cursor]
+        return JSONResponse(content={"features": docs, "total": len(docs)})
+
+    total = coll.count_documents({})
+    cursor = coll.find().sort("fecha_sorteo", -1).skip(skip).limit(limit)
+    docs = [_doc_to_json(doc) for doc in cursor]
+    return JSONResponse(content={"features": docs, "total": total})
+
+
 @app.get("/api/la-primitiva/features")
 def get_la_primitiva_features(
     limit: int = Query(50, ge=1, le=200),

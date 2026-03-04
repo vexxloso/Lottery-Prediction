@@ -4,24 +4,17 @@ const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 const PAGE_SIZE = 20;
 
 export interface EuromillonesFeatureRow {
-  draw_id: string;
-  draw_date: string;
-  weekday?: string;
-  main_numbers: number[];
-  star_numbers: number[];
-  hot_main_numbers?: number[];
-  cold_main_numbers?: number[];
-  hot_star_numbers?: number[];
-  cold_star_numbers?: number[];
-  prev_draw_id?: string | null;
-  prev_draw_date?: string | null;
-  prev_weekday?: string | null;
-  prev_main_numbers?: number[];
-  prev_star_numbers?: number[];
-  main_frequency_counts?: number[];
-  star_frequency_counts?: number[];
-  main_gap_draws?: (number | null)[];
-  star_gap_draws?: (number | null)[];
+  id_sorteo: string;
+  pre_id_sorteo?: string | null;
+  fecha_sorteo?: string;
+  dia_semana?: string;
+  main_number?: number[];
+  star_number?: number[];
+  main_dx?: number[];
+  star_dx?: number[];
+  frequency?: Array<number | null>;
+  gap?: Array<number | null>;
+  presence_mask?: number[];
 }
 
 interface ApiResponse {
@@ -43,7 +36,7 @@ export function useEuromillonesFeatures() {
       const params = new URLSearchParams();
       params.set('limit', String(PAGE_SIZE));
       params.set('skip', String(skip));
-      const res = await fetch(`${API_URL}/api/euromillones/features?${params.toString()}`);
+      const res = await fetch(`${API_URL}/api/euromillones/feature-model?${params.toString()}`);
       const data: ApiResponse = await res.json();
       if (!res.ok) {
         setError((data as any).detail ?? res.statusText);
