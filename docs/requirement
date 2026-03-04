@@ -1,11 +1,4 @@
 
--------------------------Data Collection & Storage:--------------------------------------
-- Ethical scraping of historical data from official Spanish lottery websites (e.g., www.loteriasyapuestas.es).
-    • Euromillones • La Primitiva • El Gordo
-- Database: PostgreSQL or MongoDB.
-- Automatic updates daily at 00:02 after each draw.
-- Web scraping tools like BeautifulSoup or Scrapy, mimicking human behavior.
-
 --------------------------AI Prediction Models:-----------------------------------------------------------
 
 -Neural networks (LSTM, RNN) to detect sequential patterns.
@@ -22,9 +15,6 @@ When the next draw happens, the system should compare the prediction with the ac
 
 Over time, as more draws are added to the history, the system should learn and improve, gradually reducing the number of bets needed to achieve consistent results.
 
-
-
-Complementing the previous explanation:
 When the system starts learning, it should work as follows:
 After the first draw (only one historical result available), the system will analyze that result and run millions of simulations to generate possible number combinations and betting strategies.
 When the second draw result is released, the system will:
@@ -38,6 +28,16 @@ How many smaller prizes would have been won with that number of bets
 What the total return would have been from those smaller prizes
 And how these numbers evolve as more data becomes available
 This way, I can clearly see the relationship between the number of bets placed, the probability of hitting the jackpot, and the consistent return from smaller prizes — helping me make better decisions over time.
+
+When the system analyzes the very first draw of each lottery and generates millions of combinations to choose from, I will select 100, 200, or 1,000 bets from those millions.
+
+But when the second draw result comes out, the system will tell me that I would have needed to place X bets (thousands or millions) to hit the jackpot.
+
+The expectation is that with each new draw, the system will learn and gradually reduce the number of bets required to match the winning numbers.
+
+This doesn't mean I'm chasing the jackpot. As I said before, I know lottery numbers are random. But I want to increase the odds.
+
+In practice, I'm aiming for the smaller prizes. If a jackpot comes along — great, but that's not the main goal."
 
 ---------------------------Backtesting:----------------------------------------------------
 - Test models against historical data with performance evaluation.
