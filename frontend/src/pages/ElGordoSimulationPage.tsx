@@ -192,71 +192,12 @@ export function ElGordoSimulationPage() {
   };
 
   const runWheeling = async () => {
-    if (!drawId) return;
-    try {
-      setWheelLoading(true);
-      setWheelError('');
-      setWheelTickets(null);
-
-      const params = new URLSearchParams();
-      params.set('cutoff_draw_id', drawId);
-      // Always ask backend to generate up to 3000 tickets; the Nº boletos
-      // select only controls how many we DISPLAY from the stored set.
-      params.set('n_tickets', '3000');
-
-      const res = await fetch(
-        `${API_URL}/api/el-gordo/simulation/wheeling?${params.toString()}`,
-        {
-          method: 'POST',
-        },
-      );
-      const data = await res.json();
-      if (!res.ok) {
-        setWheelError(data.detail ?? res.statusText);
-        return;
-      }
-
-      const tickets = (data.tickets ?? []) as ElGordoTicket[];
-      // Store full ticket list; UI will slice with wheelCount.
-      setWheelTickets(tickets);
-    } catch (e) {
-      setWheelError(
-        e instanceof Error
-          ? e.message
-          : 'Error al generar boletos de wheeling de El Gordo',
-      );
-    } finally {
-      setWheelLoading(false);
-    }
+    setWheelError('El sistema de wheeling está en reconstrucción.');
   };
 
   const runComparison = async () => {
-    if (!drawId) return;
-    try {
-      setCompareLoading(true);
-      setCompareError('');
-      setCompareResult(null);
-
-      const params = new URLSearchParams();
-      params.set('result_draw_id', drawId);
-      params.set('n_tickets', String(compareTicketCount));
-
-      const res = await fetch(
-        `${API_URL}/api/el-gordo/simulation/wheeling/compare?${params.toString()}`,
-      );
-      const data = await res.json();
-      if (!res.ok) {
-        setCompareError(data.detail ?? res.statusText);
-        return;
-      }
-      setCompareResult(data);
-    } catch (e) {
-      setCompareError(
-        e instanceof Error ? e.message : 'Error al comparar los boletos de El Gordo',
-      );
-    } finally {
-      setCompareLoading(false);
-    }
+    setCompareError('El sistema de wheeling está en reconstrucción.');
+    setCompareResult(null);
   };
 
   // Load latest saved El Gordo simulation for this draw (if any)

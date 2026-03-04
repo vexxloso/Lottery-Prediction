@@ -1,8 +1,3 @@
-Spanish lotteries (Euromillones, La Primitiva, El Gordo).
-1.historical data scraping
-2.AI-driven prediction models
-3.backtesting capabilities
-4.supervised bet placement
 
 -------------------------Data Collection & Storage:--------------------------------------
 - Ethical scraping of historical data from official Spanish lottery websites (e.g., www.loteriasyapuestas.es).
@@ -12,16 +7,7 @@ Spanish lotteries (Euromillones, La Primitiva, El Gordo).
 - Web scraping tools like BeautifulSoup or Scrapy, mimicking human behavior.
 
 --------------------------AI Prediction Models:-----------------------------------------------------------
-- Multiple AI models working collaboratively: Random Forest, Neural Networks (RNN/LSTM), Genetic/Evolutionary Algorithms, Bayesian Networks, and optionally Neuro-Symbolic AI.
-- Hot and cold number analysis.
-- Wheeling system for partial prize optimization.
-- Monte Carlo simulations for expected value estimation on high jackpots.
 
-• Random Forest
-• Neural Networks (RNN / LSTM)
-• Genetic / Evolutionary Algorithms
-• Bayesian Networks
-• (Optional) Neuro-Symbolic AI
 -Neural networks (LSTM, RNN) to detect sequential patterns.
 -Genetic algorithms to evolve better number combinations.
 -Bayesian networks to model probabilities.
@@ -36,26 +22,8 @@ When the next draw happens, the system should compare the prediction with the ac
 
 Over time, as more draws are added to the history, the system should learn and improve, gradually reducing the number of bets needed to achieve consistent results.
 
----------------------------Backtesting:----------------------------------------------------
-- Test models against historical data with performance evaluation.
-- Large-scale simulation (may require distributed computing).
 
---------------------------Betting Automation (Selenium):------------------------------------
-- Automated login to official website without storing credentials (encrypted sessions or fresh login).
-- Balance check before placing bets.
-- Captcha handling via manual intervention or external service.
-- Supervised bet placement with mandatory confirmation screen before finalizing.
-- Save receipts/proof of bets.
 
---------------------------Interface & Access:--------------------------------------
-- Web app using Django/FastAPI + React hosted on the cloud for remote access.
-- Dashboard featuring: FullCalendar/agenda view, draw results, generated predictions, betting history, and backtesting reports.
-• FullCalendar / agenda view
-• Draw results
-• Generated predictions
-• Betting history
-• Backtesting reports
--------------------------------------------------------------------------------------------
 Complementing the previous explanation:
 When the system starts learning, it should work as follows:
 After the first draw (only one historical result available), the system will analyze that result and run millions of simulations to generate possible number combinations and betting strategies.
@@ -71,4 +39,9 @@ What the total return would have been from those smaller prizes
 And how these numbers evolve as more data becomes available
 This way, I can clearly see the relationship between the number of bets placed, the probability of hitting the jackpot, and the consistent return from smaller prizes — helping me make better decisions over time.
 
-python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+---------------------------Backtesting:----------------------------------------------------
+- Test models against historical data with performance evaluation.
+- Large-scale simulation (may require distributed computing).
+
+
+<!-- python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000 -->

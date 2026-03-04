@@ -10,13 +10,14 @@ import os
 import re
 import sys
 from contextlib import asynccontextmanager
-from typing import Optional
+from statistics import mean
+from typing import Optional, List, Dict
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from datetime import datetime as dt
+from datetime import datetime as dt, timedelta
 
 from bson import ObjectId
 from fastapi import FastAPI, HTTPException, Query
@@ -27,6 +28,7 @@ from pymongo.errors import PyMongoError
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 
 from simulation.euromillones.frequency_model import (
@@ -44,11 +46,8 @@ from simulation.euromillones.hot_model import (
     save_hot_simulation_result,
     train_all_hot_models,
 )
+from simulation.euromillones.prediction_compare import compare_prediction_with_result
 from simulation.euromillones.candidate_pool import build_candidate_pool
-from simulation.euromillones.wheeling import (
-    generate_wheeling_tickets,
-    compare_wheeling_with_result,
-)
 from simulation.el_gordo.candidate_pool import build_el_gordo_candidate_pool
 from simulation.el_gordo.frequency_model import (
     predict_next_el_gordo_frequency_scores,
@@ -66,10 +65,6 @@ from simulation.el_gordo.hot_model import (
     train_all_el_gordo_hot_models,
 )
 from simulation.el_gordo.simple_simulation import run_el_gordo_simple_simulation
-from simulation.el_gordo.wheeling import (
-    generate_el_gordo_wheeling_tickets,
-    compare_el_gordo_wheeling_with_result,
-)
 
 # Lottery slug -> game_id for loteriasyapuestas.es API (El Gordo = ELGR per site)
 GAME_IDS = {
@@ -210,12 +205,45 @@ def create_driver() -> webdriver.Chrome:
     return driver
 
 
-def _scrape_with_selenium(api_url: str, results_page_url: str) -> list:
-    """Launch a new Chrome via Selenium, load results page, fetch API URL, return JSON list."""
+def _parse_proximo_bote_from_page(driver) -> Optional[float]:
+    """
+    Parse Próx. bote (next jackpot) from the loaded results page.
+    Looks for span.c-elemento-destacado_cantidad-millones (e.g. "193") and treats as millions.
+    Returns value in euros (e.g. 193 -> 193_000_000.0), or None if not found.
+    """
+    try:
+        # Pattern from loteriasyapuestas.es: number in span with class cantidad-millones
+        el = driver.find_element(By.CSS_SELECTOR, ".c-elemento-destacado_cantidad-millones")
+        text = (el.text or "").strip().replace(",", ".").replace("\u00a0", "").replace(" ", "")
+        if not text:
+            return None
+        num = float(text)
+        # Class name indicates "millones"; 193 -> 193 million euros
+        return num * 1_000_000.0
+    except Exception:
+        try:
+            # Fallback: any element with cantidad-millones in class
+            el = driver.find_element(By.CSS_SELECTOR, "[class*='cantidad-millones']")
+            text = (el.text or "").strip().replace(",", ".").replace("\u00a0", "").replace(" ", "")
+            if not text:
+                return None
+            num = float(text)
+            return num * 1_000_000.0
+        except Exception:
+            return None
+
+
+def _scrape_with_selenium(api_url: str, results_page_url: str) -> tuple:
+    """
+    Launch Chrome, load results page, parse Próx. bote from HTML, fetch API, return (draws, proximo_bote_eur).
+    proximo_bote_eur is None if parsing failed.
+    """
     driver = None
+    proximo_bote_eur: Optional[float] = None
     try:
         driver = create_driver()
         driver.get(results_page_url)
+        proximo_bote_eur = _parse_proximo_bote_from_page(driver)
         data = driver.execute_async_script(
             """
             var url = arguments[0];
@@ -229,7 +257,7 @@ def _scrape_with_selenium(api_url: str, results_page_url: str) -> list:
         )
         if isinstance(data, dict) and data.get("__error"):
             raise RuntimeError(data["__error"])
-        return data
+        return (data, proximo_bote_eur)
     except Exception:
         raise
     finally:
@@ -262,7 +290,7 @@ def scrape(
     results_page_url = f"{SITE_ORIGIN}{results_path}"
 
     try:
-        data = _scrape_with_selenium(api_url, results_page_url)
+        data, proximo_bote_eur = _scrape_with_selenium(api_url, results_page_url)
     except HTTPException:
         raise
     except Exception as e:
@@ -280,8 +308,11 @@ def scrape(
 
     saved, errors = _save_draws_to_db(data)
     max_date = _max_date_from_draws(data)
+    if not max_date:
+        max_date = _get_max_draw_date_from_db(game_id)
     if max_date:
         _set_last_draw_date(lottery, max_date)
+    _update_next_funds_metadata(lottery, scraped_bote=proximo_bote_eur)
 
     return {
         "saved": saved,
@@ -290,6 +321,7 @@ def scrape(
         "game_id": game_id,
         "start_date": start_date,
         "end_date": end_date,
+        "proximo_bote_eur": proximo_bote_eur,
         "message": f"Saved {saved} draws to MongoDB.",
         "errors": errors[:5] if errors else None,
     }
@@ -303,13 +335,124 @@ def _get_last_draw_date(lottery: str) -> str | None:
     return (doc.get("last_draw_date") or "").strip() or None
 
 
+@app.get("/api/metadata/next-draws")
+def get_next_draws_metadata():
+    """
+    Return last_draw_date and next_draw_date for each lottery from scraper_metadata.
+
+    Response example:
+      {
+        "items": [
+          { "lottery": "euromillones", "last_draw_date": "2026-02-27", "next_draw_date": "2026-03-03" },
+          { "lottery": "la-primitiva", "last_draw_date": "...", "next_draw_date": "..." },
+          { "lottery": "el-gordo", "last_draw_date": "...", "next_draw_date": "..." }
+        ]
+      }
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    cursor = db[METADATA_COLLECTION].find(
+        {},
+        projection={
+            "_id": 1,
+            "lottery": 1,
+            "last_draw_date": 1,
+            "next_draw_date": 1,
+            "next_bote": 1,
+            "next_premios": 1,
+            "next_funds_updated_at": 1,
+        },
+    )
+    items = []
+    for doc in cursor:
+        d = _item_to_json(doc)
+        next_bote = doc.get("next_bote")
+        next_premios = doc.get("next_premios")
+        if next_bote is None and doc.get("next_funds_prediction"):
+            old = doc["next_funds_prediction"] or {}
+            next_bote = (old.get("bote_stats") or {}).get("median")
+            next_premios = next_premios or (old.get("premios_stats") or {}).get("median")
+        if isinstance(next_bote, (int, float)):
+            next_bote = float(next_bote)
+        else:
+            next_bote = None
+        if isinstance(next_premios, (int, float)):
+            next_premios = float(next_premios)
+        else:
+            next_premios = None
+        d["next_funds_prediction"] = {
+            "bote_stats": {"median": next_bote} if next_bote is not None else {},
+            "premios_stats": {"median": next_premios} if next_premios is not None else {},
+        }
+        items.append(d)
+    return JSONResponse(content={"items": items})
+
+
+def _compute_next_draw_date(lottery_slug: str, last_date_str: str) -> str | None:
+    """
+    Given the date of the last draw, compute the next draw date for that lottery.
+
+    This approximates the "Próximo sorteo" / closing-of-sales date using only
+    the draw dates we already have in the database.
+    """
+    try:
+        d = dt.strptime(last_date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+    wd = d.weekday()  # Monday=0 .. Sunday=6
+
+    if lottery_slug == "euromillones":
+        # Euromillones draws Tuesday (1) and Friday (4)
+        if wd == 1:  # Tuesday -> next Friday
+            delta = 3
+        elif wd == 4:  # Friday -> next Tuesday
+            delta = 4
+        else:
+            delta = 1
+            while True:
+                cand = d + timedelta(days=delta)
+                if cand.weekday() in (1, 4):
+                    break
+                delta += 1
+    elif lottery_slug == "la-primitiva":
+        # La Primitiva draws Monday (0), Thursday (3) and Saturday (5)
+        valid_days = (0, 3, 5)
+        if wd in valid_days:
+            order = [0, 3, 5]
+            idx = order.index(wd)
+            next_wd = order[(idx + 1) % len(order)]
+            delta = (next_wd - wd) % 7 or 7
+        else:
+            delta = 1
+            while True:
+                cand = d + timedelta(days=delta)
+                if cand.weekday() in valid_days:
+                    break
+                delta += 1
+    elif lottery_slug == "el-gordo":
+        # El Gordo weekly on Sunday (6)
+        delta = (6 - wd) % 7 or 7
+    else:
+        return None
+
+    return (d + timedelta(days=delta)).strftime("%Y-%m-%d")
+
+
 def _set_last_draw_date(lottery: str, date_str: str) -> None:
-    """Set last_draw_date for a lottery in scraper_metadata."""
+    """Set last_draw_date (and next_draw_date) for a lottery in scraper_metadata."""
     if db is None:
         return
+
+    update_doc: dict = {"last_draw_date": date_str}
+    next_draw = _compute_next_draw_date(lottery, date_str)
+    if next_draw:
+        update_doc["next_draw_date"] = next_draw
+
     db[METADATA_COLLECTION].update_one(
         {"lottery": lottery},
-        {"$set": {"last_draw_date": date_str}},
+        {"$set": update_doc},
         upsert=True,
     )
 
@@ -326,6 +469,22 @@ def _max_date_from_draws(data: list) -> str | None:
             if d and (out is None or d > out):
                 out = d
     return out
+
+
+def _get_max_draw_date_from_db(game_id: str) -> str | None:
+    """Return latest fecha_sorteo date (YYYY-MM-DD) from the DB for a given game_id."""
+    if db is None:
+        return None
+    coll_name = COLLECTIONS.get(game_id)
+    if not coll_name:
+        return None
+    doc = db[coll_name].find_one(sort=[("fecha_sorteo", -1)], projection={"fecha_sorteo": 1})
+    if not doc:
+        return None
+    f = (doc.get("fecha_sorteo") or "").strip()
+    if not f:
+        return None
+    return f.split(" ")[0]
 
 
 def _save_draws_to_db(data: list) -> tuple[int, list]:
@@ -678,8 +837,8 @@ def get_euromillones_gaps(
 def get_euromillones_apuestas(
     window: str = Query(
         "3m",
-        pattern="^(3m|6m|1y|all)$",
-        description="Time window: last 3m, 6m, 1y or all history.",
+        pattern="^(2m|3m|6m|1y|all)$",
+        description="Time window: last 2m, 3m, 6m, 1y or all history.",
     ),
 ):
     """
@@ -706,7 +865,9 @@ def get_euromillones_apuestas(
         query: dict = {}
     else:
         today = datetime.utcnow().date()
-        if window == "3m":
+        if window == "2m":
+            delta_days = 60
+        elif window == "3m":
             delta_days = 90
         elif window == "6m":
             delta_days = 180
@@ -800,7 +961,9 @@ def _apuestas_time_series_for_lottery(lottery_slug: str, window: str):
         query: dict = {}
     else:
         today = datetime.utcnow().date()
-        if window == "3m":
+        if window == "2m":
+            delta_days = 60
+        elif window == "3m":
             delta_days = 90
         elif window == "6m":
             delta_days = 180
@@ -867,12 +1030,208 @@ def _apuestas_time_series_for_lottery(lottery_slug: str, window: str):
     return points
 
 
+def _money_to_float(val) -> Optional[float]:
+    """
+    Convert Spanish-formatted money string/number to float.
+
+    Examples:
+      "1.234.567,89" -> 1234567.89
+      "123.456"      -> 123456.0
+    """
+    if val in (None, ""):
+        return None
+    try:
+        s = str(val).replace(".", "").replace(",", ".")
+        return float(s)
+    except Exception:
+        return None
+
+
+def _weekday_name(idx: int) -> str:
+    names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    return names[idx] if 0 <= idx < 7 else str(idx)
+
+
+def _predict_next_funds_for_lottery(lottery_slug: str) -> Dict[str, object]:
+    """
+    Predict only Premios (total premios) for the next draw.
+    Próx. bote is not predicted; it comes from scraping the results page.
+
+    Algorithm:
+      - Resolve next_draw_date from scraper_metadata (or from last_draw_date / DB).
+      - Take historical draws on the same weekday; build premios distribution.
+      - Return median and summary stats for premios only.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    game_id = GAME_IDS.get(lottery_slug)
+    coll_name = COLLECTIONS.get(game_id) if game_id else None
+    if not game_id or not coll_name:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery_slug}")
+
+    meta = db[METADATA_COLLECTION].find_one(
+        {"lottery": lottery_slug}, projection={"last_draw_date": 1, "next_draw_date": 1}
+    )
+    next_date = (meta or {}).get("next_draw_date")
+    last_date = (meta or {}).get("last_draw_date")
+
+    if not next_date:
+        if isinstance(last_date, str) and last_date:
+            next_date = _compute_next_draw_date(lottery_slug, last_date)
+        if not next_date:
+            latest = _get_max_draw_date_from_db(game_id)
+            if latest:
+                next_date = _compute_next_draw_date(lottery_slug, latest)
+    if not next_date:
+        raise HTTPException(400, detail="No se ha podido determinar el próximo sorteo.")
+
+    try:
+        next_dt = dt.strptime(next_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, detail=f"Fecha próxima sorteo inválida: {next_date}")
+
+    target_wd = next_dt.weekday()
+
+    coll = db[coll_name]
+    cursor = coll.find(
+        {},
+        projection={"fecha_sorteo": 1, "premios": 1},
+    )
+
+    premios_values: List[float] = []
+
+    for doc in cursor:
+        fecha_full = (doc.get("fecha_sorteo") or "").strip()
+        if not fecha_full:
+            continue
+        date_str = fecha_full.split(" ")[0]
+        try:
+            d_date = dt.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if d_date.weekday() != target_wd:
+            continue
+
+        premios_val = _money_to_float(doc.get("premios"))
+        if premios_val is not None:
+            premios_val = premios_val / 100.0
+            premios_values.append(premios_val)
+
+    if not premios_values:
+        raise HTTPException(
+            400,
+            detail=(
+                "No hay históricos suficientes para este día de la semana "
+                "para calcular una predicción de premios."
+            ),
+        )
+
+    def _summary(arr: List[float]) -> Dict[str, float]:
+        if not arr:
+            return {}
+        arr_sorted = sorted(arr)
+        n = len(arr_sorted)
+        mid = n // 2
+        if n % 2 == 1:
+            median_val = arr_sorted[mid]
+        else:
+            median_val = 0.5 * (arr_sorted[mid - 1] + arr_sorted[mid])
+
+        def _percentile(p: float) -> float:
+            if n == 1:
+                return arr_sorted[0]
+            k = (n - 1) * p
+            f = int(k)
+            c = min(f + 1, n - 1)
+            if f == c:
+                return arr_sorted[f]
+            return arr_sorted[f] + (arr_sorted[c] - arr_sorted[f]) * (k - f)
+
+        return {
+            "count": float(n),
+            "mean": float(mean(arr_sorted)),
+            "median": float(median_val),
+            "p10": float(_percentile(0.10)),
+            "p25": float(_percentile(0.25)),
+            "p75": float(_percentile(0.75)),
+            "p90": float(_percentile(0.90)),
+        }
+
+    premios_stats = _summary(premios_values)
+
+    return {
+        "lottery": lottery_slug,
+        "next_draw_date": next_date,
+        "weekday_index": target_wd,
+        "weekday_name": _weekday_name(target_wd),
+        "premios_stats": premios_stats,
+    }
+
+
+def _update_next_funds_metadata(
+    lottery_slug: str,
+    scraped_bote: Optional[float] = None,
+) -> Dict[str, object]:
+    """
+    Persist next-funds as two values in scraper_metadata: next_bote, next_premios.
+    Próx. bote: from scraping only (when provided). Premios: from prediction (median).
+    Returns a dict with bote_stats.median and premios_stats.median for API compatibility.
+    """
+    next_bote: Optional[float] = scraped_bote
+    next_premios: Optional[float] = None
+    next_draw_date: Optional[str] = None
+
+    if db is not None:
+        current = db[METADATA_COLLECTION].find_one(
+            {"lottery": lottery_slug},
+            projection={"next_bote": 1, "next_premios": 1},
+        )
+        if next_bote is None and current:
+            next_bote = current.get("next_bote")
+            if isinstance(next_bote, (int, float)):
+                next_bote = float(next_bote)
+            else:
+                next_bote = None
+
+    try:
+        pred = _predict_next_funds_for_lottery(lottery_slug)
+        premios_stats = pred.get("premios_stats") or {}
+        next_premios = premios_stats.get("median")
+        next_draw_date = pred.get("next_draw_date")
+        if next_premios is not None:
+            next_premios = float(next_premios)
+    except HTTPException:
+        pass
+
+    if db is not None:
+        update_doc: dict = {
+            "next_funds_updated_at": dt.utcnow(),
+        }
+        if next_premios is not None:
+            update_doc["next_premios"] = next_premios
+        if scraped_bote is not None:
+            update_doc["next_bote"] = scraped_bote
+        db[METADATA_COLLECTION].update_one(
+            {"lottery": lottery_slug},
+            {"$set": update_doc},
+            upsert=True,
+        )
+
+    return {
+        "lottery": lottery_slug,
+        "next_draw_date": next_draw_date,
+        "bote_stats": {"median": next_bote} if next_bote is not None else {},
+        "premios_stats": {"median": next_premios} if next_premios is not None else {},
+    }
+
+
 @app.get("/api/la-primitiva/apuestas")
 def get_la_primitiva_apuestas(
     window: str = Query(
         "3m",
-        pattern="^(3m|6m|1y|all)$",
-        description="Time window: last 3m, 6m, 1y or all history.",
+        pattern="^(2m|3m|6m|1y|all)$",
+        description="Time window: last 2m, 3m, 6m, 1y or all history.",
     ),
 ):
     points = _apuestas_time_series_for_lottery("la-primitiva", window)
@@ -883,12 +1242,42 @@ def get_la_primitiva_apuestas(
 def get_el_gordo_apuestas(
     window: str = Query(
         "3m",
-        pattern="^(3m|6m|1y|all)$",
-        description="Time window: last 3m, 6m, 1y or all history.",
+        pattern="^(2m|3m|6m|1y|all)$",
+        description="Time window: last 2m, 3m, 6m, 1y or all history.",
     ),
 ):
     points = _apuestas_time_series_for_lottery("el-gordo", window)
     return JSONResponse(content={"points": points})
+
+
+@app.get("/api/euromillones/prediction/next-funds")
+def predict_euromillones_next_funds():
+    """
+    Return next-funds metadata: Próx. bote from last scrape (no prediction);
+    Premios from weekday-conditioned prediction.
+    """
+    result = _update_next_funds_metadata("euromillones")
+    return JSONResponse(content=_item_to_json(result))
+
+
+@app.get("/api/la-primitiva/prediction/next-funds")
+def predict_la_primitiva_next_funds():
+    """
+    Return next-funds metadata: Próx. bote from last scrape (no prediction);
+    Premios from weekday-conditioned prediction.
+    """
+    result = _update_next_funds_metadata("la-primitiva")
+    return JSONResponse(content=_item_to_json(result))
+
+
+@app.get("/api/el-gordo/prediction/next-funds")
+def predict_el_gordo_next_funds():
+    """
+    Return next-funds metadata: Próx. bote from last scrape (no prediction);
+    Premios from weekday-conditioned prediction.
+    """
+    result = _update_next_funds_metadata("el-gordo")
+    return JSONResponse(content=_item_to_json(result))
 
 @app.get("/api/euromillones/number-history")
 def get_euromillones_number_history():
@@ -1268,6 +1657,33 @@ def simulate_euromillones_hot(
     return JSONResponse(content=public)
 
 
+@app.get("/api/euromillones/simulation/prediction/compare")
+def compare_euromillones_prediction_with_result(
+    result_draw_id: str = Query(
+        ...,
+        description=(
+            "id_sorteo del sorteo real; se compara contra la simulación de predicción "
+            "generada para el sorteo anterior (prev_draw_id)."
+        ),
+    ),
+):
+    """
+    Comparar la predicción de Euromillones (freq/gap/hot) contra el resultado real.
+
+    Devuelve métricas como número de aciertos en el top-K para mains y stars,
+    así como detalles por número para los números que salieron en el sorteo real.
+    """
+    try:
+        result = compare_prediction_with_result(result_draw_id=result_draw_id)
+    except RuntimeError as e:
+        raise HTTPException(400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error comparando predicción de Euromillones: {e}")
+
+    # Ensure datetimes and ObjectIds inside result are JSON serializable
+    return JSONResponse(content=_item_to_json(result))
+
+
 @app.post("/api/el-gordo/simulation/hot/train")
 def train_el_gordo_hot_models():
     """
@@ -1496,134 +1912,6 @@ def get_el_gordo_candidate_pool(
     return JSONResponse(content=pool)
 
 
-@app.post("/api/euromillones/simulation/wheeling")
-def create_euromillones_wheeling_tickets(
-    cutoff_draw_id: str = Query(
-        ...,
-        description="Draw_id que identifica el sorteo de referencia para el wheeling.",
-    ),
-    n_tickets: int = Query(
-        20,
-        ge=1,
-        le=3000,
-        description="Número de boletos a mostrar (se calculan hasta 3000 y se guardan todos).",
-    ),
-):
-    """
-    Generar boletos de Euromillones usando el pool de candidatos guardado.
-    """
-    try:
-        result = generate_wheeling_tickets(
-            cutoff_draw_id=cutoff_draw_id,
-            n_tickets=n_tickets,
-        )
-    except ValueError as e:
-        raise HTTPException(400, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(500, detail=f"Error generando boletos de wheeling: {e}")
-
-    return JSONResponse(content=result)
-
-
-@app.post("/api/el-gordo/simulation/wheeling")
-def create_el_gordo_wheeling_tickets(
-    cutoff_draw_id: str = Query(
-        ...,
-        description="id_sorteo que identifica el sorteo de referencia para el wheeling.",
-    ),
-    n_tickets: int = Query(
-        20,
-        ge=1,
-        le=3000,
-        description="Número de boletos a mostrar (se calculan hasta 3000 y se guardan todos).",
-    ),
-):
-    """
-    Generar boletos de El Gordo usando el pool de candidatos guardado.
-    """
-    try:
-        result = generate_el_gordo_wheeling_tickets(
-            cutoff_draw_id=cutoff_draw_id,
-            n_tickets=n_tickets,
-        )
-    except ValueError as e:
-        raise HTTPException(400, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(
-            500, detail=f"Error generando boletos de wheeling de El Gordo: {e}"
-        )
-
-    return JSONResponse(content=result)
-
-
-@app.get("/api/el-gordo/simulation/wheeling/compare")
-def compare_el_gordo_wheeling(
-    result_draw_id: str = Query(
-        ...,
-        description=(
-            "id_sorteo del sorteo real; se compara contra el wheeling "
-            "generado para el sorteo anterior."
-        ),
-    ),
-    n_tickets: Optional[int] = Query(
-        None,
-        description="Si se indica, solo se comparan los primeros N boletos (ej. 10, 20, 3000).",
-        ge=1,
-        le=3000,
-    ),
-):
-    """
-    Comparar los boletos de wheeling de El Gordo generados para un cutoff_draw_id con el
-    sorteo real inmediatamente posterior, usando las categorías oficiales de premios.
-    """
-    try:
-        result = compare_el_gordo_wheeling_with_result(
-            result_draw_id=result_draw_id, n_tickets=n_tickets
-        )
-    except RuntimeError as e:
-        raise HTTPException(400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(500, detail=f"Error comparando resultados de wheeling de El Gordo: {e}")
-
-    return JSONResponse(content=result)
-
-
-@app.get("/api/euromillones/simulation/wheeling/compare")
-def compare_euromillones_wheeling(
-    result_draw_id: str = Query(
-        ...,
-        description=(
-            "id_sorteo del sorteo real; se compara contra el wheeling "
-            "generado para el sorteo anterior."
-        ),
-    ),
-    n_tickets: Optional[int] = Query(
-        None,
-        description="Si se indica, solo se comparan los primeros N boletos (ej. 10, 20, 3000).",
-        ge=1,
-        le=3000,
-    ),
-):
-    """
-    Comparar los boletos de wheeling generados para un cutoff_draw_id con el sorteo real
-    inmediatamente posterior, usando las categorías oficiales de premios.
-    """
-    try:
-        result = compare_wheeling_with_result(
-            result_draw_id=result_draw_id, n_tickets=n_tickets
-        )
-    except RuntimeError as e:
-        raise HTTPException(400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(500, detail=f"Error comparando resultados de wheeling: {e}")
-
-    return JSONResponse(content=result)
-
-
 @app.get("/api/la-primitiva/number-history")
 def get_la_primitiva_number_history():
     """
@@ -1770,15 +2058,26 @@ def scrape_daily():
         results_path = RESULTS_PATHS.get(lottery, RESULTS_PATHS["la-primitiva"])
         results_page_url = f"{SITE_ORIGIN}{results_path}"
         try:
-            data = _scrape_with_selenium(api_url, results_page_url)
+            data, proximo_bote_eur = _scrape_with_selenium(api_url, results_page_url)
             if not isinstance(data, list):
                 results.append({"lottery": lottery, "saved": 0, "message": "Invalid response"})
                 continue
             saved, _ = _save_draws_to_db(data)
             max_date = _max_date_from_draws(data)
+            if not max_date:
+                max_date = _get_max_draw_date_from_db(game_id)
             if max_date:
                 _set_last_draw_date(lottery, max_date)
-            results.append({"lottery": lottery, "saved": saved, "message": f"Saved {saved} draws"})
+            try:
+                _update_next_funds_metadata(lottery, scraped_bote=proximo_bote_eur)
+            except Exception:
+                pass
+            results.append({
+                "lottery": lottery,
+                "saved": saved,
+                "proximo_bote_eur": proximo_bote_eur,
+                "message": f"Saved {saved} draws",
+            })
         except Exception as e:
             results.append({"lottery": lottery, "saved": 0, "message": str(e)})
     return {"results": results, "date": today}

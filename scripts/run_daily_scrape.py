@@ -14,9 +14,6 @@ if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 
 from backfill_common import run_daily
-from update_euromillones_features_incremental import main as update_euromillones_features
-from build_la_primitiva_features import main as rebuild_la_primitiva_features
-from build_el_gordo_features import main as rebuild_el_gordo_features
 
 
 def next_00_02():
@@ -34,53 +31,6 @@ if __name__ == "__main__":
     try:
         results = run_daily()
         print("Scrape done.", results)
-        # If Euromillones got new draws, update features and histories (incremental)
-        euromillones_saved = next(
-            (r.get("saved", 0) for r in results if r.get("lottery") == "euromillones"),
-            0,
-        )
-        if euromillones_saved:
-            print(
-                f"Euromillones: {euromillones_saved} new draws saved. "
-                "Updating Euromillones features/histories..."
-            )
-            try:
-                update_euromillones_features()
-                print("Euromillones features/histories updated.")
-            except Exception as e:
-                print(f"Error updating Euromillones features/histories: {e}")
-
-        # If La Primitiva got new draws, rebuild its features/histories
-        la_primitiva_saved = next(
-            (r.get("saved", 0) for r in results if r.get("lottery") == "la-primitiva"),
-            0,
-        )
-        if la_primitiva_saved:
-            print(
-                f"La Primitiva: {la_primitiva_saved} new draws saved. "
-                "Rebuilding La Primitiva features/histories..."
-            )
-            try:
-                rebuild_la_primitiva_features()
-                print("La Primitiva features/histories rebuilt.")
-            except Exception as e:
-                print(f"Error rebuilding La Primitiva features/histories: {e}")
-
-        # If El Gordo got new draws, rebuild its features/histories
-        el_gordo_saved = next(
-            (r.get("saved", 0) for r in results if r.get("lottery") == "el-gordo"),
-            0,
-        )
-        if el_gordo_saved:
-            print(
-                f"El Gordo: {el_gordo_saved} new draws saved. "
-                "Rebuilding El Gordo features/histories..."
-            )
-            try:
-                rebuild_el_gordo_features()
-                print("El Gordo features/histories rebuilt.")
-            except Exception as e:
-                print(f"Error rebuilding El Gordo features/histories: {e}")
     except Exception as e:
         print(f"Scrape error: {e}")
     print("\nWaiting for next 00:02 to run again.\n")
@@ -99,50 +49,6 @@ if __name__ == "__main__":
         try:
             results = run_daily()
             print("Daily scrape done.", results)
-            euromillones_saved = next(
-                (r.get("saved", 0) for r in results if r.get("lottery") == "euromillones"),
-                0,
-            )
-            if euromillones_saved:
-                print(
-                    f"Euromillones: {euromillones_saved} new draws saved. "
-                    "Updating Euromillones features/histories..."
-                )
-                try:
-                    update_euromillones_features()
-                    print("Euromillones features/histories updated.")
-                except Exception as e:
-                    print(f"Error updating Euromillones features/histories: {e}")
-
-            la_primitiva_saved = next(
-                (r.get("saved", 0) for r in results if r.get("lottery") == "la-primitiva"),
-                0,
-            )
-            if la_primitiva_saved:
-                print(
-                    f"La Primitiva: {la_primitiva_saved} new draws saved. "
-                    "Rebuilding La Primitiva features/histories..."
-                )
-                try:
-                    rebuild_la_primitiva_features()
-                    print("La Primitiva features/histories rebuilt.")
-                except Exception as e:
-                    print(f"Error rebuilding La Primitiva features/histories: {e}")
-
-            el_gordo_saved = next(
-                (r.get("saved", 0) for r in results if r.get("lottery") == "el-gordo"),
-                0,
-            )
-            if el_gordo_saved:
-                print(
-                    f"El Gordo: {el_gordo_saved} new draws saved. "
-                    "Rebuilding El Gordo features/histories..."
-                )
-                try:
-                    rebuild_el_gordo_features()
-                    print("El Gordo features/histories rebuilt.")
-                except Exception as e:
-                    print(f"Error rebuilding El Gordo features/histories: {e}")
         except Exception as e:
             print(f"Scrape error: {e}")
         print("Waiting for next 00:02.\n")

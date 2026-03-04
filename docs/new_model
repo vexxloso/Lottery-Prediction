@@ -1,0 +1,281 @@
+STEP 1 — DATA LAYER
+
+Implement:
+
+class LotteryDataset:
+- load_csv(path)
+- sort_numbers()
+- encode_main_matrix() -> numpy array (D x 50)
+- encode_star_matrix() -> numpy array (D x 12)
+- get_last_draw()
+
+Ensure validation:
+
+No duplicate numbers in draw
+
+Correct ranges
+
+No missing values
+
+STEP 2 — FEATURE ENGINEERING
+
+Create FeatureEngineer class:
+
+Compute:
+
+Global frequency vector
+
+Rolling frequency (configurable window)
+
+Gap score per number
+
+50x50 co-occurrence matrix
+
+Structural historical distributions:
+
+sum
+
+odd count
+
+range spread
+
+Return structured FeatureSet dataclass.
+
+STEP 3 — BAYESIAN PROBABILITY ENGINE
+
+Implement BayesianModel class:
+
+Use Dirichlet prior alpha=1.
+
+Compute posterior:
+
+alpha_i' = alpha + freq_i
+
+Probability:
+
+P(i) = alpha_i' / sum(alpha')
+
+Create composite probability:
+
+Score_i =
+w1 * P_bayes
+
+w2 * P_roll
+
+w3 * P_gap
+
+Normalize final probabilities.
+
+Return:
+
+final_main_probabilities (size 50)
+
+final_star_probabilities (size 12)
+
+STEP 4 — MONTE CARLO ENGINE
+
+MonteCarloSimulator class:
+
+weighted_sample_without_replacement()
+
+simulate_draw()
+
+run_simulation(n_simulations: int, parallel=True)
+
+Simulation must:
+
+Generate synthetic draws
+
+Compute structural metrics
+
+Build percentile ranges for:
+
+sum
+
+odd count
+
+spread
+
+Return StructuralBounds dataclass:
+sum_min, sum_max
+allowed_odd_counts
+spread_min, spread_max
+
+Use multiprocessing for performance.
+
+STEP 5 — RULE ENGINE
+
+RuleEngine class:
+
+Implement:
+
+is_valid(ticket, structural_bounds)
+
+Rules:
+
+Sum within bounds
+
+Odd count in allowed set
+
+Max 2 consecutive numbers
+
+No 4 numbers in same decade
+
+No full repeat of last draw
+
+Return boolean.
+
+STEP 6 — TICKET SCORING
+
+Implement TicketScorer:
+
+Compute:
+
+Log probability:
+sum(log(P(number)))
+
+Structural score:
+1 - normalized distance from historical mean sum
+
+Pair rarity score:
+inverse of co-occurrence sum
+
+Final fitness:
+
+fitness =
+lambda1 * log_prob
+
+lambda2 * structural_score
+
+lambda3 * pair_rarity
+
+STEP 7 — GENETIC OPTIMIZER
+
+GeneticOptimizer class:
+
+initialize_population(n)
+
+evaluate_population()
+
+select_top(percent)
+
+crossover(parent1, parent2)
+
+mutate(ticket)
+
+evolve(generations)
+
+Constraints:
+
+All offspring must pass RuleEngine
+
+Avoid duplicate tickets
+
+Penalize overlap between tickets
+
+Population size configurable.
+
+STEP 8 — FINAL TICKET POOL
+
+TicketPoolGenerator class:
+
+Pipeline:
+
+Generate initial candidates via Monte Carlo sampling
+
+Filter using RuleEngine
+
+Run GeneticOptimizer
+
+Remove high-overlap tickets
+
+Ensure number coverage diversity
+
+Return final N tickets
+
+Each ticket should include:
+
+numbers
+
+stars
+
+log_probability
+
+structural_score
+
+fitness
+
+STEP 9 — CONFIGURATION FILE
+
+config.py must allow:
+
+ROLLING_WINDOW
+MONTE_CARLO_RUNS
+POPULATION_SIZE
+GENERATIONS
+LAMBDA_WEIGHTS
+STRUCTURAL_PERCENTILES
+FINAL_POOL_SIZE
+
+STEP 10 — MAIN PIPELINE
+
+main.py must:
+
+Load dataset
+
+Run feature engineering
+
+Build Bayesian probabilities
+
+Run Monte Carlo to derive structural bounds
+
+Generate optimized ticket pool
+
+Print results clearly
+
+PERFORMANCE REQUIREMENTS
+
+Vectorized numpy operations
+
+Avoid Python loops where possible
+
+Parallel Monte Carlo
+
+Deterministic option with random seed
+
+OUTPUT REQUIREMENTS
+
+Print:
+
+Final ticket pool sorted by fitness.
+Summary statistics:
+
+Number coverage frequency
+
+Pair coverage count
+
+Structural distribution of pool
+
+IMPORTANT CONSTRAINTS
+
+Do NOT claim predictive capability.
+
+Clearly document that draws are independent.
+
+Add docstrings explaining statistical limitations.
+
+Write clean, well-commented, production-quality code.
+
+Follow SOLID principles.
+
+OPTIONAL ADVANCED EXTENSIONS
+
+After base implementation, add:
+
+Entropy-based diversity control
+
+Overlap penalty matrix
+
+Adaptive mutation rate
+
+Coverage maximization algorithm

@@ -1,184 +1,406 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
 import FullCalendar from '@fullcalendar/react';
 import dayGridPlugin from '@fullcalendar/daygrid';
-import { CALENDAR_EVENTS, MOCK_DRAWS, MOCK_DATA_STATUS, NEXT_DRAWS } from '../mock/data';
+import type { EventContentArg } from '@fullcalendar/core';
+import {
+  ResponsiveContainer,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Legend,
+  CartesianGrid,
+} from 'recharts';
+import { LOTTERIES } from '../mock/data';
+import { useApuestasSeries } from './resultados/useApuestasSeries';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
-interface EuromillonesFrequencySummary {
-  draw_date: string;
-  main_frequency_counts?: number[];
-  star_frequency_counts?: number[];
+interface NextDrawItem {
+  lottery: string;
+  last_draw_date?: string;
+  next_draw_date?: string;
+  next_funds_prediction?: {
+    bote_stats?: {
+      median?: number;
+    };
+    premios_stats?: {
+      median?: number;
+    };
+  };
+}
+
+function getNextDrawForChart(
+  items: NextDrawItem[],
+  lottery: string,
+): NextDrawPrediction | undefined {
+  const m = items.find((it) => it.lottery === lottery);
+  if (!m?.next_draw_date) return undefined;
+  return {
+    date: m.next_draw_date,
+    premios: m.next_funds_prediction?.premios_stats?.median,
+    bote: m.next_funds_prediction?.bote_stats?.median,
+  };
+}
+
+interface CalendarEvent {
+  id: string;
+  title: string;
+  start: string;
+  allDay: boolean;
+  extendedProps: {
+    lottery: string;
+    imageUrl: string;
+  };
+}
+
+function getLotteryImage(lottery: string): string {
+  if (lottery === 'euromillones') return '/images/euromillones.png';
+  if (lottery === 'el-gordo') return '/images/el-gordo.png';
+  if (lottery === 'la-primitiva') return '/images/la-primitiva.png';
+  return '/images/euromillones.png';
+}
+
+function renderEventContent(arg: EventContentArg) {
+  const lottery = (arg.event.extendedProps.lottery as string) || arg.event.title;
+  const imageUrl = arg.event.extendedProps.imageUrl as string | undefined;
+  return (
+    <div
+      style={{
+        position: 'relative',
+        width: '100%',
+        height: '100%',
+        boxSizing: 'border-box',
+      }}
+      aria-label={lottery}
+    >
+      {imageUrl && (
+        <img
+          src={imageUrl}
+          alt={lottery}
+          style={{
+            position: 'absolute',
+            left: 4,
+            top: 4,
+            width: 32,
+            height: 32,
+            objectFit: 'contain',
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+interface NextDrawPrediction {
+  date: string;
+  premios?: number;
+  bote?: number;
+}
+
+function PremiosBoteChart({
+  lottery,
+  title,
+  nextDraw,
+}: {
+  lottery: 'euromillones' | 'la-primitiva' | 'el-gordo';
+  title: string;
+  nextDraw?: NextDrawPrediction | null;
+}) {
+  const { points, loading, error } = useApuestasSeries(lottery, '2m');
+
+  const chartData =
+    nextDraw?.date && (nextDraw.premios != null || nextDraw.bote != null)
+      ? [
+          ...points,
+          {
+            date: nextDraw.date,
+            premios: nextDraw.premios ?? null,
+            premio_bote: nextDraw.bote ?? null,
+            isNext: true,
+          },
+        ]
+      : points;
+
+  const maxPremios = chartData.reduce(
+    (max, p) => (p.premios != null && p.premios > max ? p.premios : max),
+    0,
+  );
+  const maxBote = chartData.reduce(
+    (max, p) => (p.premio_bote != null && p.premio_bote > max ? p.premio_bote : max),
+    0,
+  );
+  const dataWithPct = chartData.map((p, i) => {
+    const premios_pct =
+      maxPremios > 0 && p.premios != null ? (p.premios / maxPremios) * 100 : null;
+    const premio_bote_pct =
+      maxBote > 0 && p.premio_bote != null ? (p.premio_bote / maxBote) * 100 : null;
+    const isLastPoint = chartData.length >= 1 && i === chartData.length - 1;
+    const isLastTwo = chartData.length >= 2 && i >= chartData.length - 2;
+    return {
+      ...p,
+      premios_pct: isLastPoint ? null : premios_pct,
+      premio_bote_pct: isLastPoint ? null : premio_bote_pct,
+      premios_pct_dashed: isLastTwo ? premios_pct : null,
+      premio_bote_pct_dashed: isLastTwo ? premio_bote_pct : null,
+    };
+  });
+
+  const formatEuro = (value?: number | null) => {
+    if (value == null) return '-';
+    try {
+      return `${new Intl.NumberFormat('es-ES', {
+        maximumFractionDigits: value >= 1_000_000 ? 1 : 0,
+      }).format(value)} €`;
+    } catch {
+      return `${value.toFixed(0)} €`;
+    }
+  };
+
+  if (loading && points.length === 0) {
+    return (
+      <div className="dashboard-chart-wrap">
+        <h3 className="dashboard-chart-title">{title}</h3>
+        <p style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>Cargando…</p>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="dashboard-chart-wrap">
+        <h3 className="dashboard-chart-title">{title}</h3>
+        <p style={{ color: 'var(--color-error)', fontSize: '0.875rem' }}>{error}</p>
+      </div>
+    );
+  }
+  if (points.length === 0) {
+    return (
+      <div className="dashboard-chart-wrap">
+        <h3 className="dashboard-chart-title">{title}</h3>
+        <p style={{ color: 'var(--color-text-muted)', fontSize: '0.875rem' }}>Sin datos (2 meses)</p>
+      </div>
+    );
+  }
+
+  const renderDot =
+    (stroke: string) =>
+    (props: { cx?: number; cy?: number; payload?: { isNext?: boolean } }) => {
+      const { cx = 0, cy = 0, payload } = props;
+      if (payload?.isNext) {
+        return (
+          <circle
+            cx={cx}
+            cy={cy}
+            r={5}
+            fill={stroke}
+            stroke="var(--color-surface)"
+            strokeWidth={2}
+          />
+        );
+      }
+      return null;
+    };
+
+  return (
+    <div className="dashboard-chart-wrap">
+      <h3 className="dashboard-chart-title">{title}</h3>
+      <div style={{ width: '100%', height: 220 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={dataWithPct} margin={{ top: 8, right: 12, left: 0, bottom: 16 }}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="date" tick={{ fontSize: 10 }} tickMargin={6} minTickGap={24} />
+            <YAxis
+              tick={{ fontSize: 10 }}
+              domain={[0, 100]}
+              tickFormatter={(v: number) => `${v.toFixed(0)}%`}
+            />
+            <Tooltip
+              formatter={(value: number | null, name: string, props: { payload?: { premios?: number | null; premio_bote?: number | null } }) => {
+                const raw = name === 'Premios' ? props?.payload?.premios : props?.payload?.premio_bote;
+                const pct = value != null ? `${value.toFixed(1)}%` : '-';
+                return [`${pct} · ${formatEuro(raw)}`, name];
+              }}
+              labelFormatter={(label: string, payload?: { payload?: { isNext?: boolean } }[]) =>
+                payload?.[0]?.payload?.isNext ? `Próx. draw (${label})` : `Fecha: ${label}`}
+            />
+            <Legend />
+            <Line
+              type="monotone"
+              dataKey="premios_pct"
+              name="Premios"
+              stroke="var(--color-primary, #2563eb)"
+              strokeWidth={1}
+              dot={renderDot('var(--color-primary, #2563eb)')}
+            />
+            <Line
+              type="monotone"
+              dataKey="premios_pct_dashed"
+              stroke="var(--color-primary, #2563eb)"
+              strokeWidth={1}
+              strokeDasharray="5 5"
+              dot={false}
+              legendType="none"
+              connectNulls={false}
+            />
+            <Line
+              type="monotone"
+              dataKey="premio_bote_pct"
+              name="Bote"
+              stroke="var(--color-accent, #16a34a)"
+              strokeWidth={1}
+              dot={renderDot('var(--color-accent, #16a34a)')}
+            />
+            <Line
+              type="monotone"
+              dataKey="premio_bote_pct_dashed"
+              stroke="var(--color-accent, #16a34a)"
+              strokeWidth={1}
+              strokeDasharray="5 5"
+              dot={false}
+              legendType="none"
+              connectNulls={false}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
 }
 
 export function Dashboard() {
-  const [euromillonesFreq, setEuromillonesFreq] = useState<EuromillonesFrequencySummary | null>(null);
-  const [freqLoading, setFreqLoading] = useState(false);
-  const [freqError, setFreqError] = useState('');
+  const [events, setEvents] = useState<CalendarEvent[]>([]);
+  const [metaItems, setMetaItems] = useState<NextDrawItem[]>([]);
+
+  const formatEuro = (value?: number) => {
+    if (value == null) return '-';
+    try {
+      return `${new Intl.NumberFormat('es-ES', {
+        maximumFractionDigits: value >= 1_000_000 ? 1 : 0,
+      }).format(value)} €`;
+    } catch {
+      return `${value.toFixed(0)} €`;
+    }
+  };
 
   useEffect(() => {
-    const load = async () => {
-      setFreqLoading(true);
-      setFreqError('');
+    const loadNextDraws = async () => {
       try {
-        const res = await fetch(`${API_URL}/api/euromillones/features?limit=1&skip=0`);
+        const res = await fetch(`${API_URL}/api/metadata/next-draws`);
         const data = await res.json();
         if (!res.ok) {
-          setFreqError(data.detail ?? res.statusText);
-          setEuromillonesFreq(null);
+          setEvents([]);
           return;
         }
-        const row = (data.features ?? [])[0] as EuromillonesFrequencySummary | undefined;
-        setEuromillonesFreq(row ?? null);
-      } catch (e) {
-        setFreqError(e instanceof Error ? e.message : 'Error al cargar frecuencias Euromillones');
-        setEuromillonesFreq(null);
-      } finally {
-        setFreqLoading(false);
+        const items = (data.items ?? []) as NextDrawItem[];
+        setMetaItems(items);
+        const mapped: CalendarEvent[] = items
+          .filter((it) => it.next_draw_date)
+          .map((it) => {
+            const slug = it.lottery;
+            const config = LOTTERIES.find((l) => l.id === slug);
+            const title = config?.name ?? slug;
+            const imageUrl = getLotteryImage(slug);
+            return {
+              id: slug,
+              title,
+              start: it.next_draw_date as string,
+              allDay: true,
+              extendedProps: {
+                lottery: title,
+                imageUrl,
+              },
+            };
+          });
+        setEvents(mapped);
+      } catch {
+        setEvents([]);
       }
     };
-    load();
+    loadNextDraws();
   }, []);
-
-  const topMain = (() => {
-    if (!euromillonesFreq?.main_frequency_counts) return [];
-    return euromillonesFreq.main_frequency_counts
-      .map((count, idx) => ({ number: idx + 1, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 10);
-  })();
-
-  const topStars = (() => {
-    if (!euromillonesFreq?.star_frequency_counts) return [];
-    return euromillonesFreq.star_frequency_counts
-      .map((count, idx) => ({ number: idx + 1, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 6);
-  })();
-
-  const maxMainCount = topMain.reduce((max, x) => (x.count > max ? x.count : max), 0) || 1;
-  const maxStarCount = topStars.reduce((max, x) => (x.count > max ? x.count : max), 0) || 1;
 
   return (
     <>
-      <h1 className="page-title">Panel</h1>
-
-      <div className="cards-grid">
-        <section className="card">
-          <h2 style={{ margin: '0 0 var(--space-md)', fontSize: '1rem' }}>Próximos sorteos</h2>
-          <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-            {NEXT_DRAWS.map((d) => (
-              <li key={d.lottery} style={{ padding: 'var(--space-xs) 0' }}>
-                {d.lottery} — {d.day}
-              </li>
-            ))}
-          </ul>
-        </section>
-        <section className="card">
-          <h2 style={{ margin: '0 0 var(--space-md)', fontSize: '1rem' }}>Estado de datos</h2>
-          <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-            {MOCK_DATA_STATUS.map((row) => (
-              <li key={row.lottery} style={{ padding: 'var(--space-xs) 0' }}>
-                {row.lottery} <span className="status-ok">✓</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-        <section className="card">
-          <h2 style={{ margin: '0 0 var(--space-md)', fontSize: '1rem' }}>Resultados</h2>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)' }}>
-            <Link to="/resultados/la-primitiva"><button type="button" className="primary">La Primitiva</button></Link>
-            <Link to="/resultados/euromillones"><button type="button">Euromillones</button></Link>
-            <Link to="/resultados/el-gordo"><button type="button">El Gordo</button></Link>
-          </div>
-        </section>
+      <div
+        style={{
+          marginBottom: 'var(--space-sm)',
+          display: 'flex',
+          justifyContent: 'flex-end',
+          gap: '1.25rem',
+          fontSize: '0.75rem',
+        }}
+      >
+        {['euromillones', 'la-primitiva', 'el-gordo'].map((slug) => {
+          const m = metaItems.find((it) => it.lottery === slug);
+          const boteMedian = m?.next_funds_prediction?.bote_stats?.median;
+          const premiosMedian = m?.next_funds_prediction?.premios_stats?.median;
+          const label =
+            slug === 'euromillones'
+              ? 'Euromillones'
+              : slug === 'la-primitiva'
+              ? 'La Primitiva'
+              : 'El Gordo';
+          const imgSrc =
+            slug === 'euromillones'
+              ? '/images/euromillones.png'
+              : slug === 'la-primitiva'
+              ? '/images/la-primitiva.png'
+              : '/images/el-gordo.png';
+          return (
+            <div key={slug} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <img
+                src={imgSrc}
+                alt={label}
+                style={{ width: 16, height: 16, objectFit: 'contain' }}
+              />
+              <div
+                style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}
+              >
+                <span>{label}</span>
+                <span style={{ color: '#6b7280', fontSize: '0.7rem' }}>
+                  Próx. bote: {formatEuro(boteMedian)}
+                </span>
+                <span style={{ color: '#9ca3af', fontSize: '0.68rem' }}>
+                  Premios: {formatEuro(premiosMedian)}
+                </span>
+              </div>
+            </div>
+          );
+        })}
       </div>
+
+      <section className="dashboard-graph-section" aria-label="Premios y Bote últimos 2 meses">
+        <h2 className="dashboard-graph-heading">Premios y Bote (últimos 2 meses)</h2>
+        <div className="dashboard-chart-grid">
+          <PremiosBoteChart
+            lottery="euromillones"
+            title="Euromillones"
+            nextDraw={getNextDrawForChart(metaItems, 'euromillones')}
+          />
+          <PremiosBoteChart
+            lottery="la-primitiva"
+            title="La Primitiva"
+            nextDraw={getNextDrawForChart(metaItems, 'la-primitiva')}
+          />
+          <PremiosBoteChart
+            lottery="el-gordo"
+            title="El Gordo"
+            nextDraw={getNextDrawForChart(metaItems, 'el-gordo')}
+          />
+        </div>
+      </section>
 
       <div className="calendar-wrap">
         <FullCalendar
           plugins={[dayGridPlugin]}
           initialView="dayGridMonth"
-          events={CALENDAR_EVENTS}
+          events={events}
+          eventContent={renderEventContent}
+          eventDisplay="block"
           headerToolbar={{ left: 'prev,next', center: 'title', right: '' }}
           height="auto"
         />
-      </div>
-
-      <section className="card" style={{ marginTop: 'var(--space-lg)' }}>
-        <h2 style={{ margin: '0 0 var(--space-md)', fontSize: '1rem' }}>Frecuencias Euromillones (test)</h2>
-        {freqError && (
-          <p style={{ color: 'var(--color-error)', marginTop: 0 }}>{freqError}</p>
-        )}
-        {freqLoading && !euromillonesFreq && (
-          <p style={{ marginTop: 0 }}>Cargando frecuencias…</p>
-        )}
-        {!freqLoading && !freqError && !euromillonesFreq && (
-          <p style={{ marginTop: 0 }}>No hay datos de predicción para Euromillones.</p>
-        )}
-        {euromillonesFreq && (
-          <>
-            <p style={{ marginTop: 0, marginBottom: 'var(--space-md)', fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
-              Basado en el último sorteo con datos de predicción ({euromillonesFreq.draw_date}).
-            </p>
-            <div className="resultados-features-chart-grid">
-              <div>
-                <h3 className="resultados-features-chart-title">Top 10 números principales</h3>
-                <ul className="resultados-features-chart-list">
-                  {topMain.map((f) => (
-                    <li key={f.number} className="resultados-features-chart-item">
-                      <span className="resultados-features-chart-label">{f.number}</span>
-                      <div className="resultados-features-chart-bar-wrap">
-                        <div
-                          className="resultados-features-chart-bar"
-                          style={{ width: `${(f.count / maxMainCount) * 100 || 0}%` }}
-                        />
-                      </div>
-                      <span className="resultados-features-chart-count">{f.count}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-              <div>
-                <h3 className="resultados-features-chart-title">Top 6 estrellas</h3>
-                <ul className="resultados-features-chart-list">
-                  {topStars.map((f) => (
-                    <li key={f.number} className="resultados-features-chart-item">
-                      <span className="resultados-features-chart-label">{f.number}</span>
-                      <div className="resultados-features-chart-bar-wrap">
-                        <div
-                          className="resultados-features-chart-bar resultados-features-chart-bar--star"
-                          style={{ width: `${(f.count / maxStarCount) * 100 || 0}%` }}
-                        />
-                      </div>
-                      <span className="resultados-features-chart-count">{f.count}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          </>
-        )}
-      </section>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-lg)', marginTop: 'var(--space-lg)' }}>
-        <section className="card">
-          <h2 style={{ margin: '0 0 var(--space-md)', fontSize: '1rem' }}>Últimos resultados</h2>
-          <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-            {MOCK_DRAWS.slice(0, 3).map((d) => (
-              <li key={d.id} style={{ padding: 'var(--space-sm) 0', borderBottom: '1px solid var(--color-border)' }}>
-                <strong>{d.date}</strong> {d.lottery}: {d.mainNumbers.join(' ')}
-                {d.starsOrBonus.length ? ` (${d.starsOrBonus.join(' ')})` : ''} — {d.jackpot}
-              </li>
-            ))}
-          </ul>
-        </section>
-        <section className="card">
-          <h2 style={{ margin: '0 0 var(--space-md)', fontSize: '1rem' }}>Resultados</h2>
-          <p style={{ color: 'var(--color-text-muted)', margin: 0 }}>
-            Ver sorteos de La Primitiva, Euromillones y El Gordo en el menú.
-          </p>
-        </section>
       </div>
     </>
   );

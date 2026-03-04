@@ -25,9 +25,12 @@ export function SimulationPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const date = searchParams.get('date') ?? '';
   const viewParam = searchParams.get('view');
-  const view: 'compare' | 'sim' | 'pool' | 'wheel' =
-    viewParam === 'sim' || viewParam === 'pool' || viewParam === 'wheel'
-      ? (viewParam as 'sim' | 'pool' | 'wheel')
+  const view: 'compare' | 'sim' | 'pool' | 'wheel' | 'pred' =
+    viewParam === 'sim' ||
+    viewParam === 'pool' ||
+    viewParam === 'wheel' ||
+    viewParam === 'pred'
+      ? (viewParam as 'sim' | 'pool' | 'wheel' | 'pred')
       : 'compare';
 
   const slug = (lottery as LotterySlug) || 'euromillones';
@@ -72,6 +75,9 @@ export function SimulationPage() {
   const [compareGraphPoints, setCompareGraphPoints] = useState<
     { tickets: number; total: number; cost: number; earning: number }[]
   >([]);
+  const [predictionCompareLoading, setPredictionCompareLoading] = useState(false);
+  const [predictionCompareError, setPredictionCompareError] = useState('');
+  const [predictionCompare, setPredictionCompare] = useState<any | null>(null);
 
   const navigate = useNavigate();
 
@@ -149,6 +155,39 @@ export function SimulationPage() {
     void loadSavedSimulation();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, drawId]);
+
+  // Load Euromillones prediction vs result metrics (freq/gap/hot vs real draw)
+  useEffect(() => {
+    const loadPredictionCompare = async () => {
+      if (slug !== 'euromillones' || !drawId || view !== 'pred') return;
+      try {
+        setPredictionCompareLoading(true);
+        setPredictionCompareError('');
+
+        const params = new URLSearchParams();
+        params.set('result_draw_id', drawId);
+        const res = await fetch(
+          `${API_URL}/api/euromillones/simulation/prediction/compare?${params.toString()}`,
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          setPredictionCompare(null);
+          setPredictionCompareError(data.detail ?? res.statusText);
+          return;
+        }
+        setPredictionCompare(data);
+      } catch (e) {
+        setPredictionCompare(null);
+        setPredictionCompareError(
+          e instanceof Error ? e.message : 'Error al comparar predicción con resultado real',
+        );
+      } finally {
+        setPredictionCompareLoading(false);
+      }
+    };
+    void loadPredictionCompare();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slug, drawId, view, API_URL]);
 
   const runAllSimulation = async () => {
     try {
@@ -289,69 +328,18 @@ export function SimulationPage() {
     }
   };
 
+  // Wheeling system removed; keep placeholders to avoid runtime errors
   const runWheeling = async () => {
-    if (slug !== 'euromillones' || !drawId) return;
-    try {
-      setWheelLoading(true);
-      setWheelError('');
-      setWheelTickets(null);
-
-      const params = new URLSearchParams();
-      params.set('cutoff_draw_id', drawId);
-      params.set('n_tickets', '3000');
-
-      const res = await fetch(
-        `${API_URL}/api/euromillones/simulation/wheeling?${params.toString()}`,
-        { method: 'POST' },
-      );
-      const data = await res.json();
-      if (!res.ok) {
-        setWheelError(data.detail ?? res.statusText);
-        return;
-      }
-      const tickets = (data.tickets ?? []) as { mains: number[]; stars: number[] }[];
-      setWheelTickets(tickets);
-    } catch (e) {
-      setWheelError(
-        e instanceof Error ? e.message : 'Error al generar boletos de wheeling',
-      );
-    } finally {
-      setWheelLoading(false);
-    }
+    setWheelError('El sistema de wheeling está en reconstrucción.');
   };
 
-  // Load comparison when on "compare" tab (uses current page draw and ticket count)
   useEffect(() => {
-    const loadCompare = async () => {
-      if (slug !== 'euromillones' || !drawId || view !== 'compare') return;
-      try {
-        setCompareLoading(true);
-        setCompareError('');
-        setCompareResult(null);
-        const params = new URLSearchParams();
-        params.set('result_draw_id', drawId);
-        params.set('n_tickets', String(compareTicketCount));
-        const res = await fetch(
-          `${API_URL}/api/euromillones/simulation/wheeling/compare?${params.toString()}`,
-        );
-        const data = await res.json();
-        if (!res.ok) {
-          setCompareError(data.detail ?? res.statusText);
-          return;
-        }
-        setCompareResult(data);
-        // Graph points are derived from per-ticket categories on the client
-        setCompareGraphPoints([]);
-      } catch (e) {
-        setCompareError(
-          e instanceof Error ? e.message : 'Error al comparar resultados de wheeling',
-        );
-      } finally {
-        setCompareLoading(false);
-      }
-    };
-    void loadCompare();
-  }, [slug, drawId, view, compareTicketCount, API_URL]);
+    if (view === 'compare') {
+      setCompareError('El sistema de wheeling está en reconstrucción.');
+      setCompareResult(null);
+      setCompareGraphPoints([]);
+    }
+  }, [view]);
 
   // Derive graph points from per-ticket prizes, cost, and gains (same logic as table)
   useEffect(() => {
@@ -449,6 +437,21 @@ export function SimulationPage() {
             >
               Modelos (freq / gap / hot)
             </button>
+            {slug === 'euromillones' && (
+              <button
+                type="button"
+                className={`resultados-tab ${view === 'pred' ? 'resultados-tab--active' : ''}`}
+                role="tab"
+                aria-selected={view === 'pred'}
+                onClick={() => {
+                  const next = new URLSearchParams(searchParams);
+                  next.set('view', 'pred');
+                  setSearchParams(next);
+                }}
+              >
+                Predicción vs resultado
+              </button>
+            )}
             <button
               type="button"
               className={`resultados-tab ${view === 'pool' ? 'resultados-tab--active' : ''}`}
@@ -779,6 +782,70 @@ export function SimulationPage() {
                     );
                   })()}
               </>
+            )}
+          </section>
+        )}
+
+        {slug === 'euromillones' && view === 'pred' && (
+          <section
+            className="card resultados-features-card resultados-theme-euromillones"
+            style={{ marginTop: 'var(--space-lg)', width: '100%' }}
+          >
+            <h3 style={{ marginTop: 0, marginBottom: '0.75rem' }}>
+              Predicción vs resultado real
+            </h3>
+            {predictionCompareLoading && (
+              <p style={{ margin: 0 }}>Calculando métricas de predicción…</p>
+            )}
+            {!predictionCompareLoading && predictionCompareError && !predictionCompare && (
+              <p style={{ margin: 0, color: 'var(--color-error)' }}>{predictionCompareError}</p>
+            )}
+            {!predictionCompareLoading && predictionCompare && predictionCompare.metrics && (
+              <div className="resultados-features-table-wrap">
+                {(() => {
+                  const m = predictionCompare.metrics;
+                  const kMain = m.top_k_main ?? 10;
+                  const kStar = m.top_k_star ?? 6;
+                  const main = m.main ?? {};
+                  const star = m.star ?? {};
+                  return (
+                    <table className="resultados-features-table">
+                      <thead>
+                        <tr>
+                          <th>Modelo</th>
+                          <th>
+                            Top {kMain} números principales
+                            <br />
+                            (aciertos / 5)
+                          </th>
+                          <th>
+                            Top {kStar} estrellas
+                            <br />
+                            (aciertos / 2)
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td>Frecuencia</td>
+                          <td>{main.freq_topk_hits ?? 0} / 5</td>
+                          <td>{star.freq_topk_hits ?? 0} / 2</td>
+                        </tr>
+                        <tr>
+                          <td>Gap</td>
+                          <td>{main.gap_topk_hits ?? 0} / 5</td>
+                          <td>{star.gap_topk_hits ?? 0} / 2</td>
+                        </tr>
+                        <tr>
+                          <td>Hot/Cold</td>
+                          <td>{main.hot_topk_hits ?? 0} / 5</td>
+                          <td>{star.hot_topk_hits ?? 0} / 2</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  );
+                })()}
+              </div>
             )}
           </section>
         )}
@@ -1369,6 +1436,9 @@ export function SimulationPage() {
               })()}
             </>
           )}
+
+          {/* La calidad de predicción (freq / gap / hot) ahora se muestra en la pestaña
+              "Predicción vs resultado" en lugar de en la barra lateral. */}
         </aside>
       )}
 

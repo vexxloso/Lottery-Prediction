@@ -280,6 +280,34 @@ tr:hover td {
   color: var(--color-text-muted);
 }
 
+/* Dashboard graph section (Premios / Bote last 3 months) */
+.dashboard-graph-section {
+  margin-bottom: var(--space-lg);
+}
+.dashboard-graph-heading {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0 0 var(--space-md);
+  color: var(--color-text);
+}
+.dashboard-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-lg);
+}
+.dashboard-chart-wrap {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-md);
+}
+.dashboard-chart-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 0 0 var(--space-sm);
+  color: var(--color-text);
+}
+
 /* Calendar container */
 .calendar-wrap {
   background: var(--color-surface);
@@ -290,6 +318,23 @@ tr:hover td {
 }
 .calendar-wrap .fc {
   font-size: 0.9rem;
+}
+
+/* Calendar events: show only small logo image without background box */
+.calendar-wrap .fc-daygrid-event {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+}
+.calendar-wrap .fc-daygrid-event .fc-event-main {
+  padding: 0 !important;
+}
+
+/* Make the events container fill the day cell so the logo can sit at bottom-right */
+.calendar-wrap .fc-daygrid-day-events {
+  position: relative;
+  min-height: 100%;
 }
 
 /* Status badge */

@@ -51,11 +51,18 @@ def _weekday_name(date_str: str) -> str:
 
 
 def _split_main_and_stars(numbers: List[int]) -> Tuple[List[int], List[int]]:
+    """
+    For Euromillones, the raw `numbers` array contains 7 integers in draw order:
+      - first 5 = main numbers
+      - last 2 = star numbers
+    Do not sort; preserve the original order from the source.
+    """
     nums = [int(n) for n in numbers if isinstance(n, int)]
-    nums_sorted = sorted(nums)
-    if len(nums_sorted) <= 5:
-        return nums_sorted, []
-    return nums_sorted[:5], nums_sorted[5:]
+    if len(nums) >= 7:
+        return nums[:5], nums[5:7]
+    if len(nums) >= 5:
+        return nums[:5], []
+    return nums, []
 
 
 def _load_last_state(client: MongoClient):
