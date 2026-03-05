@@ -14,9 +14,9 @@ if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 
 from backfill_common import run_daily
-from update_euromillones_feature_incremental import main as update_euromillones_feature
-from update_la_primitiva_feature_incremental import main as update_la_primitiva_feature
-from update_el_gordo_feature_incremental import main as update_el_gordo_feature
+from build_euromillones_feature import build as build_euromillones_feature
+from build_la_primitiva_feature import build as build_la_primitiva_feature
+from build_el_gordo_feature import build as build_el_gordo_feature
 
 
 def next_00_02():
@@ -29,23 +29,23 @@ def next_00_02():
 
 
 def run_all_feature_updates():
-    """Run incremental feature updates for all lotteries after scraping."""
-    print("Updating feature collections incrementally (euromillones / la_primitiva / el_gordo)…")
+    """Rebuild feature-model collections for all lotteries after scraping."""
+    print("Rebuilding feature collections (euromillones_feature / la_primitiva_feature / el_gordo_feature)…")
     try:
-        update_euromillones_feature()
-        print("Euromillones feature updated.")
+        build_euromillones_feature(limit=None)
+        print("Euromillones feature rebuilt.")
     except Exception as e:
-        print(f"Error updating euromillones_feature: {e}")
+        print(f"Error rebuilding euromillones_feature: {e}")
     try:
-        update_la_primitiva_feature()
-        print("La Primitiva feature updated.")
+        build_la_primitiva_feature(limit=None)
+        print("La Primitiva feature rebuilt.")
     except Exception as e:
-        print(f"Error updating la_primitiva_feature: {e}")
+        print(f"Error rebuilding la_primitiva_feature: {e}")
     try:
-        update_el_gordo_feature()
-        print("El Gordo feature updated.")
+        build_el_gordo_feature(limit=None)
+        print("El Gordo feature rebuilt.")
     except Exception as e:
-        print(f"Error updating el_gordo_feature: {e}")
+        print(f"Error rebuilding el_gordo_feature: {e}")
 
 
 if __name__ == "__main__":
