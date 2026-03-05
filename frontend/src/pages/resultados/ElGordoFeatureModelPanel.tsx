@@ -11,8 +11,8 @@ import {
   Scatter,
   CartesianGrid,
 } from 'recharts';
-import type { EuromillonesFeatureRow } from './useEuromillonesFeatures';
-import { useEuromillonesFeatures, useEuromillonesLast10 } from './useEuromillonesFeatures';
+import type { ElGordoFeatureModelRow } from './useElGordoFeatureModel';
+import { useElGordoFeatureModel, useElGordoLast10 } from './useElGordoFeatureModel';
 
 const WEEKDAY_ES = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
 
@@ -34,27 +34,69 @@ function formatFecha(fecha?: string | null): string {
   }
 }
 
-function formatResultado(mains?: number[] | null, stars?: number[] | null): string {
+function formatResultado(mains?: number[] | null, clave?: number | null): string {
   const m = (mains ?? []).join(' ');
-  const sList = stars ?? [];
-  if (!m && !sList.length) return '—';
-  const s = sList.join(' ');
-  return s ? `${m} (${s})` : m;
+  if (!m && clave == null) return '—';
+  return clave != null ? `${m} (${clave})` : m;
 }
 
-/** Heatmap: X = number, Y = draw (date). Last 10 draws from euromillones_feature. */
+function computeHotCold(row: ElGordoFeatureModelRow) {
+  const freq = row.frequency ?? [];
+  // mains 1–54 → indices 0..53
+  const mainFreq = Array.from({ length: 54 }, (_, i) => ({
+    num: i + 1,
+    freq: Number(freq[i] ?? 0),
+  }));
+  // clave 0–9 → indices 54..63
+  const claveFreq = Array.from({ length: 10 }, (_, i) => ({
+    num: i,
+    freq: Number(freq[54 + i] ?? 0),
+  }));
+
+  const hotMains = mainFreq
+    .filter((x) => x.freq > 0)
+    .sort((a, b) => b.freq - a.freq)
+    .slice(0, 5)
+    .map((x) => x.num);
+
+  const coldMains = [...mainFreq]
+    .sort((a, b) => a.freq - b.freq)
+    .slice(0, 5)
+    .map((x) => x.num);
+
+  const hotClave = claveFreq
+    .filter((x) => x.freq > 0)
+    .sort((a, b) => b.freq - a.freq)
+    .slice(0, 3)
+    .map((x) => x.num);
+
+  const coldClave = [...claveFreq]
+    .sort((a, b) => a.freq - b.freq)
+    .slice(0, 3)
+    .map((x) => x.num);
+
+  return {
+    hotMains,
+    coldMains,
+    hotClave,
+    coldClave,
+  };
+}
+
+/** Heatmap: X = number, Y = draw (date). Last 10 draws from el_gordo_feature. */
 function Last10Heatmap({
   draws,
   type,
   numberType,
   title,
 }: {
-  draws: EuromillonesFeatureRow[];
+  draws: ElGordoFeatureModelRow[];
   type: 'gap' | 'frequency';
-  numberType: 'main' | 'star';
+  numberType: 'main' | 'clave';
   title: string;
 }) {
-  const { offset, count } = numberType === 'main' ? { offset: 0, count: 50 } : { offset: 50, count: 12 };
+  const { offset, count } =
+    numberType === 'main' ? { offset: 0, count: 54 } : { offset: 54, count: 10 };
   const values = useMemo(() => {
     const v: number[] = [];
     draws.forEach((d) => {
@@ -82,8 +124,7 @@ function Last10Heatmap({
     return { backgroundColor: `rgba(33, 119, 255, ${alpha})` };
   };
 
-  const rows = draws.length;
-  if (!rows) return null;
+  if (!draws.length) return null;
 
   return (
     <section className="resultados-features-last10-heatmap">
@@ -95,7 +136,7 @@ function Last10Heatmap({
               <th className="resultados-features-heatmap-y-label">Fecha</th>
               {Array.from({ length: count }, (_, i) => (
                 <th key={i} className="resultados-features-heatmap-x-cell">
-                  {i + 1}
+                  {numberType === 'main' ? i + 1 : i}
                 </th>
               ))}
             </tr>
@@ -107,14 +148,17 @@ function Last10Heatmap({
                   {d.fecha_sorteo ?? '—'}
                 </td>
                 {Array.from({ length: count }, (_, colIdx) => {
+                  const idx = offset + colIdx;
                   const arr = type === 'gap' ? (d.gap ?? []) : (d.frequency ?? []);
-                  const val = typeof arr[offset + colIdx] === 'number' ? Number(arr[offset + colIdx]) : 0;
+                  const val = typeof arr[idx] === 'number' ? Number(arr[idx]) : 0;
                   return (
                     <td
                       key={colIdx}
                       className="resultados-features-heatmap-cell"
                       style={getCellStyle(val)}
-                      title={`Nº ${colIdx + 1}: ${type === 'gap' ? 'gap' : 'freq'} = ${val}`}
+                      title={`Nº ${numberType === 'main' ? colIdx + 1 : colIdx}: ${
+                        type === 'gap' ? 'gap' : 'freq'
+                      } = ${val}`}
                     >
                       {val > 0 ? val : ''}
                     </td>
@@ -135,23 +179,30 @@ function Last10DotGraph({
   numberType,
   title,
 }: {
-  draws: EuromillonesFeatureRow[];
-  numberType: 'main' | 'star';
+  draws: ElGordoFeatureModelRow[];
+  numberType: 'main' | 'clave';
   title: string;
 }) {
-  const count = numberType === 'main' ? 50 : 12;
-  const domainX: [number, number] = [1, count];
+  const domainX: [number, number] =
+    numberType === 'main' ? [1, 54] : [0, 9];
 
   const points = useMemo(() => {
     const out: { number: number; dateIndex: number; date: string }[] = [];
     draws.forEach((d, dateIndex) => {
-      const arr = numberType === 'main' ? (d.main_number ?? []) : (d.star_number ?? []);
       const date = d.fecha_sorteo ?? '';
-      arr.forEach((n) => {
-        if (numberType === 'main' ? n >= 1 && n <= 50 : n >= 1 && n <= 12) {
-          out.push({ number: n, dateIndex, date });
+      if (numberType === 'main') {
+        const mains = d.main_number ?? [];
+        mains.forEach((n) => {
+          if (n >= 1 && n <= 54) {
+            out.push({ number: n, dateIndex, date });
+          }
+        });
+      } else {
+        const clave = d.clave;
+        if (typeof clave === 'number' && clave >= 0 && clave <= 9) {
+          out.push({ number: clave, dateIndex, date });
         }
-      });
+      }
     });
     return out;
   }, [draws, numberType]);
@@ -162,7 +213,7 @@ function Last10DotGraph({
   if (!draws.length) return null;
 
   return (
-    <section className={`resultados-features-dotgraph resultados-features-dotgraph--${numberType}`}>
+    <section className="resultados-features-dotgraph">
       <h4 className="resultados-features-chart-title">{title}</h4>
       <div className="resultados-features-dotgraph-chart-wrap">
         <ResponsiveContainer width="100%" height={280}>
@@ -174,7 +225,6 @@ function Last10DotGraph({
               name="Número"
               domain={domainX}
               tick={{ fontSize: 10 }}
-              tickCount={numberType === 'main' ? 10 : 6}
               allowDecimals={false}
             />
             <YAxis
@@ -203,7 +253,7 @@ function Last10DotGraph({
             />
             <Scatter
               data={points}
-              fill={numberType === 'main' ? '#1976d2' : '#ffc107'}
+              fill={numberType === 'main' ? '#7c3aed' : '#a855f7'}
               shape="circle"
             />
           </ScatterChart>
@@ -213,48 +263,7 @@ function Last10DotGraph({
   );
 }
 
-function computeHotCold(row: EuromillonesFeatureRow) {
-  const freq = row.frequency ?? [];
-  const mainFreq = Array.from({ length: 50 }, (_, i) => ({
-    num: i + 1,
-    freq: Number(freq[i] ?? 0),
-  }));
-  const starFreq = Array.from({ length: 12 }, (_, i) => ({
-    num: i + 1,
-    freq: Number(freq[50 + i] ?? 0),
-  }));
-
-  const hotMains = mainFreq
-    .filter((x) => x.freq > 0)
-    .sort((a, b) => b.freq - a.freq)
-    .slice(0, 5)
-    .map((x) => x.num);
-
-  const coldMains = [...mainFreq]
-    .sort((a, b) => a.freq - b.freq)
-    .slice(0, 5)
-    .map((x) => x.num);
-
-  const hotStars = starFreq
-    .filter((x) => x.freq > 0)
-    .sort((a, b) => b.freq - a.freq)
-    .slice(0, 5)
-    .map((x) => x.num);
-
-  const coldStars = [...starFreq]
-    .sort((a, b) => a.freq - b.freq)
-    .slice(0, 5)
-    .map((x) => x.num);
-
-  return {
-    hotMains,
-    coldMains,
-    hotStars,
-    coldStars,
-  };
-}
-
-export function EuromillonesFeaturesPanel() {
+export function ElGordoFeatureModelPanel() {
   const {
     rows,
     loading,
@@ -264,23 +273,28 @@ export function EuromillonesFeaturesPanel() {
     total,
     nextPage,
     prevPage,
-  } = useEuromillonesFeatures();
-  const { rows: last10Rows, loading: last10Loading } = useEuromillonesLast10();
+  } = useElGordoFeatureModel();
 
-  const [selectedRow, setSelectedRow] = useState<EuromillonesFeatureRow | null>(null);
+  const [selectedRow, setSelectedRow] = useState<ElGordoFeatureModelRow | null>(null);
   const [chartMode, setChartMode] = useState<'frequency' | 'gap'>('frequency');
 
-  const openDrawer = (row: EuromillonesFeatureRow, mode: 'frequency' | 'gap') => {
+  const { rows: last10Rows, loading: last10Loading } = useElGordoLast10();
+
+  const openDrawer = (row: ElGordoFeatureModelRow, mode: 'frequency' | 'gap') => {
     setSelectedRow(row);
     setChartMode(mode);
   };
 
   return (
-    <section className="card resultados-features-card resultados-theme-euromillones">
+    <section className="card resultados-features-card resultados-theme-el-gordo">
+      <h2 style={{ marginTop: 0, marginBottom: 'var(--space-md)', fontSize: '1rem' }}>
+        El Gordo — predicción (nuevo modelo)
+      </h2>
+
       {error && <p style={{ color: 'var(--color-error)', marginTop: 'var(--space-sm)' }}>{error}</p>}
       {loading && <p style={{ marginTop: 'var(--space-sm)' }}>Cargando features…</p>}
       {!loading && !error && rows.length === 0 && (
-        <p style={{ marginTop: 'var(--space-sm)' }}>No hay datos de predicción para Euromillones.</p>
+        <p style={{ marginTop: 'var(--space-sm)' }}>No hay datos de predicción para El Gordo.</p>
       )}
 
       {!loading && rows.length > 0 && (
@@ -290,25 +304,25 @@ export function EuromillonesFeaturesPanel() {
               <thead>
                 <tr>
                   <th>Fecha</th>
-                  <th>Resultado</th>
+                  <th>Resultado (5 + clave)</th>
                   <th>Hot mains</th>
                   <th>Cold mains</th>
-                  <th>Hot stars</th>
-                  <th>Cold stars</th>
+                  <th>Hot clave</th>
+                  <th>Cold clave</th>
                   <th>Todo</th>
                 </tr>
               </thead>
               <tbody>
-                {rows.map((row: EuromillonesFeatureRow) => {
-                  const { hotMains, coldMains, hotStars, coldStars } = computeHotCold(row);
+                {rows.map((row) => {
+                  const { hotMains, coldMains, hotClave, coldClave } = computeHotCold(row);
                   return (
                     <tr key={row.id_sorteo}>
                       <td>{formatFecha(row.fecha_sorteo)}</td>
-                      <td>{formatResultado(row.main_number, row.star_number)}</td>
+                      <td>{formatResultado(row.main_number ?? [], row.clave ?? null)}</td>
                       <td>{hotMains.length ? hotMains.join(' ') : '—'}</td>
                       <td>{coldMains.length ? coldMains.join(' ') : '—'}</td>
-                      <td>{hotStars.length ? hotStars.join(' ') : '—'}</td>
-                      <td>{coldStars.length ? coldStars.join(' ') : '—'}</td>
+                      <td>{hotClave.length ? hotClave.join(' ') : '—'}</td>
+                      <td>{coldClave.length ? coldClave.join(' ') : '—'}</td>
                       <td>
                         <button
                           type="button"
@@ -376,8 +390,10 @@ export function EuromillonesFeaturesPanel() {
       <Drawer
         title={
           selectedRow
-            ? `${chartMode === 'frequency' ? 'Frecuencia' : 'Gaps'} Euromillones — ${formatFecha(selectedRow.fecha_sorteo)}`
-            : 'Euromillones'
+            ? `${chartMode === 'frequency' ? 'Frecuencia' : 'Gaps'} El Gordo — ${formatFecha(
+                selectedRow.fecha_sorteo,
+              )}`
+            : 'El Gordo'
         }
         placement="right"
         width="100%"
@@ -389,69 +405,68 @@ export function EuromillonesFeaturesPanel() {
       >
         {selectedRow && (
           <div className="resultados-features-drawer-inner">
-            {/* Top summary: hot/cold mains and stars for this draw */}
-            <div className="resultados-features-hotcold">
-              {(() => {
-                const { hotMains, coldMains, hotStars, coldStars } = computeHotCold(selectedRow);
-                return (
-                  <>
-                    <div>
-                      <div className="resultados-features-hotcold-title">
-                        <span className="resultados-features-hot-icon">🏆</span>
-                        Hot mains
-                      </div>
-                      <div className="resultados-features-hotcold-values">
-                        {hotMains.length ? hotMains.join(' ') : '—'}
-                      </div>
+            {(() => {
+              const { hotMains, coldMains, hotClave, coldClave } = computeHotCold(selectedRow);
+              return (
+                <div className="resultados-features-hotcold">
+                  <div>
+                    <div className="resultados-features-hotcold-title">
+                      <span className="resultados-features-hot-icon">🏆</span>
+                      Hot mains
                     </div>
-                    <div>
-                      <div className="resultados-features-hotcold-title">Cold mains</div>
-                      <div className="resultados-features-hotcold-values">
-                        {coldMains.length ? coldMains.join(' ') : '—'}
-                      </div>
+                    <div className="resultados-features-hotcold-values">
+                      {hotMains.length ? hotMains.join(' ') : '—'}
                     </div>
-                    <div>
-                      <div className="resultados-features-hotcold-title">
-                        <span className="resultados-features-hot-icon">🏆</span>
-                        Hot stars
-                      </div>
-                      <div className="resultados-features-hotcold-values">
-                        {hotStars.length ? hotStars.join(' ') : '—'}
-                      </div>
+                  </div>
+                  <div>
+                    <div className="resultados-features-hotcold-title">Cold mains</div>
+                    <div className="resultados-features-hotcold-values">
+                      {coldMains.length ? coldMains.join(' ') : '—'}
                     </div>
-                    <div>
-                      <div className="resultados-features-hotcold-title">Cold stars</div>
-                      <div className="resultados-features-hotcold-values">
-                        {coldStars.length ? coldStars.join(' ') : '—'}
-                      </div>
+                  </div>
+                  <div>
+                    <div className="resultados-features-hotcold-title">
+                      <span className="resultados-features-hot-icon">🏆</span>
+                      Hot clave
                     </div>
-                  </>
-                );
-              })()}
-            </div>
+                    <div className="resultados-features-hotcold-values">
+                      {hotClave.length ? hotClave.join(' ') : '—'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="resultados-features-hotcold-title">Cold clave</div>
+                    <div className="resultados-features-hotcold-values">
+                      {coldClave.length ? coldClave.join(' ') : '—'}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
 
             <div className="resultados-features-fullcharts">
               <Row gutter={[16, 16]}>
                 <Col xs={24} md={18}>
                   <section>
                     <h4 className="resultados-features-chart-title">
-                      Este sorteo — Números principales (1–50) {chartMode === 'frequency' ? 'Frecuencia' : 'Gap'}
+                      Este sorteo — Números principales (1–54){' '}
+                      {chartMode === 'frequency' ? 'Frecuencia' : 'Gap'}
                     </h4>
                     <div className="resultados-features-chart-container resultados-features-chart-main">
                       <ResponsiveContainer width="100%" height="100%">
                         <BarChart
-                          data={Array.from({ length: 50 }, (_, i) => ({
+                          data={Array.from({ length: 54 }, (_, i) => ({
                             number: i + 1,
-                            count: chartMode === 'frequency'
-                              ? Number((selectedRow.frequency ?? [])[i] ?? 0)
-                              : Number((selectedRow.gap ?? [])[i] ?? 0),
+                            count:
+                              chartMode === 'frequency'
+                                ? Number((selectedRow.frequency ?? [])[i] ?? 0)
+                                : Number((selectedRow.gap ?? [])[i] ?? 0),
                           }))}
                           margin={{ top: 10, right: 30, left: 10, bottom: 20 }}
                         >
                           <XAxis dataKey="number" />
                           <YAxis />
                           <Tooltip />
-                          <Bar dataKey="count" fill={chartMode === 'frequency' ? '#1677ff' : '#52c41a'} />
+                          <Bar dataKey="count" fill={chartMode === 'frequency' ? '#7c3aed' : '#16a34a'} />
                         </BarChart>
                       </ResponsiveContainer>
                     </div>
@@ -460,23 +475,24 @@ export function EuromillonesFeaturesPanel() {
                 <Col xs={24} md={6}>
                   <section>
                     <h4 className="resultados-features-chart-title">
-                      Este sorteo — Estrellas (1–12) {chartMode === 'frequency' ? 'Frecuencia' : 'Gap'}
+                      Este sorteo — Clave (0–9) {chartMode === 'frequency' ? 'Frecuencia' : 'Gap'}
                     </h4>
                     <div className="resultados-features-chart-container resultados-features-chart-stars">
                       <ResponsiveContainer width="100%" height="100%" minHeight={220}>
                         <BarChart
-                          data={Array.from({ length: 12 }, (_, i) => ({
-                            number: i + 1,
-                            count: chartMode === 'frequency'
-                              ? Number((selectedRow.frequency ?? [])[50 + i] ?? 0)
-                              : Number((selectedRow.gap ?? [])[50 + i] ?? 0),
+                          data={Array.from({ length: 10 }, (_, i) => ({
+                            number: i,
+                            count:
+                              chartMode === 'frequency'
+                                ? Number((selectedRow.frequency ?? [])[54 + i] ?? 0)
+                                : Number((selectedRow.gap ?? [])[54 + i] ?? 0),
                           }))}
                           margin={{ top: 10, right: 30, left: 10, bottom: 20 }}
                         >
                           <XAxis dataKey="number" />
                           <YAxis />
                           <Tooltip />
-                          <Bar dataKey="count" fill={chartMode === 'frequency' ? '#eab308' : '#fa8c16'} />
+                          <Bar dataKey="count" fill={chartMode === 'frequency' ? '#a855f7' : '#f97316'} />
                         </BarChart>
                       </ResponsiveContainer>
                     </div>
@@ -485,69 +501,72 @@ export function EuromillonesFeaturesPanel() {
               </Row>
             </div>
 
-            {/* For GAP mode, show last-10 overview after the current-draw charts. For FREQUENCY, skip it. */}
+            {/* For GAP mode, show last-10 overview after the current-draw charts. For FRECUENCIA, skip it. */}
             {chartMode === 'gap' && (
               <>
-                {/* Last 10 draws: X = number, Y = draw (date) — from euromillones_feature */}
                 {last10Loading ? (
-                  <p className="resultados-features-loading">Cargando últimos 10 sorteos…</p>
+                  <p className="resultados-features-loading">Cargando últimos 10 sorteos de El Gordo…</p>
                 ) : last10Rows.length > 0 ? (
                   <div className="resultados-features-last10-section">
-                    <h3 className="resultados-features-last10-heading">Últimos 10 sorteos (euromillones_feature)</h3>
+                    <h3 className="resultados-features-last10-heading">
+                      Últimos 10 sorteos (el_gordo_feature)
+                    </h3>
                     <Row gutter={[16, 16]}>
-                      {/* Presence (dot) last 10 (main + stars) */}
+                      {/* Presence (dot) last 10 (main + clave) */}
                       <Col xs={24} lg={14}>
                         <Last10DotGraph
                           draws={last10Rows}
                           numberType="main"
-                          title="Presencia (dot) — Números principales (1–50)"
+                          title="Presencia (dot) — Números principales (1–54)"
                         />
                       </Col>
                       <Col xs={24} lg={10}>
                         <Last10DotGraph
                           draws={last10Rows}
-                          numberType="star"
-                          title="Presencia (dot) — Estrellas (1–12)"
+                          numberType="clave"
+                          title="Presencia (dot) — Clave (0–9)"
                         />
                       </Col>
-                      {/* Gap last 10 (main + stars) */}
+                      {/* Gap last 10 (main + clave) */}
                       <Col xs={24} lg={14}>
                         <Last10Heatmap
                           draws={last10Rows}
                           type="gap"
                           numberType="main"
-                          title="Gap — Números principales (1–50)"
+                          title="Gap — Números principales (1–54)"
                         />
                       </Col>
                       <Col xs={24} lg={10}>
                         <Last10Heatmap
                           draws={last10Rows}
                           type="gap"
-                          numberType="star"
-                          title="Gap — Estrellas (1–12)"
+                          numberType="clave"
+                          title="Gap — Clave (0–9)"
                         />
                       </Col>
-                      {/* Frequency (dot) last 10 (main + stars) */}
+                      {/* Frequency last 10 (main + clave) */}
                       <Col xs={24} lg={14}>
                         <Last10Heatmap
                           draws={last10Rows}
                           type="frequency"
                           numberType="main"
-                          title="Frecuencia (dot) — Números principales (1–50)"
+                          title="Frecuencia (dot) — Números principales (1–54)"
                         />
                       </Col>
                       <Col xs={24} lg={10}>
                         <Last10Heatmap
                           draws={last10Rows}
                           type="frequency"
-                          numberType="star"
-                          title="Frecuencia (dot) — Estrellas (1–12)"
+                          numberType="clave"
+                          title="Frecuencia (dot) — Clave (0–9)"
                         />
                       </Col>
                     </Row>
                   </div>
                 ) : (
-                  <p className="resultados-features-loading">No hay datos de últimos 10 sorteos.</p>
+                  <p className="resultados-features-loading">
+                    No hay datos de últimos 10 sorteos de El Gordo.
+                  </p>
                 )}
               </>
             )}
@@ -557,3 +576,4 @@ export function EuromillonesFeaturesPanel() {
     </section>
   );
 }
+

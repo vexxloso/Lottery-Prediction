@@ -1,0 +1,10 @@
+data/*
+*.csv
+*.parquet
+*.zip
+*.png
+*.jpg
+node_modules
+__pycache__
+.venv
+frontend/public

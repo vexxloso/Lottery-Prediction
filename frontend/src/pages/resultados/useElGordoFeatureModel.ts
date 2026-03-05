@@ -3,27 +3,26 @@ import { useEffect, useState, useCallback } from 'react';
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 const PAGE_SIZE = 20;
 
-export interface EuromillonesFeatureRow {
+export interface ElGordoFeatureModelRow {
   id_sorteo: string;
   pre_id_sorteo?: string | null;
   fecha_sorteo?: string;
   dia_semana?: string;
   main_number?: number[];
-  star_number?: number[];
+  clave?: number | null;
   main_dx?: number[];
-  star_dx?: number[];
+  clave_dx?: number[];
   frequency?: Array<number | null>;
   gap?: Array<number | null>;
-  presence_mask?: number[];
 }
 
 interface ApiResponse {
-  features: EuromillonesFeatureRow[];
+  features: ElGordoFeatureModelRow[];
   total: number;
 }
 
-export function useEuromillonesFeatures() {
-  const [rows, setRows] = useState<EuromillonesFeatureRow[]>([]);
+export function useElGordoFeatureModel() {
+  const [rows, setRows] = useState<ElGordoFeatureModelRow[]>([]);
   const [total, setTotal] = useState(0);
   const [skip, setSkip] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -36,7 +35,7 @@ export function useEuromillonesFeatures() {
       const params = new URLSearchParams();
       params.set('limit', String(PAGE_SIZE));
       params.set('skip', String(skip));
-      const res = await fetch(`${API_URL}/api/euromillones/feature-model?${params.toString()}`);
+      const res = await fetch(`${API_URL}/api/el-gordo/feature-model?${params.toString()}`);
       const data: ApiResponse = await res.json();
       if (!res.ok) {
         setError((data as any).detail ?? res.statusText);
@@ -47,7 +46,7 @@ export function useEuromillonesFeatures() {
       setRows(data.features ?? []);
       setTotal(data.total ?? 0);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Error al cargar datos de Euromillones');
+      setError(e instanceof Error ? e.message : 'Error al cargar datos de El Gordo');
       setRows([]);
       setTotal(0);
     } finally {
@@ -89,8 +88,8 @@ export function useEuromillonesFeatures() {
 
 const LAST_N = 10;
 
-export function useEuromillonesLast10() {
-  const [rows, setRows] = useState<EuromillonesFeatureRow[]>([]);
+export function useElGordoLast10() {
+  const [rows, setRows] = useState<ElGordoFeatureModelRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -101,7 +100,7 @@ export function useEuromillonesLast10() {
       const params = new URLSearchParams();
       params.set('limit', String(LAST_N));
       params.set('skip', '0');
-      const res = await fetch(`${API_URL}/api/euromillones/feature-model?${params.toString()}`);
+      const res = await fetch(`${API_URL}/api/el-gordo/feature-model?${params.toString()}`);
       const data: ApiResponse = await res.json();
       if (!res.ok) {
         setError((data as any).detail ?? res.statusText);
@@ -110,7 +109,7 @@ export function useEuromillonesLast10() {
       }
       setRows(data.features ?? []);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Error al cargar últimos sorteos');
+      setError(e instanceof Error ? e.message : 'Error al cargar últimos sorteos de El Gordo');
       setRows([]);
     } finally {
       setLoading(false);
@@ -123,4 +122,5 @@ export function useEuromillonesLast10() {
 
   return { rows, loading, error, reload: fetchLast10 };
 }
+
 

@@ -14,6 +14,9 @@ if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 
 from backfill_common import run_daily
+from update_euromillones_feature_incremental import main as update_euromillones_feature
+from update_la_primitiva_feature_incremental import main as update_la_primitiva_feature
+from update_el_gordo_feature_incremental import main as update_el_gordo_feature
 
 
 def next_00_02():
@@ -25,12 +28,33 @@ def next_00_02():
     return target
 
 
+def run_all_feature_updates():
+    """Run incremental feature updates for all lotteries after scraping."""
+    print("Updating feature collections incrementally (euromillones / la_primitiva / el_gordo)…")
+    try:
+        update_euromillones_feature()
+        print("Euromillones feature updated.")
+    except Exception as e:
+        print(f"Error updating euromillones_feature: {e}")
+    try:
+        update_la_primitiva_feature()
+        print("La Primitiva feature updated.")
+    except Exception as e:
+        print(f"Error updating la_primitiva_feature: {e}")
+    try:
+        update_el_gordo_feature()
+        print("El Gordo feature updated.")
+    except Exception as e:
+        print(f"Error updating el_gordo_feature: {e}")
+
+
 if __name__ == "__main__":
     print("Daily scrape started. Running scrape once now, then every day at 00:02. Press Ctrl+C to stop.")
     print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M')}] Running scrape now...")
     try:
         results = run_daily()
         print("Scrape done.", results)
+        run_all_feature_updates()
     except Exception as e:
         print(f"Scrape error: {e}")
     print("\nWaiting for next 00:02 to run again.\n")
@@ -49,6 +73,7 @@ if __name__ == "__main__":
         try:
             results = run_daily()
             print("Daily scrape done.", results)
+            run_all_feature_updates()
         except Exception as e:
             print(f"Scrape error: {e}")
         print("Waiting for next 00:02.\n")

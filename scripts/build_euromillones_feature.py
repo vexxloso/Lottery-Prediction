@@ -55,7 +55,7 @@ def _parse_main_and_star(doc: dict) -> Tuple[List[int], List[int]]:
     return mains[:5], stars[:2]
 
 
-def build(limit: int = 5) -> None:
+def build(limit: int | None = None) -> None:
     client = MongoClient(MONGO_URI)
     db = client[MONGO_DB]
     src = db[SOURCE_COLLECTION]
@@ -72,7 +72,10 @@ def build(limit: int = 5) -> None:
             "combinacion": 1,
             "combinacion_acta": 1,
         },
-    ).sort("fecha_sorteo", ASCENDING).limit(limit)
+    ).sort("fecha_sorteo", ASCENDING)
+
+    if limit is not None and limit > 0:
+        cursor = cursor.limit(limit)
 
     draws = list(cursor)
     if not draws:
@@ -163,6 +166,12 @@ def build(limit: int = 5) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--limit", type=int, default=5, help="How many sorted draws to process")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="How many sorted draws to process (0 = no limit)",
+    )
     args = parser.parse_args()
-    build(limit=max(1, args.limit))
+    limit_arg = args.limit if args.limit and args.limit > 0 else None
+    build(limit=limit_arg)

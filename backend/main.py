@@ -714,6 +714,62 @@ def get_euromillones_feature_model(
     return JSONResponse(content={"features": docs, "total": total})
 
 
+@app.get("/api/el-gordo/feature-model")
+def get_el_gordo_feature_model(
+    limit: int = Query(50, ge=1, le=200),
+    skip: int = Query(0, ge=0),
+    draw_id: str | None = Query(
+        None,
+        description="Optional: filter by id_sorteo to get one feature row.",
+    ),
+):
+    """
+    Return rows from `el_gordo_feature` (new per-draw feature model: 5 mains + clave, frequency/gap arrays).
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db["el_gordo_feature"]
+
+    if draw_id:
+        cursor = coll.find({"id_sorteo": draw_id})
+        docs = [_doc_to_json(doc) for doc in cursor]
+        return JSONResponse(content={"features": docs, "total": len(docs)})
+
+    total = coll.count_documents({})
+    cursor = coll.find().sort("fecha_sorteo", -1).skip(skip).limit(limit)
+    docs = [_doc_to_json(doc) for doc in cursor]
+    return JSONResponse(content={"features": docs, "total": total})
+
+
+@app.get("/api/la-primitiva/feature-model")
+def get_la_primitiva_feature_model(
+    limit: int = Query(50, ge=1, le=200),
+    skip: int = Query(0, ge=0),
+    draw_id: str | None = Query(
+        None,
+        description="Optional: filter by id_sorteo to get one feature row.",
+    ),
+):
+    """
+    Return rows from `la_primitiva_feature` (new per-draw feature model: mains + complementario + reintegro).
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db["la_primitiva_feature"]
+
+    if draw_id:
+        cursor = coll.find({"id_sorteo": draw_id})
+        docs = [_doc_to_json(doc) for doc in cursor]
+        return JSONResponse(content={"features": docs, "total": len(docs)})
+
+    total = coll.count_documents({})
+    cursor = coll.find().sort("fecha_sorteo", -1).skip(skip).limit(limit)
+    docs = [_doc_to_json(doc) for doc in cursor]
+    return JSONResponse(content={"features": docs, "total": total})
+
+
 @app.get("/api/la-primitiva/features")
 def get_la_primitiva_features(
     limit: int = Query(50, ge=1, le=200),

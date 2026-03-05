@@ -32,3 +32,18 @@ you can find image in public/images/ frequency.svg and gape.svg
 
 when i click frequency icon i will show frequency chart
 when i click gap icon i will show gap chart
+
+like this i have to make la_parmitiva
+and also there is difference
+number-> main number
+reintegro-> r
+complementario-> c
+so you have to made build_la_primitiva_features.py like anothers
+and display result on prediction page
+
+on la_primativa prediction table have to include items like this
+Fecha	Resultado (6 + C + R)	Hot mains	Cold mains	Hot C	Cold C	Hot R	Cold R	Todo
+
+Presencia (dot) (main and star)
+Gap — Números principales (main and star)
+Frecuencia (dot) — Números principales (main and star)

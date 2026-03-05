@@ -1,7 +1,7 @@
 import { useSearchParams } from 'react-router-dom';
 import { ResultadosPage } from './ResultadosPage';
 import { ElGordoApuestasPanel } from './ElGordoApuestasPanel';
-import { ElGordoFeaturesPanel } from './ElGordoFeaturesPanel';
+import { ElGordoFeatureModelPanel } from './ElGordoFeatureModelPanel';
 
 type ElGordoTab = 'results' | 'prediction' | 'grafico';
 
@@ -53,7 +53,7 @@ export function ResultadosElGordo() {
         {activeTab === 'results' && <ResultadosPage lottery="el-gordo" />}
         {activeTab === 'prediction' && (
           <div className="resultados-euromillones-features">
-            <ElGordoFeaturesPanel />
+            <ElGordoFeatureModelPanel />
           </div>
         )}
         {activeTab === 'grafico' && (

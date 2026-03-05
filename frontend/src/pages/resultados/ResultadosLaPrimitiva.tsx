@@ -1,7 +1,7 @@
 import { useSearchParams } from 'react-router-dom';
 import { ResultadosPage } from './ResultadosPage';
 import { LaPrimitivaApuestasPanel } from './LaPrimitivaApuestasPanel';
-import { LaPrimitivaFeaturesPanel } from './LaPrimitivaFeaturesPanel';
+import { LaPrimitivaFeatureModelPanel } from './LaPrimitivaFeatureModelPanel';
 
 type LaPrimitivaTab = 'results' | 'prediction' | 'grafico';
 
@@ -53,7 +53,7 @@ export function ResultadosLaPrimitiva() {
         {activeTab === 'results' && <ResultadosPage lottery="la-primitiva" />}
         {activeTab === 'prediction' && (
           <div className="resultados-euromillones-features">
-            <LaPrimitivaFeaturesPanel />
+            <LaPrimitivaFeatureModelPanel />
           </div>
         )}
         {activeTab === 'grafico' && (
