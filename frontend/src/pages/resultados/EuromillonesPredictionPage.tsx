@@ -36,6 +36,8 @@ interface TrainProgress {
       mains?: { count: number; sum: number; even: number; odd: number };
       stars?: { count: number; sum: number; even: number; odd: number };
     };
+    snapshot_mains?: number[];
+    snapshot_stars?: number[];
   };
   candidate_pool?: { mains: number[]; stars: number[] }[];
   candidate_pool_at?: string;
@@ -51,8 +53,38 @@ export function EuromillonesPredictionPage() {
   const [runningStep, setRunningStep] = useState<number>(0);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerWidth, setDrawerWidth] = useState(420);
+  const [currentDraw, setCurrentDraw] = useState<{ date: string; mains: number[]; stars: number[] } | null>(null);
   const [candidateDisplayCount, setCandidateDisplayCount] = useState(20);
   const CANDIDATE_COUNT_OPTIONS = [10, 20, 30, 50, 100, 300, 500, 1000, 2000, 3000];
+
+  useEffect(() => {
+    if (!cutoffDrawId) {
+      setCurrentDraw(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `${API_URL}/api/euromillones/feature-model?draw_id=${encodeURIComponent(cutoffDrawId)}`
+        );
+        const data = await res.json();
+        if (cancelled || !data.features?.length) {
+          if (!cancelled) setCurrentDraw(null);
+          return;
+        }
+        const f = data.features[0];
+        const fecha = (f.fecha_sorteo || '').toString().trim();
+        const date = fecha.split(' ')[0] || fecha;
+        const mains = Array.isArray(f.main_number) ? f.main_number.map(Number).filter((n: number) => !isNaN(n)) : [];
+        const stars = Array.isArray(f.star_number) ? f.star_number.map(Number).filter((n: number) => !isNaN(n)) : [];
+        if (!cancelled) setCurrentDraw({ date, mains, stars });
+      } catch {
+        if (!cancelled) setCurrentDraw(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [cutoffDrawId]);
 
   useEffect(() => {
     const mq = window.matchMedia('(max-width: 768px)');
@@ -325,6 +357,28 @@ export function EuromillonesPredictionPage() {
               </div>
             </Card>
           )}
+          {currentDraw && (
+            <Card size="small" className="euromillones-train-current-draw-card" bodyStyle={{ padding: 'var(--space-md)' }} style={{ marginTop: 'var(--space-md)' }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginBottom: 'var(--space-xs)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                Sorteo actual
+              </div>
+              <div style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: 'var(--space-sm)' }}>
+                {currentDraw.date}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginBottom: 'var(--space-xs)' }}>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginRight: 4 }}>Mains:</span>
+                {(currentDraw.mains.length ? currentDraw.mains : []).map((n) => (
+                  <span key={n} className="resultados-ball resultados-train-draw-ball" style={{ width: 26, height: 26, fontSize: '0.75rem' }}>{n}</span>
+                ))}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginRight: 4 }}>Stars:</span>
+                {(currentDraw.stars.length ? currentDraw.stars : []).map((n) => (
+                  <span key={n} className="resultados-ball resultados-ball star resultados-train-draw-ball" style={{ width: 26, height: 26, fontSize: '0.75rem' }}>{n}</span>
+                ))}
+              </div>
+            </Card>
+          )}
         </div>
       </div>
 
@@ -363,14 +417,34 @@ export function EuromillonesPredictionPage() {
                 {progress.candidate_pool_count != null && ` · ${progress.candidate_pool_count} boletos`}
               </Descriptions.Item>
             </Descriptions>
+            {(progress.rule_flags?.snapshot_mains?.length || progress.rule_flags?.snapshot_stars?.length) && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ marginBottom: 8, fontWeight: 600 }}>Snapshot Step 4 (debug)</div>
+                <p style={{ margin: 0, fontSize: '0.9rem' }}>
+                  Mains ({progress.rule_flags?.snapshot_mains?.length ?? 0}):{' '}
+                  {progress.rule_flags?.snapshot_mains?.join(' ') || '—'}
+                  {progress.rule_flags?.snapshot_stars?.length ? (
+                    <>
+                      {' · '}
+                      <span style={{ opacity: 0.8 }}>
+                        Stars ({progress.rule_flags.snapshot_stars.length}):{' '}
+                        {progress.rule_flags.snapshot_stars.join(' ')}
+                      </span>
+                    </>
+                  ) : null}
+                </p>
+              </div>
+            )}
             {(progress.filtered_mains_probs?.length || progress.filtered_stars_probs?.length) ? (
               <div style={{ marginTop: 16 }}>
                 <div style={{ marginBottom: 8, fontWeight: 600 }}>Pool filtrado</div>
                 <p style={{ margin: 0, fontSize: '0.9rem' }}>
-                  Mains (20): {progress.filtered_mains_probs?.slice(0, 20).map((x) => x.number).join(' ') || '—'}
+                  Mains ({progress.filtered_mains_probs?.length ?? 0}):{' '}
+                  {progress.filtered_mains_probs?.map((x) => x.number).join(' ') || '—'}
                 </p>
                 <p style={{ margin: '4px 0 0', fontSize: '0.9rem' }}>
-                  Stars (4): {progress.filtered_stars_probs?.slice(0, 4).map((x) => x.number).join(' ') || '—'}
+                  Stars ({progress.filtered_stars_probs?.length ?? 0}):{' '}
+                  {progress.filtered_stars_probs?.map((x) => x.number).join(' ') || '—'}
                 </p>
               </div>
             ) : null}

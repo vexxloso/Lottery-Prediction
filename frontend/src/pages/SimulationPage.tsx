@@ -15,6 +15,16 @@ import {
   Legend,
 } from 'recharts';
 
+function parseEuroPremio(value: unknown): number {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') {
+    const cleaned = value.replace(/\./g, '').replace(',', '.').replace(/[^\d.]/g, '');
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
 interface EuromillonesFeatureRow {
   id_sorteo: string;
   pre_id_sorteo?: string | null;
@@ -81,6 +91,25 @@ export function SimulationPage() {
   const [compareGraphPoints, setCompareGraphPoints] = useState<
     { tickets: number; total: number; cost: number; earning: number }[]
   >([]);
+  // Compare page: real draw + train progress (candidate pool)
+  const [compareDrawLoading, setCompareDrawLoading] = useState(false);
+  const [compareDrawError, setCompareDrawError] = useState('');
+  const [compareDraw, setCompareDraw] = useState<{
+    id_sorteo: string;
+    fecha_sorteo?: string;
+    main: number[];
+    stars: number[];
+    escrutinio?: any[] | null;
+  } | null>(null);
+  const [compareProgressLoading, setCompareProgressLoading] = useState(false);
+  const [compareProgressError, setCompareProgressError] = useState('');
+  const [compareProgress, setCompareProgress] = useState<{
+    cutoff_draw_id: string;
+    candidate_pool?: { mains: number[]; stars: number[] }[];
+    candidate_pool_count?: number;
+  } | null>(null);
+  const [comparePoolLimit, setComparePoolLimit] = useState(20);
+  const [showComparePoolTable, setShowComparePoolTable] = useState(false);
   const [featureRowsLoading, setFeatureRowsLoading] = useState(false);
   const [featureRowsError, setFeatureRowsError] = useState('');
   const [featureRows, setFeatureRows] = useState<EuromillonesFeatureRow[]>([]);
@@ -334,6 +363,48 @@ export function SimulationPage() {
     setWheelError('El sistema de wheeling está en reconstrucción.');
   };
 
+  const openComparePoolGraph = () => {
+    if (!compareProgress || !compareDraw) return;
+    const pool = compareProgress.candidate_pool ?? [];
+    const limit = Math.min(comparePoolLimit, pool.length);
+    if (!limit) return;
+    const mainSet = new Set(compareDraw.main.map(Number));
+    const starSet = new Set(compareDraw.stars.map(Number));
+    const escrutinio = Array.isArray(compareDraw.escrutinio)
+      ? (compareDraw.escrutinio as any[])
+      : [];
+    const prizeByHits = new Map<string, number>();
+    escrutinio.forEach((row: any) => {
+      const aciertos = String(row.tipo ?? row.aciertos ?? row.categoria ?? '').trim();
+      const m = aciertos.match(/(\d+)\s*\+\s*(\d+)/);
+      if (!m) return;
+      const hm = Number(m[1]);
+      const hs = Number(m[2]);
+      if (!Number.isFinite(hm) || !Number.isFinite(hs)) return;
+      const key = `${hm}-${hs}`;
+      const premio = parseEuroPremio(row.premio);
+      if (premio > 0) {
+        prizeByHits.set(key, premio);
+      }
+    });
+    const points: { tickets: number; total: number; cost: number; earning: number }[] = [];
+    let runningPrize = 0;
+    pool.slice(0, limit).forEach((t, idx) => {
+      const mains = (t.mains ?? []).map(Number);
+      const stars = (t.stars ?? []).map(Number);
+      const hitsMain = mains.filter((n) => mainSet.has(n)).length;
+      const hitsStar = stars.filter((n) => starSet.has(n)).length;
+      const prizePerTicket = prizeByHits.get(`${hitsMain}-${hitsStar}`) ?? 0;
+      runningPrize += prizePerTicket;
+      const ticketNo = idx + 1;
+      const cost = ticketNo * TICKET_BUDGET_EUR;
+      const earning = runningPrize - cost;
+      points.push({ tickets: ticketNo, total: runningPrize, cost, earning });
+    });
+    setCompareGraphPoints(points);
+    setShowCompareGraph(true);
+  };
+
   useEffect(() => {
     if (view === 'compare') {
       setCompareError('El sistema de wheeling está en reconstrucción.');
@@ -341,6 +412,95 @@ export function SimulationPage() {
       setCompareGraphPoints([]);
     }
   }, [view]);
+
+  // Compare page: fetch real draw (id_sorteo) and train progress (cutoff_draw_id = prev_id)
+  useEffect(() => {
+    if (slug !== 'euromillones' || view !== 'compare' || !drawId) {
+      setCompareDraw(null);
+      setCompareProgress(null);
+      return;
+    }
+    const prevId = searchParams.get('prev_id')?.trim() || undefined;
+
+    const loadDraw = async () => {
+      setCompareDrawLoading(true);
+      setCompareDrawError('');
+      setCompareDraw(null);
+      try {
+        const res = await fetch(
+          `${API_URL}/api/euromillones/draw?draw_id=${encodeURIComponent(drawId)}`,
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          setCompareDrawError(data.detail ?? res.statusText ?? 'Error al cargar sorteo');
+          return;
+        }
+        const numbers = Array.isArray(data.numbers) ? data.numbers : [];
+        const combinacionActa = data.combinacion_acta;
+        let main: number[] = [];
+        let stars: number[] = [];
+        if (numbers.length >= 7) {
+          main = numbers.slice(0, 5).map((n: unknown) => Number(n));
+          stars = numbers.slice(5, 7).map((n: unknown) => Number(n));
+        } else if (combinacionActa && typeof combinacionActa === 'string') {
+          const parts = combinacionActa.split(/[\s\-]+/).filter(Boolean);
+          const nums = parts.map((p: string) => parseInt(p, 10)).filter((n: number) => !Number.isNaN(n));
+          main = nums.slice(0, 5);
+          stars = nums.slice(5, 7);
+        }
+        setCompareDraw({
+          id_sorteo: String(data.id_sorteo ?? drawId),
+          fecha_sorteo: data.fecha_sorteo,
+          main,
+          stars,
+          escrutinio: Array.isArray(data.escrutinio) ? data.escrutinio : null,
+        });
+      } catch (e) {
+        setCompareDrawError(e instanceof Error ? e.message : 'Error al cargar sorteo');
+      } finally {
+        setCompareDrawLoading(false);
+      }
+    };
+
+    const loadProgress = async () => {
+      if (!prevId) {
+        setCompareProgress(null);
+        setCompareProgressError('');
+        return;
+      }
+      setCompareProgressLoading(true);
+      setCompareProgressError('');
+      setCompareProgress(null);
+      try {
+        const res = await fetch(
+          `${API_URL}/api/euromillones/train/progress?cutoff_draw_id=${encodeURIComponent(prevId)}`,
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          setCompareProgressError(data.detail ?? res.statusText ?? 'Error al cargar progreso');
+          return;
+        }
+        const progress = data.progress ?? null;
+        if (!progress) {
+          setCompareProgress(null);
+          return;
+        }
+        const pool = progress.candidate_pool;
+        setCompareProgress({
+          cutoff_draw_id: progress.cutoff_draw_id ?? prevId,
+          candidate_pool: Array.isArray(pool) ? pool : undefined,
+          candidate_pool_count: progress.candidate_pool_count,
+        });
+      } catch (e) {
+        setCompareProgressError(e instanceof Error ? e.message : 'Error al cargar progreso');
+      } finally {
+        setCompareProgressLoading(false);
+      }
+    };
+
+    void loadDraw();
+    void loadProgress();
+  }, [slug, view, drawId, searchParams, API_URL]);
 
   // Derive graph points from per-ticket prizes, cost, and gains (same logic as table)
   useEffect(() => {
@@ -396,7 +556,7 @@ export function SimulationPage() {
   }, [slug, view, compareResult, compareTicketCount]);
 
   return (
-    <div className="resultados-page">
+    <div className={`resultados-page ${view === 'compare' ? 'resultados-page--single' : ''}`}>
       <div>
         <nav className="resultados-breadcrumb" aria-label="Ruta de navegación">
           <Link to="/">inicio</Link>
@@ -406,7 +566,7 @@ export function SimulationPage() {
           <span>Simulación</span>
         </nav>
 
-        {(slug === 'euromillones' || slug === 'el-gordo') && (
+        {(slug === 'euromillones' || slug === 'el-gordo') && view !== 'compare' && (
           <div
             className="resultados-tabs"
             role="tablist"
@@ -483,308 +643,506 @@ export function SimulationPage() {
         )}
 
         {slug === 'euromillones' && view === 'compare' && (
-          <section
-            className="card resultados-features-card resultados-theme-euromillones"
-            style={{ marginTop: 'var(--space-lg)', width: '100%' }}
-          >
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: '1rem',
-                flexWrap: 'wrap',
-                marginBottom: '0.5rem',
-              }}
-            >
-              <h3 style={{ marginTop: 0, marginBottom: 0 }}>Comparación Wheeling</h3>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <label
-                  className="form-label"
-                  style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}
-                >
-                  <span>Nº boletos</span>
-                  <select
-                    className="form-input"
-                    value={compareTicketCount}
-                    onChange={(e) =>
-                      setCompareTicketCount(Math.max(1, Number(e.target.value) || 1))
-                    }
-                    disabled={compareLoading}
-                    style={{ width: '7rem' }}
-                  >
-                    {[10, 20, 30, 50, 100, 1000, 3000].map((opt) => (
-                      <option key={opt} value={opt}>
-                        {opt}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button
-                  type="button"
-                  className="form-input"
-                  onClick={() => setShowCompareTickets((v) => !v)}
-                  disabled={!compareResult || !Array.isArray(compareResult.tickets)}
-                  title={showCompareTickets ? 'Ocultar boletos' : 'Ver boletos'}
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    padding: '0.35rem 0.5rem',
-                    minWidth: '2.5rem',
-                  }}
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="20"
-                    height="20"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden
-                  >
-                    <path d="M2 9a3 3 0 0 1 3-3h14a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3V9z" />
-                    <path d="M2 12h20" />
-                    <path d="M8 12v3" />
-                    <path d="M16 12v3" />
-                  </svg>
-                </button>
-                <button
-                  type="button"
-                  className="form-input"
-                  onClick={() => setShowCompareGraph(true)}
-                  disabled={compareGraphPoints.length === 0}
-                  title="Ver gráfico"
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    padding: '0.35rem 0.5rem',
-                    minWidth: '2.5rem',
-                  }}
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="20"
-                    height="20"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden
-                  >
-                    <polyline points="3 17 9 11 13 15 21 7" />
-                    <polyline points="14 7 21 7 21 14" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            {compareLoading && (
-              <p style={{ marginTop: 0 }}>Cargando comparación de resultados…</p>
+          <>
+            {compareDrawLoading && <p style={{ margin: 0 }}>Cargando sorteo…</p>}
+            {compareDrawError && !compareDrawLoading && (
+              <p style={{ margin: 0, color: 'var(--color-error)' }}>{compareDrawError}</p>
             )}
-            {compareError && !compareLoading && !compareResult && (
-              <p style={{ marginTop: 0, color: 'var(--color-error)' }}>{compareError}</p>
+            {compareProgressLoading && (
+              <p style={{ margin: '0.25rem 0 0' }}>Cargando pool de predicción…</p>
             )}
-            {compareResult && (
-              <>
-                <div
-                  style={{
-                    display: 'flex',
-                    gap: 'var(--space-lg)',
-                    alignItems: 'flex-start',
-                    flexWrap: 'wrap',
-                  }}
-                >
-                  <div style={{ flex: '1 1 min(100%, 400px)' }}>
-                    <div className="resultados-features-table-wrap">
-                      <table className="resultados-features-table">
-                        <thead>
-                          <tr>
-                            <th>Categoría</th>
-                            <th>Aciertos</th>
-                            <th>Boletos</th>
-                            <th>Premio por boleto</th>
-                            <th>Retorno total</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {(compareResult.categories || []).map((cat: any, idx: number) => (
-                            <tr key={`${idx}-${cat.name}`}>
-                              <td>{cat.name}</td>
-                              <td>
-                                {cat.hits_main}+{cat.hits_star}
-                              </td>
-                              <td>{cat.count}</td>
-                              <td>
-                                {typeof cat.prize_per_ticket === 'number'
-                                  ? `${cat.prize_per_ticket.toFixed(2)} €`
-                                  : '—'}
-                              </td>
-                              <td>
-                                {typeof cat.total_return === 'number'
-                                  ? `${cat.total_return.toFixed(2)} €`
-                                  : '—'}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
+            {compareProgressError && !compareProgressLoading && (
+              <p style={{ margin: '0.25rem 0 0', color: 'var(--color-error)' }}>
+                {compareProgressError}
+              </p>
+            )}
 
-                {showCompareTickets &&
-                  Array.isArray(compareResult.tickets) &&
-                  compareResult.tickets.length > 0 && (() => {
-                    const resultMainSet = new Set(
-                      (compareResult.result_main_numbers || []).map(Number),
-                    );
-                    const resultStarSet = new Set(
-                      (compareResult.result_star_numbers || []).map(Number),
-                    );
-                    const categories = (compareResult.categories || []) as {
-                      name: string;
-                      hits_main: number;
-                      hits_star: number;
-                      prize_per_ticket?: number;
-                    }[];
-                    const getCategoryAndPrize = (mains: number[], stars: number[]) => {
-                      const hitsMain = (mains || []).filter((n) => resultMainSet.has(n)).length;
-                      const hitsStar = (stars || []).filter((n) => resultStarSet.has(n)).length;
-                      const cat = categories.find(
-                        (c) => c.hits_main === hitsMain && c.hits_star === hitsStar,
-                      );
-                      if (!cat) {
-                        return { name: '—', prize: 0 };
-                      }
-                      const prize =
-                        typeof cat.prize_per_ticket === 'number' ? cat.prize_per_ticket : 0;
-                      return { name: cat.name, prize };
-                    };
-                    return (
+            {(compareDraw || compareProgress) && (
+              <div className="euromillones-compare-layout">
+                <section className="card resultados-features-card resultados-theme-euromillones euromillones-compare-table-col">
+                  {compareProgress && compareDraw && (
+                    <div className="euromillones-compare-pool">
                       <div
-                        className="resultados-features-table-wrap"
-                        style={{ marginTop: 'var(--space-lg)' }}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'flex-start',
+                          justifyContent: 'space-between',
+                          gap: '1rem',
+                          flexWrap: 'wrap',
+                        }}
                       >
-                        <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '0.95rem' }}>
-                          Boletos ({compareResult.tickets.length})
-                        </h4>
-                        <table className="resultados-features-table">
-                          <thead>
-                            <tr>
-                              <th>#</th>
-                              <th>Números principales</th>
-                              <th>Estrellas</th>
-                              <th>Categoría</th>
-                              <th>Premio</th>
-                              <th>Acumulado</th>
-                              <th>Coste acumulado</th>
-                              <th>Ganancia</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {(() => {
-                              let runningPrize = 0;
-                              return (
-                                compareResult.tickets as {
-                                  mains: number[];
-                                  stars: number[];
-                                }[]
-                              ).map((t, idx) => {
-                              const mains = t.mains ?? [];
-                              const stars = t.stars ?? [];
-                              const { name: catName, prize } = getCategoryAndPrize(mains, stars);
-                              runningPrize += prize;
-                              const ticketNo = idx + 1;
-                              const costAcc = ticketNo * TICKET_BUDGET_EUR;
-                              const gain = runningPrize - costAcc;
-                              return (
-                                <tr
-                                  key={`${idx}-${mains.join('-')}-${stars.join('-')}`}
-                                >
-                                  <td>{ticketNo}</td>
-                                  <td>
-                                    <div className="resultados-sim-balls resultados-balls">
-                                      {mains.map((n, i) => (
-                                        <span
-                                          key={`m-${idx}-${i}`}
-                                          className="resultados-ball"
-                                          style={
-                                            resultMainSet.has(Number(n))
-                                              ? { fontWeight: 700, border: '2px solid rgba(255,255,255,0.9)', opacity: 1 }
-                                              : { opacity: 0.45 }
-                                          }
-                                        >
-                                          {String(n).padStart(2, '0')}
-                                        </span>
-                                      ))}
-                                    </div>
-                                  </td>
-                                  <td>
-                                    <div className="resultados-sim-balls resultados-balls">
-                                      {stars.map((n, i) => (
-                                        <span
-                                          key={`s-${idx}-${i}`}
-                                          className="resultados-ball-star-wrap"
-                                          title="Estrella"
-                                          style={
-                                            resultStarSet.has(Number(n))
-                                              ? { opacity: 1 }
-                                              : { opacity: 0.45 }
-                                          }
-                                        >
-                                          <img src="/images/start.svg" alt="" className="resultados-star-img" aria-hidden />
-                                          <span
-                                            className="resultados-star-num"
-                                            style={
-                                              resultStarSet.has(Number(n))
-                                                ? { fontWeight: 700 }
-                                                : undefined
-                                            }
-                                          >
-                                            {String(n).padStart(2, '0')}
-                                          </span>
-                                        </span>
-                                      ))}
-                                    </div>
-                                  </td>
-                                  <td>{catName}</td>
-                                  <td>{prize ? `${prize.toFixed(2)} €` : '—'}</td>
-                                  <td>{runningPrize ? `${runningPrize.toFixed(2)} €` : '—'}</td>
-                                  <td>{costAcc.toFixed(2)} €</td>
-                                  <td>
-                                    <span
-                                      style={{
-                                        color:
-                                          gain > 0
-                                            ? 'var(--color-success, green)'
-                                            : gain < 0
-                                            ? 'var(--color-error, #c00)'
-                                            : 'inherit',
-                                      }}
-                                    >
-                                      {gain === 0
-                                        ? '0.00 €'
-                                        : `${gain > 0 ? '+' : ''}${gain.toFixed(2)} €`}
-                                    </span>
-                                  </td>
-                                </tr>
-                              );
-                              });
-                            })()}
-                          </tbody>
-                        </table>
+                        <div>
+                          <h4 style={{ margin: '0 0 0.25rem 0', fontSize: '0.95rem' }}>
+                            Predicción (pool con cutoff {compareProgress.cutoff_draw_id})
+                          </h4>
+                          <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--color-text-muted)' }}>
+                            {compareProgress.candidate_pool_count ??
+                              (compareProgress.candidate_pool?.length ?? 0)}{' '}
+                            boletos en el pool.
+                          </p>
+                        </div>
+
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.5rem',
+                            flexWrap: 'wrap',
+                          }}
+                        >
+                          <label
+                            className="form-label"
+                            style={{
+                              margin: 0,
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '0.5rem',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            <span>Ver</span>
+                            <select
+                              className="form-input"
+                              value={comparePoolLimit}
+                              onChange={(e) =>
+                                setComparePoolLimit(Math.max(1, Number(e.target.value) || 20))
+                              }
+                              style={{ width: '7rem' }}
+                            >
+                              {[10, 20, 30, 50, 100, 500, 1000, 3000].map((opt) => (
+                                <option key={opt} value={opt}>
+                                  {opt}
+                                </option>
+                              ))}
+                            </select>
+                            <span>boletos</span>
+                          </label>
+                          <button
+                            type="button"
+                            className="form-input"
+                            onClick={() => setShowComparePoolTable((v) => !v)}
+                            title={showComparePoolTable ? 'Ocultar tabla' : 'Ver tabla'}
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              padding: '0.35rem 0.5rem',
+                              minWidth: '2.5rem',
+                            }}
+                          >
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              width="18"
+                              height="18"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              aria-hidden
+                            >
+                              <rect x="3" y="4" width="18" height="16" rx="2" ry="2" />
+                              <line x1="3" y1="10" x2="21" y2="10" />
+                              <line x1="3" y1="16" x2="21" y2="16" />
+                              <line x1="9" y1="4" x2="9" y2="20" />
+                              <line x1="15" y1="4" x2="15" y2="20" />
+                            </svg>
+                          </button>
+                          <button
+                            type="button"
+                            className="form-input"
+                            onClick={openComparePoolGraph}
+                            title="Ver gráfico"
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              padding: '0.35rem 0.5rem',
+                              minWidth: '2.5rem',
+                            }}
+                          >
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              width="18"
+                              height="18"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              aria-hidden
+                            >
+                              <polyline points="3 17 9 11 13 15 21 7" />
+                              <polyline points="14 7 21 7 21 14" />
+                            </svg>
+                          </button>
+                        </div>
                       </div>
-                    );
-                  })()}
-              </>
+
+                      {(() => {
+                        const pool = compareProgress.candidate_pool ?? [];
+                        const limit = Math.min(comparePoolLimit, pool.length);
+                        const mainSet = new Set(compareDraw.main.map(Number));
+                        const starSet = new Set(compareDraw.stars.map(Number));
+                        const escrutinio = Array.isArray(compareDraw.escrutinio)
+                          ? (compareDraw.escrutinio as any[])
+                          : [];
+                        const prizeByHits = new Map<string, number>();
+                        escrutinio.forEach((row: any) => {
+                          // For Euromillones, "tipo" usually has the hits pattern like "5+2", "2+1", etc.
+                          const aciertos = String(
+                            row.tipo ?? row.aciertos ?? row.categoria ?? '',
+                          ).trim();
+                          const m = aciertos.match(/(\d+)\s*\+\s*(\d+)/);
+                          if (!m) return;
+                          const hm = Number(m[1]);
+                          const hs = Number(m[2]);
+                          if (!Number.isFinite(hm) || !Number.isFinite(hs)) return;
+                          const key = `${hm}-${hs}`;
+                          const premio = parseEuroPremio(row.premio);
+                          if (premio > 0) {
+                            prizeByHits.set(key, premio);
+                          }
+                        });
+                        let runningPrize = 0;
+                        const byPattern = new Map<
+                          string,
+                          { label: string; count: number; prizePerTicket: number; totalPrize: number }
+                        >();
+                        const rows = pool.slice(0, limit).map((t, idx) => {
+                                  const mains = (t.mains ?? []).map(Number);
+                                  const stars = (t.stars ?? []).map(Number);
+                                  const hitsMain = mains.filter((n) => mainSet.has(n)).length;
+                                  const hitsStar = stars.filter((n) => starSet.has(n)).length;
+                                  const ticketNo = idx + 1;
+                                  const costAcc = ticketNo * TICKET_BUDGET_EUR;
+                                  const prizePerTicket =
+                                    prizeByHits.get(`${hitsMain}-${hitsStar}`) ?? 0;
+                                  runningPrize += prizePerTicket;
+                                  const earning = runningPrize - costAcc;
+                                  const patternKey = `${hitsMain}+${hitsStar}`;
+                                  if (!byPattern.has(patternKey)) {
+                                    byPattern.set(patternKey, {
+                                      label:
+                                        prizePerTicket > 0
+                                          ? `${patternKey} · ${prizePerTicket.toFixed(2)} €`
+                                          : patternKey,
+                                      count: 0,
+                                      prizePerTicket,
+                                      totalPrize: 0,
+                                    });
+                                  }
+                                  const agg = byPattern.get(patternKey)!;
+                                  agg.count += 1;
+                                  agg.totalPrize += prizePerTicket;
+                                  return (
+                                    <tr key={`${idx}-${mains.join('-')}-${stars.join('-')}`}>
+                                      <td>{ticketNo}</td>
+                                      <td>
+                                        <div
+                                          style={{
+                                            display: 'flex',
+                                            flexWrap: 'wrap',
+                                            alignItems: 'center',
+                                            gap: 6,
+                                          }}
+                                        >
+                                          <div className="resultados-balls">
+                                            {mains.map((n, i) => (
+                                              <span
+                                                key={`m-${idx}-${i}`}
+                                                className="resultados-ball"
+                                                style={
+                                                  mainSet.has(n)
+                                                    ? {
+                                                        fontWeight: 700,
+                                                        border: '2px solid rgba(255,255,255,0.9)',
+                                                        opacity: 1,
+                                                      }
+                                                    : { opacity: 0.45 }
+                                                }
+                                              >
+                                                {String(n).padStart(2, '0')}
+                                              </span>
+                                            ))}
+                                          </div>
+                                          <div className="resultados-balls">
+                                            {stars.map((n, i) => (
+                                              <span
+                                                key={`s-${idx}-${i}`}
+                                                className="resultados-ball-star-wrap"
+                                                title="Estrella"
+                                                style={starSet.has(n) ? { opacity: 1 } : { opacity: 0.45 }}
+                                              >
+                                                <img
+                                                  src="/images/start.svg"
+                                                  alt=""
+                                                  className="resultados-star-img"
+                                                  aria-hidden
+                                                />
+                                                <span
+                                                  className="resultados-star-num"
+                                                  style={starSet.has(n) ? { fontWeight: 700 } : undefined}
+                                                >
+                                                  {String(n).padStart(2, '0')}
+                                                </span>
+                                              </span>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      </td>
+                                      <td>
+                                        {hitsMain}+{hitsStar}
+                                        {prizePerTicket
+                                          ? ` · ${prizePerTicket.toFixed(2)} €`
+                                          : ''}
+                                      </td>
+                                      <td>{costAcc.toFixed(2)} €</td>
+                                      <td>{`${runningPrize.toFixed(2)} €`}</td>
+                                      <td>
+                                        <span
+                                          style={{
+                                            color:
+                                              earning > 0
+                                                ? 'var(--color-success, green)'
+                                                : earning < 0
+                                                ? 'var(--color-error, #c00)'
+                                                : 'inherit',
+                                          }}
+                                        >
+                                          {earning === 0
+                                            ? '0.00 €'
+                                            : `${earning > 0 ? '+' : ''}${earning.toFixed(2)} €`}
+                                        </span>
+                                      </td>
+                                    </tr>
+                                  );
+                                });
+                        const totalCost = limit * TICKET_BUDGET_EUR;
+                        const totalPrize = runningPrize;
+                        const totalEarning = totalPrize - totalCost;
+                        return (
+                          <div style={{ marginTop: 'var(--space-md)' }}>
+                            <div className="resultados-features-table-wrap" style={{ marginBottom: 'var(--space-md)' }}>
+                              <table className="resultados-features-table">
+                                <thead>
+                                  <tr>
+                                    <th>Aciertos / premio</th>
+                                    <th>Count</th>
+                                    <th>Earning</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {Array.from(byPattern.entries())
+                                    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+                                    .map(([key, agg]) => (
+                                      <tr key={key}>
+                                        <td>{agg.label}</td>
+                                        <td>{agg.count}</td>
+                                        <td>{agg.totalPrize.toFixed(2)} €</td>
+                                      </tr>
+                                    ))}
+                                </tbody>
+                              </table>
+                            </div>
+
+                            {showComparePoolTable && (
+                              <div className="resultados-features-table-wrap">
+                                <table className="resultados-features-table">
+                                  <thead>
+                                    <tr>
+                                      <th style={{ width: 60 }}>#</th>
+                                      <th>Boletos (pool)</th>
+                                      <th style={{ width: 180 }}>Aciertos / premio</th>
+                                      <th style={{ width: 150 }}>Coste acumulado</th>
+                                      <th style={{ width: 150 }}>Premio acumulado</th>
+                                      <th style={{ width: 150 }}>Ganancia</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>{rows}</tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </section>
+
+                <section className="euromillones-compare-card-col">
+                  {compareDraw && (
+                    <>
+                      <div className="euromillones-train-current-draw-card euromillones-compare-result-card">
+                        <div
+                          style={{
+                            fontSize: '0.75rem',
+                            color: 'var(--color-text-muted)',
+                            marginBottom: 'var(--space-xs)',
+                            textTransform: 'uppercase',
+                            letterSpacing: '0.04em',
+                          }}
+                        >
+                          Resultado real (sorteo {compareDraw.id_sorteo})
+                        </div>
+                        {compareDraw.fecha_sorteo && (
+                          <div
+                            style={{
+                              fontSize: '0.9rem',
+                              fontWeight: 600,
+                              marginBottom: 'var(--space-sm)',
+                            }}
+                          >
+                            {compareDraw.fecha_sorteo}
+                          </div>
+                        )}
+                        <div
+                          style={{
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            gap: 6,
+                            alignItems: 'center',
+                            marginBottom: 'var(--space-xs)',
+                          }}
+                        >
+                          {(compareDraw.main.length ? compareDraw.main : []).map((n) => (
+                            <span
+                              key={n}
+                              className="resultados-ball resultados-train-draw-ball"
+                              style={{ width: 28, height: 28, fontSize: '0.8rem' }}
+                            >
+                              {String(n).padStart(2, '0')}
+                            </span>
+                          ))}
+                        </div>
+                        <div
+                          style={{
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            gap: 6,
+                            alignItems: 'center',
+                          }}
+                        >
+                          {(compareDraw.stars.length ? compareDraw.stars : []).map((n) => (
+                            <span
+                              key={n}
+                              className="resultados-ball-star-wrap"
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}
+                            >
+                              <img
+                                src="/images/start.svg"
+                                alt=""
+                                className="resultados-star-img"
+                                aria-hidden
+                                style={{ width: 18, height: 18 }}
+                              />
+                              <span
+                                className="resultados-ball resultados-train-draw-ball"
+                                style={{ width: 28, height: 28, fontSize: '0.8rem' }}
+                              >
+                                {String(n).padStart(2, '0')}
+                              </span>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      {compareProgress && (
+                        (() => {
+                          const pool = compareProgress.candidate_pool ?? [];
+                          const limit = Math.min(comparePoolLimit, pool.length);
+                          const mainSet = new Set(compareDraw.main.map(Number));
+                          const starSet = new Set(compareDraw.stars.map(Number));
+                          const escrutinio = Array.isArray(compareDraw.escrutinio)
+                            ? (compareDraw.escrutinio as any[])
+                            : [];
+                          const prizeByHits = new Map<string, number>();
+                          escrutinio.forEach((row: any) => {
+                            const aciertos = String(
+                              row.tipo ?? row.aciertos ?? row.categoria ?? '',
+                            ).trim();
+                            const m = aciertos.match(/(\d+)\s*\+\s*(\d+)/);
+                            if (!m) return;
+                            const hm = Number(m[1]);
+                            const hs = Number(m[2]);
+                            if (!Number.isFinite(hm) || !Number.isFinite(hs)) return;
+                            const key = `${hm}-${hs}`;
+                            const premio = parseEuroPremio(row.premio);
+                            if (premio > 0) {
+                              prizeByHits.set(key, premio);
+                            }
+                          });
+                          let runningPrize = 0;
+                          pool.slice(0, limit).forEach((t) => {
+                            const mains = (t.mains ?? []).map(Number);
+                            const stars = (t.stars ?? []).map(Number);
+                            const hitsMain = mains.filter((n) => mainSet.has(n)).length;
+                            const hitsStar = stars.filter((n) => starSet.has(n)).length;
+                            const prizePerTicket =
+                              prizeByHits.get(`${hitsMain}-${hitsStar}`) ?? 0;
+                            runningPrize += prizePerTicket;
+                          });
+                          const totalCost = limit * TICKET_BUDGET_EUR;
+                          const totalPrize = runningPrize;
+                          const totalEarning = totalPrize - totalCost;
+                          return (
+                            <div
+                              className="euromillones-train-current-draw-card"
+                              style={{ marginTop: 'var(--space-md)', padding: 'var(--space-md)' }}
+                            >
+                              <div
+                                style={{
+                                  fontSize: '0.75rem',
+                                  color: 'var(--color-text-muted)',
+                                  marginBottom: 'var(--space-xs)',
+                                  textTransform: 'uppercase',
+                                  letterSpacing: '0.04em',
+                                }}
+                              >
+                                Resumen de {limit} boletos
+                              </div>
+                              <div style={{ fontSize: '0.9rem', display: 'grid', rowGap: 4 }}>
+                                <div>
+                                  <strong>Boletos seleccionados</strong> {limit}
+                                </div>
+                                <div>
+                                  <strong>Coste total</strong> {totalCost.toFixed(2)} €
+                                </div>
+                                <div>
+                                  <strong>Premio total</strong> {totalPrize.toFixed(2)} €
+                                </div>
+                                <div>
+                                  <strong>Ganancia</strong>{' '}
+                                  <span
+                                    style={{
+                                      color:
+                                        totalEarning > 0
+                                          ? 'var(--color-success, green)'
+                                          : totalEarning < 0
+                                          ? 'var(--color-error, #c00)'
+                                          : 'inherit',
+                                    }}
+                                  >
+                                    {totalEarning === 0
+                                      ? '0.00 €'
+                                      : `${totalEarning > 0 ? '+' : ''}${totalEarning.toFixed(
+                                          2,
+                                        )} €`}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })()
+                      )}
+                    </>
+                  )}
+                </section>
+              </div>
             )}
-          </section>
+          </>
         )}
 
         {slug === 'euromillones' && view === 'pred' && (
@@ -1351,7 +1709,7 @@ export function SimulationPage() {
         )}
       </div>
 
-      {slug === 'euromillones' && (
+      {slug === 'euromillones' && view !== 'compare' && (
         <aside
           className="resultados-page-sidebar resultados-theme-euromillones"
           style={{

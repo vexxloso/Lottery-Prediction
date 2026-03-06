@@ -24,6 +24,10 @@
   animation: fadeIn 0.35s ease-out;
 }
 
+.resultados-page--single {
+  grid-template-columns: 1fr;
+}
+
 .resultados-page-sidebar {
   min-width: 0;
 }
@@ -476,6 +480,75 @@
   border-top-color: var(--color-border);
 }
 
+/* Current draw card (separate card below step card) */
+.euromillones-train-current-draw-card {
+  background: var(--resultados-card-bg, var(--color-surface));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.08);
+}
+[data-theme="light"] .euromillones-train-current-draw-card {
+  background: var(--color-surface);
+  border-color: var(--color-border);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04);
+}
+.euromillones-train-current-draw-card .resultados-train-draw-ball {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Euromillones compare page: split table (19) and card (5) */
+.euromillones-compare-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 19fr) minmax(0, 5fr);
+  gap: var(--space-lg);
+  align-items: flex-start;
+  margin-top: var(--space-lg);
+}
+
+.euromillones-compare-table-col {
+  min-width: 0;
+}
+
+.euromillones-compare-card-col {
+  min-width: 0;
+}
+
+.euromillones-compare-card-col .euromillones-compare-result-card {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-md);
+}
+
+/* Smaller balls inside compare pool table */
+.euromillones-compare-table-col .resultados-balls .resultados-ball {
+  width: 26px;
+  height: 26px;
+  font-size: 0.75rem;
+}
+
+.euromillones-compare-table-col .resultados-balls .resultados-ball-star-wrap .resultados-star-img {
+  width: 14px;
+  height: 14px;
+}
+
+.euromillones-compare-table-col .resultados-balls .resultados-star-num {
+  font-size: 0.7rem;
+}
+
+@media (max-width: 900px) {
+  .euromillones-compare-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .euromillones-compare-table-col,
+  .euromillones-compare-card-col {
+    width: 100%;
+  }
+}
+
 /* Euromillones train: mobile responsive */
 @media (max-width: 768px) {
   .euromillones-train-split.card {
@@ -869,6 +942,15 @@
   width: 20px;
   height: 20px;
   display: block;
+}
+
+.resultados-features-compare-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--color-text);
 }
 
 /* Last 10 draws heatmap: X = number, Y = draw (date) */

@@ -43,6 +43,7 @@ from train_euromillones_model import (
     train_euromillones_models,
     compute_euromillones_probabilities,
 )
+from itertools import combinations
 
 
 def build_step4_pool(
@@ -73,23 +74,35 @@ def build_step4_pool(
     rules_used: List[str] = []
     excluded = {"mains": [], "stars": []}
 
-    # --- 3 mains + 1 star from previous draw or random ---
-    if prev_main_numbers and len(prev_main_numbers) >= 3 and prev_star_numbers and len(prev_star_numbers) >= 1:
+    # --- 4–5 mains + 1 star from previous draw or random ---
+    # Mains: choose a random count in {4, 5} from previous draw mains (or random fallback).
+    if prev_main_numbers and len(prev_main_numbers) >= 4 and prev_star_numbers and len(prev_star_numbers) >= 1:
         pick_mains = list(prev_main_numbers)[:5]
         pick_stars = list(prev_star_numbers)[:2]
-        three_mains = random.sample(pick_mains, min(3, len(pick_mains)))
+        prev_count = 5 if len(pick_mains) >= 5 else len(pick_mains)
+        # Randomly choose 4 or 5, but not more than we actually have.
+        target_prev = random.choice([4, 5])
+        target_prev = min(target_prev, prev_count)
+        base_mains = random.sample(pick_mains, target_prev)
         one_star = random.sample(pick_stars, 1)[0]
-        rules_used.append("from_previous_draw")
+        rules_used.append(f"from_previous_draw_{target_prev}m_1s")
     else:
-        three_mains = random.sample(range(MAIN_MIN, MAIN_MAX + 1), 3)
+        target_prev = random.choice([4, 5])
+        base_mains = random.sample(range(MAIN_MIN, MAIN_MAX + 1), target_prev)
         one_star = random.randint(STAR_MIN, STAR_MAX)
-        rules_used.append("random_3m_1s")
+        rules_used.append(f"random_{target_prev}m_1s")
 
-    main_set = set(three_mains)
+    main_set = set(base_mains)
     star_set = {one_star}
 
-    # --- 17 mains from ranking bands: random selection within each band (no duplicate with the 3) ---
-    def take_random_from_ranking(ranking: List[Dict], start_1based: int, end_1based: int, count: int, exclude: set) -> List[Dict]:
+    # --- Mains from ranking bands: random counts within requested ranges (no duplicate with the previous mains) ---
+    def take_random_from_ranking(
+        ranking: List[Dict],
+        start_1based: int,
+        end_1based: int,
+        count: int,
+        exclude: set,
+    ) -> List[Dict]:
         segment = [x for x in ranking[start_1based - 1 : end_1based] if int(x.get("number") or 0) not in exclude]
         if len(segment) <= count:
             chosen = list(segment)
@@ -99,14 +112,21 @@ def build_step4_pool(
             exclude.add(int(item.get("number") or 0))
         return chosen
 
-    from_1_20 = take_random_from_ranking(mains_ranking, 1, 20, 8, main_set)
+    # User-requested distribution:
+    # - From pre-draw: 4–5 mains (handled above as base_mains)
+    # - From ranks 1–20: select between 6 and 7 numbers (randomly)
+    # - From ranks 21–30: select 3
+    # - From ranks 31–40: select 3
+    # - From ranks 41–50: select 3
+    top_count = random.choice([6, 7])
+    from_1_20 = take_random_from_ranking(mains_ranking, 1, 20, top_count, main_set)
     from_21_30 = take_random_from_ranking(mains_ranking, 21, 30, 3, main_set)
     from_31_40 = take_random_from_ranking(mains_ranking, 31, 40, 3, main_set)
     from_41_50 = take_random_from_ranking(mains_ranking, 41, 50, 3, main_set)
-    rules_used.append("mains_ranking_bands_8_3_3_3")
+    rules_used.append(f"mains_ranking_bands_prev_{len(base_mains)}_top_{top_count}_3_3_3")
 
     filtered_mains_items: List[Dict] = []
-    for n in three_mains:
+    for n in base_mains:
         p = next((x.get("p") for x in mains_probs if int(x.get("number") or 0) == n), 0.0)
         filtered_mains_items.append({"number": n, "p": p})
     for seg in (from_1_20, from_21_30, from_31_40, from_41_50):
@@ -125,6 +145,10 @@ def build_step4_pool(
     filtered_stars_items.extend(from_star_7_12)
     filtered_stars = filtered_stars_items[:4]
 
+    # Randomly reorder mains and stars so Step 5 receives a shuffled pool.
+    random.shuffle(filtered_mains)
+    random.shuffle(filtered_stars)
+
     def _stats(rows: List[Dict]) -> Dict:
         nums = [int(r.get("number") or 0) for r in rows]
         return {
@@ -141,6 +165,8 @@ def build_step4_pool(
         "rules_used": rules_used,
         "excluded": excluded,
         "stats": stats,
+        "snapshot_mains": base_mains,
+        "snapshot_stars": [one_star],
     }
 
 try:
@@ -789,6 +815,25 @@ def get_draws(
     return JSONResponse(content={"draws": all_draws, "total": total})
 
 
+@app.get("/api/euromillones/draw")
+def get_euromillones_draw_by_id(
+    draw_id: str | None = Query(None, description="id_sorteo of the draw."),
+):
+    """Return one Euromillones draw by id_sorteo (escrutinio, combinacion_acta, numbers, main/star)."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not draw_id or not draw_id.strip():
+        raise HTTPException(400, detail="draw_id is required")
+    cid = draw_id.strip()
+    doc = db["euromillones"].find_one({"id_sorteo": cid})
+    if doc is None and cid.isdigit():
+        doc = db["euromillones"].find_one({"id_sorteo": int(cid)})
+    if not doc:
+        raise HTTPException(404, detail="Draw not found")
+    draw = _build_draw(doc, "EMIL")
+    return JSONResponse(content=draw)
+
+
 @app.get("/api/debug/euromillones-one")
 def debug_euromillones_one():
     """Return one raw document from euromillones to verify combinacion_acta and escrutinio."""
@@ -1098,6 +1143,8 @@ def api_euromillones_rule_filters(
                     "rules_used": result["rules_used"],
                     "excluded": result["excluded"],
                     "stats": result.get("stats"),
+                    "snapshot_mains": result.get("snapshot_mains"),
+                    "snapshot_stars": result.get("snapshot_stars"),
                 },
             }
         },
@@ -1142,11 +1189,25 @@ def api_euromillones_candidate_pool(
     star_nums = [int(x.get("number") or 0) for x in filtered_stars if x.get("number") is not None]
     if len(main_nums) < 5 or len(star_nums) < 2:
         raise HTTPException(400, detail="Pool too small: need at least 5 mains and 2 stars.")
+
+    # Step 5: build a simple wheeling system from the Step 4 pool.
+    # Generate mains combinations in a structured way (no duplicates),
+    # then pair them with star pairs in round-robin fashion.
+    unique_mains_combos = list(combinations(sorted(set(main_nums)), 5))
+    random.shuffle(unique_mains_combos)
+    max_mains = min(len(unique_mains_combos), num_tickets)
+    mains_combos = unique_mains_combos[:max_mains]
+
+    star_pairs = list(combinations(sorted(set(star_nums)), 2))
+    if not star_pairs:
+        raise HTTPException(400, detail="Pool too small: need at least 2 distinct stars.")
+    random.shuffle(star_pairs)
+
     tickets: List[Dict] = []
-    for _ in range(num_tickets):
-        mains = random.sample(main_nums, min(5, len(main_nums)))
-        stars = random.sample(star_nums, min(2, len(star_nums)))
-        tickets.append({"mains": sorted(mains), "stars": sorted(stars)})
+    for idx, mains in enumerate(mains_combos):
+        pair = star_pairs[idx % len(star_pairs)]
+        tickets.append({"mains": list(mains), "stars": list(pair)})
+
     now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     coll.update_one(
         {"cutoff_draw_id": cid},

@@ -67,4 +67,21 @@ i will selete 20 main_number and 3 star_number pool
 
 so step 4 result is 20 main number and 4 star number
 
+find one draw euromillones collection with current id == id_sorteo -> escrutinio, main, star number
+find one data from euromillones_train_progress collection with current pre id == cutoff_draw_id -> candidate pool
 
+and compare prediction & real result 
+also make one card and dispaly now main number and star number
+
+Aciertos / premio | count | earning
+2+1 · 5.14 € | 2 | 10.28
+1+1 | 1 | 0
+1+0 | 1 | 0
+0+2 | 1 | 0
+0+1 | 4 | 0
+0+0 | 1 | 0
+
+i have to create el-gordo generate ticket system and cpmpare system like Euromillones
+but there is some difference so i will implement one by one with you
+so you have to lead me like Euromillones and i will confirm same or not and i will give you what changed 
+where can we start this work?

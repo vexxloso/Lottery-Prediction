@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Drawer, Row, Col } from 'antd';
 import {
   ResponsiveContainer,
@@ -269,6 +269,7 @@ export function EuromillonesFeaturesPanel() {
   const { rows: last10Rows, loading: last10Loading } = useEuromillonesLast10();
 
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const [selectedRow, setSelectedRow] = useState<EuromillonesFeatureRow | null>(null);
   const [chartMode, setChartMode] = useState<'frequency' | 'gap'>('frequency');
 
@@ -286,6 +287,18 @@ export function EuromillonesFeaturesPanel() {
       params.delete('cutoff_draw_id');
     }
     setSearchParams(params, { replace: true });
+  };
+
+  const goToCompare = (row: EuromillonesFeatureRow) => {
+    const currentId = row.id_sorteo;
+    const prevId = row.pre_id_sorteo ?? undefined;
+    if (!currentId || !prevId) return;
+    const date = (row.fecha_sorteo ?? '').split(' ')[0];
+    const params = new URLSearchParams();
+    params.set('view', 'compare');
+    params.set('prev_id', prevId);
+    if (date) params.set('date', date);
+    navigate(`/simulacion/euromillones/${encodeURIComponent(currentId)}?${params.toString()}`);
   };
 
   return (
@@ -350,7 +363,17 @@ export function EuromillonesFeaturesPanel() {
                           aria-label="Usar este sorteo como corte de backtesting"
                           title="Usar este sorteo como corte de backtesting"
                         >
-                          P
+                          <img src="/images/start.svg" alt="" className="resultados-features-icon" />
+                        </button>
+                        <button
+                          type="button"
+                          className="resultados-features-iconbtn"
+                          style={{ marginLeft: 8 }}
+                          onClick={() => goToCompare(row)}
+                          aria-label="Comparar sorteo actual con anterior"
+                          title="Comparar sorteo actual con anterior"
+                        >
+                          <span className="resultados-features-icon resultados-features-compare-icon" aria-hidden>⇄</span>
                         </button>
                       </td>
                     </tr>
