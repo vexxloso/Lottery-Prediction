@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
 import { Drawer, Row, Col } from 'antd';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ResponsiveContainer,
   BarChart,
@@ -280,9 +281,35 @@ export function ElGordoFeatureModelPanel() {
 
   const { rows: last10Rows, loading: last10Loading } = useElGordoLast10();
 
+  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
+
   const openDrawer = (row: ElGordoFeatureModelRow, mode: 'frequency' | 'gap') => {
     setSelectedRow(row);
     setChartMode(mode);
+  };
+
+  const goToPredictionBacktest = (row: ElGordoFeatureModelRow) => {
+    const params = new URLSearchParams(searchParams);
+    params.set('tab', 'prediction');
+    if (row.id_sorteo) {
+      params.set('cutoff_draw_id', row.id_sorteo);
+    } else {
+      params.delete('cutoff_draw_id');
+    }
+    setSearchParams(params, { replace: true });
+  };
+
+  const goToCompare = (row: ElGordoFeatureModelRow) => {
+    const currentId = row.id_sorteo;
+    const prevId = row.pre_id_sorteo ?? undefined;
+    if (!currentId || !prevId) return;
+    const date = (row.fecha_sorteo ?? '').split(' ')[0];
+    const params = new URLSearchParams();
+    params.set('view', 'compare');
+    params.set('prev_id', prevId);
+    if (date) params.set('date', date);
+    navigate(`/simulacion/el-gordo/${encodeURIComponent(currentId)}?${params.toString()}`);
   };
 
   return (
@@ -342,6 +369,26 @@ export function ElGordoFeatureModelPanel() {
                           title="Ver gráfico de gaps"
                         >
                           <img src="/images/gape.svg" alt="" className="resultados-features-icon" />
+                        </button>
+                        <button
+                          type="button"
+                          className="resultados-features-iconbtn"
+                          style={{ marginLeft: 8 }}
+                          onClick={() => goToPredictionBacktest(row)}
+                          aria-label="Usar este sorteo como corte de backtesting"
+                          title="Usar este sorteo como corte de backtesting"
+                        >
+                          <img src="/images/start.svg" alt="" className="resultados-features-icon" />
+                        </button>
+                        <button
+                          type="button"
+                          className="resultados-features-iconbtn"
+                          style={{ marginLeft: 8 }}
+                          onClick={() => goToCompare(row)}
+                          aria-label="Comparar sorteo actual con anterior"
+                          title="Comparar sorteo actual con anterior"
+                        >
+                          <span className="resultados-features-icon resultados-features-compare-icon" aria-hidden>⇄</span>
                         </button>
                       </td>
                     </tr>

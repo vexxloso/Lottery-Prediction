@@ -43,6 +43,11 @@ from train_euromillones_model import (
     train_euromillones_models,
     compute_euromillones_probabilities,
 )
+from train_el_gordo_model import (
+    prepare_el_gordo_dataset,
+    train_el_gordo_models,
+    compute_el_gordo_probabilities,
+)
 from itertools import combinations
 
 
@@ -77,7 +82,7 @@ def build_step4_pool(
     # --- 4–5 mains + 1 star from previous draw or random ---
     # Mains: choose a random count in {4, 5} from previous draw mains (or random fallback).
     if prev_main_numbers and len(prev_main_numbers) >= 4 and prev_star_numbers and len(prev_star_numbers) >= 1:
-        pick_mains = list(prev_main_numbers)[:5]
+        pick_mains = list(prev_main_numbers)[:5] 
         pick_stars = list(prev_star_numbers)[:2]
         prev_count = 5 if len(pick_mains) >= 5 else len(pick_mains)
         # Randomly choose 4 or 5, but not more than we actually have.
@@ -167,6 +172,129 @@ def build_step4_pool(
         "stats": stats,
         "snapshot_mains": base_mains,
         "snapshot_stars": [one_star],
+    }
+
+
+def build_el_gordo_step4_pool(
+    mains_probs: List[Dict],
+    clave_probs: List[Dict],
+    prev_main_numbers: Optional[List[int]] = None,
+    prev_clave: Optional[int] = None,
+    seed: Optional[int] = None,
+) -> Dict:
+    """
+    Step 4 pool for El Gordo: mains + clave candidates.
+
+    - 4–5 mains + 1 clave from previous draw (prev_main_numbers, prev_clave) if available,
+      else random. No duplicate with the rest.
+    - Additional mains from Step 3 ranking bands (mains_probs sorted by p), no duplicate:
+        * From 1st–20th select 6–7 (random)
+        * From 21st–30th select 3
+        * From 31st–40th select 3
+        * From 41st–54th select 3
+      Final mains list is truncated to 20 if longer.
+    - Clave pool:
+        * 1 clave from previous draw (snapshot) if available, else random
+        * Up to 3 additional claves from ranking (clave_probs sorted by p), no duplicate
+      Final clave list is truncated to 4.
+    """
+    if seed is not None:
+        random.seed(seed)
+    MAIN_MIN, MAIN_MAX = 1, 54
+    CLAVE_MIN, CLAVE_MAX = 0, 9
+    mains_ranking = sorted(mains_probs, key=lambda x: (x.get("p") or 0), reverse=True)
+    clave_ranking = sorted(clave_probs, key=lambda x: (x.get("p") or 0), reverse=True)
+    rules_used: List[str] = []
+    excluded = {"mains": [], "clave": []}
+
+    # --- 4–5 mains + 1 clave from previous draw or random ---
+    if prev_main_numbers and len(prev_main_numbers) >= 4 and isinstance(prev_clave, int):
+        pick_mains = list(prev_main_numbers)[:5]
+        prev_count = 5 if len(pick_mains) >= 5 else len(pick_mains)
+        target_prev = random.choice([4, 5])
+        target_prev = min(target_prev, prev_count)
+        base_mains = random.sample(pick_mains, target_prev)
+        base_clave = int(prev_clave)
+        rules_used.append(f"from_previous_draw_{target_prev}m_1c")
+    else:
+        target_prev = random.choice([4, 5])
+        base_mains = random.sample(range(MAIN_MIN, MAIN_MAX + 1), target_prev)
+        base_clave = random.randint(CLAVE_MIN, CLAVE_MAX)
+        rules_used.append(f"random_{target_prev}m_1c")
+
+    main_set = set(base_mains)
+    clave_set = {base_clave}
+
+    # --- Mains from ranking bands (avoid duplicates with snapshot mains) ---
+    def take_random_from_ranking(
+        ranking: List[Dict],
+        start_1based: int,
+        end_1based: int,
+        count: int,
+        exclude: set,
+    ) -> List[Dict]:
+        segment = [
+            x
+            for x in ranking[start_1based - 1 : end_1based]
+            if int(x.get("number") or 0) not in exclude
+        ]
+        if len(segment) <= count:
+            chosen = list(segment)
+        else:
+            chosen = random.sample(segment, count)
+        for item in chosen:
+            exclude.add(int(item.get("number") or 0))
+        return chosen
+
+    top_count = random.choice([6, 7])
+    from_1_20 = take_random_from_ranking(mains_ranking, 1, 20, top_count, main_set)
+    from_21_30 = take_random_from_ranking(mains_ranking, 21, 30, 3, main_set)
+    from_31_40 = take_random_from_ranking(mains_ranking, 31, 40, 3, main_set)
+    from_41_54 = take_random_from_ranking(mains_ranking, 41, 54, 3, main_set)
+    rules_used.append(f"el_gordo_mains_bands_prev_{len(base_mains)}_top_{top_count}_3_3_3")
+
+    filtered_mains_items: List[Dict] = []
+    for n in base_mains:
+        p = next((x.get("p") for x in mains_probs if int(x.get("number") or 0) == n), 0.0)
+        filtered_mains_items.append({"number": n, "p": p})
+    for seg in (from_1_20, from_21_30, from_31_40, from_41_54):
+        filtered_mains_items.extend(seg)
+    filtered_mains = filtered_mains_items[:20]
+
+    # --- Clave pool: snapshot + top ranking claves (avoid duplicates) ---
+    filtered_clave_items: List[Dict] = []
+    p_clave = next(
+        (x.get("p") for x in clave_probs if int(x.get("number") or 0) == base_clave), 0.0
+    )
+    filtered_clave_items.append({"number": base_clave, "p": p_clave})
+
+    extras = [x for x in clave_ranking if int(x.get("number") or 0) not in clave_set]
+    max_extras = max(0, 4 - len(filtered_clave_items))
+    filtered_clave_items.extend(extras[:max_extras])
+    filtered_clave = filtered_clave_items[:4]
+
+    # Randomly reorder mains and clave so Step 5 receives shuffled pools.
+    random.shuffle(filtered_mains)
+    random.shuffle(filtered_clave)
+
+    def _stats(rows: List[Dict]) -> Dict:
+        nums = [int(r.get("number") or 0) for r in rows]
+        return {
+            "count": len(nums),
+            "sum": sum(nums),
+            "even": sum(1 for n in nums if n % 2 == 0),
+            "odd": sum(1 for n in nums if n % 2 != 0),
+        }
+
+    stats = {"mains": _stats(filtered_mains), "clave": _stats(filtered_clave)}
+    return {
+        "filtered_mains": filtered_mains,
+        "filtered_clave": filtered_clave,
+        "rules_used": rules_used,
+        "excluded": excluded,
+        "stats": stats,
+        "snapshot_mains": base_mains,
+        "snapshot_clave": [base_clave],
     }
 
 try:
@@ -265,6 +393,7 @@ SITE_ORIGIN = "https://www.loteriasyapuestas.es"
 COLLECTIONS = {"LAPR": "la_primitiva", "EMIL": "euromillones", "ELGR": "el_gordo"}
 METADATA_COLLECTION = "scraper_metadata"
 EUROMILLONES_TRAIN_PROGRESS_COLLECTION = "euromillones_train_progress"
+EL_GORDO_TRAIN_PROGRESS_COLLECTION = "el_gordo_train_progress"
 
 logger = logging.getLogger("lottery")
 
@@ -284,6 +413,7 @@ async def lifespan(app: FastAPI):
     for coll_name in COLLECTIONS.values():
         db[coll_name].create_index("id_sorteo", unique=True)
     db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
+    db[EL_GORDO_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
     yield
     if client:
         client.close()
@@ -834,6 +964,26 @@ def get_euromillones_draw_by_id(
     return JSONResponse(content=draw)
 
 
+@app.get("/api/el-gordo/draw")
+def get_el_gordo_draw_by_id(
+    draw_id: str | None = Query(None, description="id_sorteo of the El Gordo draw."),
+):
+    """Return one El Gordo draw by id_sorteo (escrutinio, combinacion_acta, numbers, main/clave)."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not draw_id or not draw_id.strip():
+        raise HTTPException(400, detail="draw_id is required")
+    cid = draw_id.strip()
+    coll = db["el_gordo"]
+    doc = coll.find_one({"id_sorteo": cid})
+    if doc is None and cid.isdigit():
+        doc = coll.find_one({"id_sorteo": int(cid)})
+    if not doc:
+        raise HTTPException(404, detail="Draw not found")
+    draw = _build_draw(doc, "ELGR")
+    return JSONResponse(content=draw)
+
+
 @app.get("/api/debug/euromillones-one")
 def debug_euromillones_one():
     """Return one raw document from euromillones to verify combinacion_acta and escrutinio."""
@@ -1001,6 +1151,345 @@ def api_euromillones_prepare_dataset(
             upsert=True,
         )
     return JSONResponse(content={"status": "ok", "info": info})
+
+
+@app.get("/api/el-gordo/train/progress")
+def api_el_gordo_train_progress(
+    cutoff_draw_id: str | None = Query(None, description="id_sorteo for this training run (El Gordo)."),
+):
+    """Return El Gordo training progress for the given cutoff_draw_id (dataset prepared, models trained)."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        return JSONResponse(
+            content={"progress": None},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one({"cutoff_draw_id": cutoff_draw_id.strip()})
+    if not doc:
+        return JSONResponse(
+            content={"progress": None},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    progress = {
+        "cutoff_draw_id": doc.get("cutoff_draw_id"),
+        "dataset_prepared": bool(doc.get("dataset_prepared")),
+        "dataset_prepared_at": doc.get("dataset_prepared_at"),
+        "main_rows": doc.get("main_rows"),
+        "clave_rows": doc.get("clave_rows"),
+        "models_trained": bool(doc.get("models_trained")),
+        "trained_at": doc.get("trained_at"),
+        "main_accuracy": doc.get("main_accuracy"),
+        "clave_accuracy": doc.get("clave_accuracy"),
+        "probs_computed": bool(doc.get("probs_computed")),
+        "probs_computed_at": doc.get("probs_computed_at"),
+        "mains_probs": doc.get("mains_probs"),
+        "clave_probs": doc.get("clave_probs"),
+        "probs_draw_id": doc.get("probs_draw_id"),
+        "probs_fecha_sorteo": doc.get("probs_fecha_sorteo"),
+        "rules_applied": bool(doc.get("rules_applied")),
+        "rules_applied_at": doc.get("rules_applied_at"),
+        "filtered_mains_probs": doc.get("filtered_mains_probs"),
+        "filtered_clave_probs": doc.get("filtered_clave_probs"),
+        "rule_flags": doc.get("rule_flags"),
+        "candidate_pool": doc.get("candidate_pool"),
+        "candidate_pool_at": doc.get("candidate_pool_at"),
+        "candidate_pool_count": doc.get("candidate_pool_count"),
+    }
+    return JSONResponse(
+        content={"progress": progress},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.post("/api/el-gordo/train/prepare-dataset")
+def api_el_gordo_prepare_dataset(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="Optional id_sorteo: only draws up to this one (inclusive) are used to build the dataset.",
+    ),
+):
+    """
+    Build / refresh the El Gordo per-number training datasets from
+    `el_gordo_feature`.
+
+    This calls `scripts/train_el_gordo_model.prepare_el_gordo_dataset`
+    inside the backend process and returns basic metadata so the UI can show
+    where the CSV files were written. Saves progress to el_gordo_train_progress.
+    """
+    try:
+        info = prepare_el_gordo_dataset(cutoff_draw_id=cutoff_draw_id, out_dir=None)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error while preparing El Gordo dataset: {e!s}",
+        )
+    if db is not None and cutoff_draw_id:
+        coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+        now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        coll.update_one(
+            {"cutoff_draw_id": cutoff_draw_id.strip()},
+            {
+                "$set": {
+                    "cutoff_draw_id": cutoff_draw_id.strip(),
+                    "dataset_prepared": True,
+                    "dataset_prepared_at": now,
+                    "main_rows": info.get("main_rows"),
+                    "clave_rows": info.get("clave_rows"),
+                }
+            },
+            upsert=True,
+        )
+    return JSONResponse(content={"status": "ok", "info": info})
+
+
+@app.post("/api/el-gordo/train/models")
+def api_el_gordo_train_models(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description=(
+            "Optional id_sorteo: only draws up to this one (inclusive) are used "
+            "for both dataset building and model training (El Gordo)."
+        ),
+    ),
+):
+    """
+    Train Gradient Boosting models for El Gordo mains and clave using the
+    per-number dataset derived from `el_gordo_feature`. Saves progress to el_gordo_train_progress.
+    """
+    try:
+        info = train_el_gordo_models(cutoff_draw_id=cutoff_draw_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error while training El Gordo models: {e!s}",
+        )
+    if db is not None and cutoff_draw_id:
+        coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+        now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        coll.update_one(
+            {"cutoff_draw_id": cutoff_draw_id.strip()},
+            {
+                "$set": {
+                    "models_trained": True,
+                    "trained_at": now,
+                    "main_accuracy": info.get("main_accuracy"),
+                    "clave_accuracy": info.get("clave_accuracy"),
+                }
+            },
+            upsert=True,
+        )
+    return JSONResponse(content={"status": "ok", "info": info})
+
+
+@app.get("/api/el-gordo/prediction/ml")
+def api_el_gordo_prediction_ml(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description=(
+            "Optional id_sorteo: use this draw as cutoff; "
+            "if omitted, use the latest draw in el_gordo_feature."
+        ),
+    ),
+):
+    """
+    Step 3 (new_flow): generate per-number probabilities for the next El Gordo draw
+    using the trained Gradient Boosting models.
+    """
+    try:
+        info = compute_el_gordo_probabilities(cutoff_draw_id=cutoff_draw_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error while computing El Gordo ML probabilities: {e!s}",
+        )
+
+    if db is not None and info.get("cutoff_draw_id"):
+        coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+        now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        coll.update_one(
+            {"cutoff_draw_id": str(info["cutoff_draw_id"]).strip()},
+            {
+                "$set": {
+                    "probs_computed": True,
+                    "probs_computed_at": now,
+                    "mains_probs": info.get("mains"),
+                    "clave_probs": info.get("claves"),
+                    "probs_draw_id": info.get("draw_id"),
+                    "probs_fecha_sorteo": info.get("fecha_sorteo"),
+                }
+            },
+            upsert=True,
+        )
+
+    return JSONResponse(content={"status": "ok", "info": info})
+
+
+@app.post("/api/el-gordo/train/rule-filters")
+def api_el_gordo_rule_filters(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="id_sorteo for this El Gordo training run (uses saved mains_probs/clave_probs).",
+    ),
+):
+    """
+    Step 4 (new_flow): build pool of 20 main numbers + 6 clave numbers for El Gordo.
+    - 4–5 mains + 1 clave from row where pre_id_sorteo == current id_sorteo, or random if not found.
+    - Remaining mains from Step 3 ranking bands (1–20: 6–7, 21–30: 3, 31–40: 3, 41–54: 3), no duplicate.
+    - Clave pool: snapshot clave + up to 5 additional clave candidates from Step 3 ranking, no duplicate.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        raise HTTPException(400, detail="cutoff_draw_id is required")
+    cid = cutoff_draw_id.strip()
+    progress_coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    feature_coll = db["el_gordo_feature"]
+    doc = progress_coll.find_one({"cutoff_draw_id": cid})
+    if not doc:
+        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+    mains = doc.get("mains_probs") or []
+    claves = doc.get("clave_probs") or []
+    if not mains and not claves:
+        raise HTTPException(400, detail="Run step 3 (compute probabilities) first.")
+
+    # Row where pre_id_sorteo == current id_sorteo (current id_sorteo == row.pre_id_sorteo)
+    prev_main_numbers: Optional[List[int]] = None
+    prev_clave: Optional[int] = None
+    prev_row = feature_coll.find_one({"pre_id_sorteo": cid})
+    if prev_row:
+        pm = prev_row.get("main_number") or []
+        prev_main_numbers = [int(x) for x in pm if isinstance(x, (int, float))]
+        clave_val = prev_row.get("clave")
+        if isinstance(clave_val, (int, float)):
+            prev_clave = int(clave_val)
+
+    result = build_el_gordo_step4_pool(
+        mains_probs=mains,
+        clave_probs=claves,
+        prev_main_numbers=prev_main_numbers,
+        prev_clave=prev_clave,
+        seed=None,
+    )
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    progress_coll.update_one(
+        {"cutoff_draw_id": cid},
+        {
+            "$set": {
+                "rules_applied": True,
+                "rules_applied_at": now,
+                "filtered_mains_probs": result["filtered_mains"],
+                "filtered_clave_probs": result["filtered_clave"],
+                "rule_flags": {
+                    "rules_used": result["rules_used"],
+                    "excluded": result["excluded"],
+                    "stats": result.get("stats"),
+                    "snapshot_mains": result.get("snapshot_mains"),
+                    "snapshot_clave": result.get("snapshot_clave"),
+                },
+            }
+        },
+    )
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "filtered_mains": result["filtered_mains"],
+            "filtered_clave": result["filtered_clave"],
+            "rules_used": result["rules_used"],
+            "excluded": result["excluded"],
+        }
+    )
+
+
+@app.post("/api/el-gordo/train/candidate-pool")
+def api_el_gordo_candidate_pool(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="id_sorteo for this El Gordo training run.",
+    ),
+    num_tickets: int = Query(3000, ge=100, le=10000),
+):
+    """
+    Step 5 (new_flow): generate candidate ticket pool for El Gordo from Step 4 pool.
+
+    - Uses filtered_mains_probs (20 mains) and filtered_clave_probs (up to 6 claves)
+      produced by Step 4.
+    - Each ticket: 5 distinct mains from the 20, 1 clave from the clave pool
+      (assigned in round-robin order).
+    - Saves candidate_pool (list of {mains, clave}) and count to el_gordo_train_progress.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        raise HTTPException(400, detail="cutoff_draw_id is required")
+    cid = cutoff_draw_id.strip()
+    coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one({"cutoff_draw_id": cid})
+    if not doc:
+        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+
+    filtered_mains = doc.get("filtered_mains_probs") or []
+    filtered_clave = doc.get("filtered_clave_probs") or []
+    if not filtered_mains or len(filtered_mains) < 5:
+        raise HTTPException(
+            400,
+            detail="Run step 4 (rule filters) first to get mains pool (need at least 5).",
+        )
+    if not filtered_clave:
+        raise HTTPException(
+            400,
+            detail="Run step 4 (rule filters) first to get clave pool (need at least 1).",
+        )
+
+    main_nums = [
+        int(x.get("number") or 0)
+        for x in filtered_mains
+        if x.get("number") is not None
+    ]
+    clave_nums = [
+        int(x.get("number") or 0)
+        for x in filtered_clave
+        if x.get("number") is not None
+    ]
+    if len(set(main_nums)) < 5:
+        raise HTTPException(
+            400,
+            detail="Pool too small: need at least 5 distinct mains.",
+        )
+    if not clave_nums:
+        raise HTTPException(
+            400,
+            detail="Pool too small: need at least 1 clave.",
+        )
+
+    # Generate mains combinations in a structured way (no duplicates),
+    # then pair them with claves in round-robin fashion.
+    unique_mains_combos = list(combinations(sorted(set(main_nums)), 5))
+    random.shuffle(unique_mains_combos)
+    max_mains = min(len(unique_mains_combos), num_tickets)
+    mains_combos = unique_mains_combos[:max_mains]
+
+    random.shuffle(clave_nums)
+    tickets: List[Dict] = []
+    for idx, mains in enumerate(mains_combos):
+        clave = clave_nums[idx % len(clave_nums)]
+        tickets.append({"mains": list(mains), "clave": int(clave)})
+
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    coll.update_one(
+        {"cutoff_draw_id": cid},
+        {
+            "$set": {
+                "candidate_pool": tickets,
+                "candidate_pool_at": now,
+                "candidate_pool_count": len(tickets),
+            }
+        },
+    )
+    return JSONResponse(
+        content={"status": "ok", "candidate_pool_count": len(tickets)},
+    )
 
 
 @app.post("/api/euromillones/train/models")

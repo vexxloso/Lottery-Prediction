@@ -2,6 +2,7 @@ import { useSearchParams } from 'react-router-dom';
 import { ResultadosPage } from './ResultadosPage';
 import { ElGordoApuestasPanel } from './ElGordoApuestasPanel';
 import { ElGordoFeatureModelPanel } from './ElGordoFeatureModelPanel';
+import { ElGordoPredictionPage } from './ElGordoPredictionPage';
 
 type ElGordoTab = 'results' | 'prediction' | 'grafico';
 
@@ -10,6 +11,7 @@ export function ResultadosElGordo() {
   const tabParam = (searchParams.get('tab') as ElGordoTab | null) ?? 'results';
   const activeTab: ElGordoTab =
     tabParam === 'prediction' || tabParam === 'grafico' ? tabParam : 'results';
+  const hasCutoffDraw = !!searchParams.get('cutoff_draw_id');
 
   const setActiveTab = (tab: ElGordoTab) => {
     const params = new URLSearchParams(searchParams);
@@ -53,7 +55,7 @@ export function ResultadosElGordo() {
         {activeTab === 'results' && <ResultadosPage lottery="el-gordo" />}
         {activeTab === 'prediction' && (
           <div className="resultados-euromillones-features">
-            <ElGordoFeatureModelPanel />
+            {hasCutoffDraw ? <ElGordoPredictionPage /> : <ElGordoFeatureModelPanel />}
           </div>
         )}
         {activeTab === 'grafico' && (

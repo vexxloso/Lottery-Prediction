@@ -103,9 +103,13 @@ export function SimulationPage() {
   } | null>(null);
   const [compareProgressLoading, setCompareProgressLoading] = useState(false);
   const [compareProgressError, setCompareProgressError] = useState('');
+  type CompareTicket =
+    | { mains: number[]; stars: number[] }
+    | { mains: number[]; clave: number };
+
   const [compareProgress, setCompareProgress] = useState<{
     cutoff_draw_id: string;
-    candidate_pool?: { mains: number[]; stars: number[] }[];
+    candidate_pool?: CompareTicket[];
     candidate_pool_count?: number;
   } | null>(null);
   const [comparePoolLimit, setComparePoolLimit] = useState(20);
@@ -114,7 +118,7 @@ export function SimulationPage() {
   const [featureRowsError, setFeatureRowsError] = useState('');
   const [featureRows, setFeatureRows] = useState<EuromillonesFeatureRow[]>([]);
 
-  const TICKET_BUDGET_EUR = 2.5;
+  const TICKET_BUDGET_EUR = slug === 'el-gordo' ? 1.5 : 2.5;
 
   const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
@@ -390,10 +394,15 @@ export function SimulationPage() {
     const points: { tickets: number; total: number; cost: number; earning: number }[] = [];
     let runningPrize = 0;
     pool.slice(0, limit).forEach((t, idx) => {
-      const mains = (t.mains ?? []).map(Number);
-      const stars = (t.stars ?? []).map(Number);
-      const hitsMain = mains.filter((n) => mainSet.has(n)).length;
-      const hitsStar = stars.filter((n) => starSet.has(n)).length;
+      const anyTicket = t as any;
+      const mains = (anyTicket.mains ?? []).map(Number);
+      const starsOrClave = Array.isArray(anyTicket.stars)
+        ? anyTicket.stars.map(Number)
+        : anyTicket.clave != null
+        ? [Number(anyTicket.clave)]
+        : [];
+      const hitsMain = mains.filter((n: number) => mainSet.has(n)).length;
+      const hitsStar = starsOrClave.filter((n: number) => starSet.has(n)).length;
       const prizePerTicket = prizeByHits.get(`${hitsMain}-${hitsStar}`) ?? 0;
       runningPrize += prizePerTicket;
       const ticketNo = idx + 1;
@@ -407,7 +416,7 @@ export function SimulationPage() {
 
   useEffect(() => {
     if (view === 'compare') {
-      setCompareError('El sistema de wheeling está en reconstrucción.');
+      setCompareError('');
       setCompareResult(null);
       setCompareGraphPoints([]);
     }
@@ -415,7 +424,7 @@ export function SimulationPage() {
 
   // Compare page: fetch real draw (id_sorteo) and train progress (cutoff_draw_id = prev_id)
   useEffect(() => {
-    if (slug !== 'euromillones' || view !== 'compare' || !drawId) {
+    if (view !== 'compare' || !drawId) {
       setCompareDraw(null);
       setCompareProgress(null);
       return;
@@ -427,8 +436,10 @@ export function SimulationPage() {
       setCompareDrawError('');
       setCompareDraw(null);
       try {
+        const isEuromillones = slug === 'euromillones';
+        const endpoint = isEuromillones ? '/api/euromillones/draw' : '/api/el-gordo/draw';
         const res = await fetch(
-          `${API_URL}/api/euromillones/draw?draw_id=${encodeURIComponent(drawId)}`,
+          `${API_URL}${endpoint}?draw_id=${encodeURIComponent(drawId)}`,
         );
         const data = await res.json();
         if (!res.ok) {
@@ -439,14 +450,39 @@ export function SimulationPage() {
         const combinacionActa = data.combinacion_acta;
         let main: number[] = [];
         let stars: number[] = [];
-        if (numbers.length >= 7) {
-          main = numbers.slice(0, 5).map((n: unknown) => Number(n));
-          stars = numbers.slice(5, 7).map((n: unknown) => Number(n));
-        } else if (combinacionActa && typeof combinacionActa === 'string') {
-          const parts = combinacionActa.split(/[\s\-]+/).filter(Boolean);
-          const nums = parts.map((p: string) => parseInt(p, 10)).filter((n: number) => !Number.isNaN(n));
-          main = nums.slice(0, 5);
-          stars = nums.slice(5, 7);
+        if (isEuromillones) {
+          if (numbers.length >= 7) {
+            main = numbers.slice(0, 5).map((n: unknown) => Number(n));
+            stars = numbers.slice(5, 7).map((n: unknown) => Number(n));
+          } else if (combinacionActa && typeof combinacionActa === 'string') {
+            const parts = combinacionActa.split(/[\s\-]+/).filter(Boolean);
+            const nums = parts
+              .map((p: string) => parseInt(p, 10))
+              .filter((n: number) => !Number.isNaN(n));
+            main = nums.slice(0, 5);
+            stars = nums.slice(5, 7);
+          }
+        } else {
+          // El Gordo: numbers -> main_number, reintegro -> clave.
+          const reintegro = typeof data.reintegro === 'number' ? data.reintegro : undefined;
+          if (numbers.length >= 5) {
+            main = numbers.slice(0, 5).map((n: unknown) => Number(n));
+            stars = reintegro != null ? [reintegro] : [];
+          } else if (combinacionActa && typeof combinacionActa === 'string') {
+            // Fallback: parse strings like "03 - 13 - 25 - 45 - 52 R(0)"
+            const mainMatches = combinacionActa.match(/\b\d{1,2}\b/g) || [];
+            main = mainMatches.slice(0, 5).map((p) => parseInt(p, 10)).filter((n) => !Number.isNaN(n));
+            let claveVal: number | undefined;
+            const rMatch = combinacionActa.match(/R\((\d)\)/i);
+            if (rMatch) {
+              const v = parseInt(rMatch[1], 10);
+              if (!Number.isNaN(v)) claveVal = v;
+            } else if (mainMatches.length > 5) {
+              const v = parseInt(mainMatches[5], 10);
+              if (!Number.isNaN(v)) claveVal = v;
+            }
+            stars = claveVal != null ? [claveVal] : [];
+          }
         }
         setCompareDraw({
           id_sorteo: String(data.id_sorteo ?? drawId),
@@ -472,8 +508,12 @@ export function SimulationPage() {
       setCompareProgressError('');
       setCompareProgress(null);
       try {
+        const isEuromillones = slug === 'euromillones';
+        const endpoint = isEuromillones
+          ? '/api/euromillones/train/progress'
+          : '/api/el-gordo/train/progress';
         const res = await fetch(
-          `${API_URL}/api/euromillones/train/progress?cutoff_draw_id=${encodeURIComponent(prevId)}`,
+          `${API_URL}${endpoint}?cutoff_draw_id=${encodeURIComponent(prevId)}`,
         );
         const data = await res.json();
         if (!res.ok) {
@@ -488,7 +528,7 @@ export function SimulationPage() {
         const pool = progress.candidate_pool;
         setCompareProgress({
           cutoff_draw_id: progress.cutoff_draw_id ?? prevId,
-          candidate_pool: Array.isArray(pool) ? pool : undefined,
+          candidate_pool: Array.isArray(pool) ? (pool as CompareTicket[]) : undefined,
           candidate_pool_count: progress.candidate_pool_count,
         });
       } catch (e) {
@@ -642,7 +682,7 @@ export function SimulationPage() {
           </div>
         )}
 
-        {slug === 'euromillones' && view === 'compare' && (
+        {view === 'compare' && (
           <>
             {compareDrawLoading && <p style={{ margin: 0 }}>Cargando sorteo…</p>}
             {compareDrawError && !compareDrawLoading && (
@@ -789,9 +829,12 @@ export function SimulationPage() {
                         const escrutinio = Array.isArray(compareDraw.escrutinio)
                           ? (compareDraw.escrutinio as any[])
                           : [];
-                        const prizeByHits = new Map<string, number>();
+                        const prizeByHits = new Map<
+                          string,
+                          { label: string; count: number; prizePerTicket: number; totalPrize: number }
+                        >();
+                        const prizeLookup = new Map<string, number>();
                         escrutinio.forEach((row: any) => {
-                          // For Euromillones, "tipo" usually has the hits pattern like "5+2", "2+1", etc.
                           const aciertos = String(
                             row.tipo ?? row.aciertos ?? row.categoria ?? '',
                           ).trim();
@@ -803,123 +846,154 @@ export function SimulationPage() {
                           const key = `${hm}-${hs}`;
                           const premio = parseEuroPremio(row.premio);
                           if (premio > 0) {
-                            prizeByHits.set(key, premio);
+                            prizeLookup.set(key, premio);
                           }
                         });
                         let runningPrize = 0;
-                        const byPattern = new Map<
-                          string,
-                          { label: string; count: number; prizePerTicket: number; totalPrize: number }
-                        >();
                         const rows = pool.slice(0, limit).map((t, idx) => {
-                                  const mains = (t.mains ?? []).map(Number);
-                                  const stars = (t.stars ?? []).map(Number);
-                                  const hitsMain = mains.filter((n) => mainSet.has(n)).length;
-                                  const hitsStar = stars.filter((n) => starSet.has(n)).length;
-                                  const ticketNo = idx + 1;
-                                  const costAcc = ticketNo * TICKET_BUDGET_EUR;
-                                  const prizePerTicket =
-                                    prizeByHits.get(`${hitsMain}-${hitsStar}`) ?? 0;
-                                  runningPrize += prizePerTicket;
-                                  const earning = runningPrize - costAcc;
-                                  const patternKey = `${hitsMain}+${hitsStar}`;
-                                  if (!byPattern.has(patternKey)) {
-                                    byPattern.set(patternKey, {
-                                      label:
-                                        prizePerTicket > 0
-                                          ? `${patternKey} · ${prizePerTicket.toFixed(2)} €`
-                                          : patternKey,
-                                      count: 0,
-                                      prizePerTicket,
-                                      totalPrize: 0,
-                                    });
-                                  }
-                                  const agg = byPattern.get(patternKey)!;
-                                  agg.count += 1;
-                                  agg.totalPrize += prizePerTicket;
-                                  return (
-                                    <tr key={`${idx}-${mains.join('-')}-${stars.join('-')}`}>
-                                      <td>{ticketNo}</td>
-                                      <td>
-                                        <div
-                                          style={{
-                                            display: 'flex',
-                                            flexWrap: 'wrap',
-                                            alignItems: 'center',
-                                            gap: 6,
-                                          }}
-                                        >
-                                          <div className="resultados-balls">
-                                            {mains.map((n, i) => (
-                                              <span
-                                                key={`m-${idx}-${i}`}
-                                                className="resultados-ball"
-                                                style={
-                                                  mainSet.has(n)
-                                                    ? {
-                                                        fontWeight: 700,
-                                                        border: '2px solid rgba(255,255,255,0.9)',
-                                                        opacity: 1,
-                                                      }
-                                                    : { opacity: 0.45 }
-                                                }
-                                              >
-                                                {String(n).padStart(2, '0')}
-                                              </span>
-                                            ))}
-                                          </div>
-                                          <div className="resultados-balls">
-                                            {stars.map((n, i) => (
-                                              <span
-                                                key={`s-${idx}-${i}`}
-                                                className="resultados-ball-star-wrap"
-                                                title="Estrella"
-                                                style={starSet.has(n) ? { opacity: 1 } : { opacity: 0.45 }}
-                                              >
-                                                <img
-                                                  src="/images/start.svg"
-                                                  alt=""
-                                                  className="resultados-star-img"
-                                                  aria-hidden
-                                                />
-                                                <span
-                                                  className="resultados-star-num"
-                                                  style={starSet.has(n) ? { fontWeight: 700 } : undefined}
-                                                >
-                                                  {String(n).padStart(2, '0')}
-                                                </span>
-                                              </span>
-                                            ))}
-                                          </div>
-                                        </div>
-                                      </td>
-                                      <td>
-                                        {hitsMain}+{hitsStar}
-                                        {prizePerTicket
-                                          ? ` · ${prizePerTicket.toFixed(2)} €`
-                                          : ''}
-                                      </td>
-                                      <td>{costAcc.toFixed(2)} €</td>
-                                      <td>{`${runningPrize.toFixed(2)} €`}</td>
-                                      <td>
+                          const anyTicket = t as any;
+                          const mains = (anyTicket.mains ?? []).map(Number);
+                          const starsOrClave = Array.isArray(anyTicket.stars)
+                            ? anyTicket.stars.map(Number)
+                            : anyTicket.clave != null
+                            ? [Number(anyTicket.clave)]
+                            : [];
+                          const hitsMain = mains.filter((n: number) => mainSet.has(n)).length;
+                          const hitsStar = starsOrClave.filter((n: number) => starSet.has(n)).length;
+                          const ticketNo = idx + 1;
+                          const costAcc = ticketNo * TICKET_BUDGET_EUR;
+                          const prizePerTicket =
+                            prizeLookup.get(`${hitsMain}-${hitsStar}`) ?? 0;
+                          runningPrize += prizePerTicket;
+                          const earning = runningPrize - costAcc;
+                          const patternKey = `${hitsMain}+${hitsStar}`;
+                          if (!prizeByHits.has(patternKey)) {
+                            prizeByHits.set(patternKey, {
+                              label:
+                                prizePerTicket > 0
+                                  ? `${patternKey} · ${prizePerTicket.toFixed(2)} €`
+                                  : patternKey,
+                              count: 0,
+                              prizePerTicket,
+                              totalPrize: 0,
+                            });
+                          }
+                          const agg = prizeByHits.get(patternKey)!;
+                          agg.count += 1;
+                          agg.totalPrize += prizePerTicket;
+                          return (
+                            <tr
+                              key={`${idx}-${mains.join('-')}-${
+                                Array.isArray(anyTicket.stars)
+                                  ? anyTicket.stars.join('-')
+                                  : anyTicket.clave ?? ''
+                              }`}
+                            >
+                              <td>{ticketNo}</td>
+                              <td>
+                                <div
+                                  style={{
+                                    display: 'flex',
+                                    flexWrap: 'wrap',
+                                    alignItems: 'center',
+                                    gap: 6,
+                                  }}
+                                >
+                                  <div className="resultados-balls">
+                                    {mains.map((n, i) => (
+                                      <span
+                                        key={`m-${idx}-${i}`}
+                                        className="resultados-ball"
+                                        style={
+                                          mainSet.has(n)
+                                            ? {
+                                                fontWeight: 700,
+                                                border: '2px solid rgba(255,255,255,0.9)',
+                                                opacity: 1,
+                                              }
+                                            : { opacity: 0.45 }
+                                        }
+                                      >
+                                        {String(n).padStart(2, '0')}
+                                      </span>
+                                    ))}
+                                  </div>
+                                  {slug === 'euromillones' ? (
+                                    <div className="resultados-balls">
+                                      {starsOrClave.map((n, i) => (
                                         <span
-                                          style={{
-                                            color:
-                                              earning > 0
-                                                ? 'var(--color-success, green)'
-                                                : earning < 0
-                                                ? 'var(--color-error, #c00)'
-                                                : 'inherit',
-                                          }}
+                                          key={`s-${idx}-${i}`}
+                                          className="resultados-ball-star-wrap"
+                                          title="Estrella"
+                                          style={starSet.has(n) ? { opacity: 1 } : { opacity: 0.45 }}
                                         >
-                                          {earning === 0
-                                            ? '0.00 €'
-                                            : `${earning > 0 ? '+' : ''}${earning.toFixed(2)} €`}
+                                          <img
+                                            src="/images/start.svg"
+                                            alt=""
+                                            className="resultados-star-img"
+                                            aria-hidden
+                                          />
+                                          <span
+                                            className="resultados-star-num"
+                                            style={starSet.has(n) ? { fontWeight: 700 } : undefined}
+                                          >
+                                            {String(n).padStart(2, '0')}
+                                          </span>
                                         </span>
-                                      </td>
-                                    </tr>
-                                  );
-                                });
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    starsOrClave.length > 0 && (
+                                      <div className="resultados-balls">
+                                        {starsOrClave.map((n, i) => (
+                                          <span
+                                            key={`c-${idx}-${i}`}
+                                            className="resultados-ball"
+                                            style={
+                                              starSet.has(n)
+                                                ? {
+                                                    fontWeight: 700,
+                                                    border: '2px solid rgba(255,255,255,0.9)',
+                                                    opacity: 1,
+                                                  }
+                                                : { opacity: 0.45 }
+                                            }
+                                          >
+                                            {String(n).padStart(2, '0')}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    )
+                                  )}
+                                </div>
+                              </td>
+                              <td>
+                                {hitsMain}+{hitsStar}
+                                {prizePerTicket
+                                  ? ` · ${prizePerTicket.toFixed(2)} €`
+                                  : ''}
+                              </td>
+                              <td>{costAcc.toFixed(2)} €</td>
+                              <td>{`${runningPrize.toFixed(2)} €`}</td>
+                              <td>
+                                <span
+                                  style={{
+                                    color:
+                                      earning > 0
+                                        ? 'var(--color-success, green)'
+                                        : earning < 0
+                                        ? 'var(--color-error, #c00)'
+                                        : 'inherit',
+                                  }}
+                                >
+                                  {earning === 0
+                                    ? '0.00 €'
+                                    : `${earning > 0 ? '+' : ''}${earning.toFixed(2)} €`}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        });
                         const totalCost = limit * TICKET_BUDGET_EUR;
                         const totalPrize = runningPrize;
                         const totalEarning = totalPrize - totalCost;
@@ -935,7 +1009,7 @@ export function SimulationPage() {
                                   </tr>
                                 </thead>
                                 <tbody>
-                                  {Array.from(byPattern.entries())
+                                  {Array.from(prizeByHits.entries())
                                     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
                                     .map(([key, agg]) => (
                                       <tr key={key}>
@@ -1017,36 +1091,57 @@ export function SimulationPage() {
                             </span>
                           ))}
                         </div>
-                        <div
-                          style={{
-                            display: 'flex',
-                            flexWrap: 'wrap',
-                            gap: 6,
-                            alignItems: 'center',
-                          }}
-                        >
-                          {(compareDraw.stars.length ? compareDraw.stars : []).map((n) => (
-                            <span
-                              key={n}
-                              className="resultados-ball-star-wrap"
-                              style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}
-                            >
-                              <img
-                                src="/images/start.svg"
-                                alt=""
-                                className="resultados-star-img"
-                                aria-hidden
-                                style={{ width: 18, height: 18 }}
-                              />
+                        {slug === 'euromillones' ? (
+                          <div
+                            style={{
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              gap: 6,
+                              alignItems: 'center',
+                            }}
+                          >
+                            {(compareDraw.stars.length ? compareDraw.stars : []).map((n) => (
                               <span
+                                key={n}
+                                className="resultados-ball-star-wrap"
+                                style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}
+                              >
+                                <img
+                                  src="/images/start.svg"
+                                  alt=""
+                                  className="resultados-star-img"
+                                  aria-hidden
+                                  style={{ width: 18, height: 18 }}
+                                />
+                                <span
+                                  className="resultados-ball resultados-train-draw-ball"
+                                  style={{ width: 28, height: 28, fontSize: '0.8rem' }}
+                                >
+                                  {String(n).padStart(2, '0')}
+                                </span>
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <div
+                            style={{
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              gap: 6,
+                              alignItems: 'center',
+                            }}
+                          >
+                            {(compareDraw.stars.length ? compareDraw.stars : []).map((n) => (
+                              <span
+                                key={n}
                                 className="resultados-ball resultados-train-draw-ball"
                                 style={{ width: 28, height: 28, fontSize: '0.8rem' }}
                               >
                                 {String(n).padStart(2, '0')}
                               </span>
-                            </span>
-                          ))}
-                        </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
 
                       {compareProgress && (
@@ -1058,7 +1153,7 @@ export function SimulationPage() {
                           const escrutinio = Array.isArray(compareDraw.escrutinio)
                             ? (compareDraw.escrutinio as any[])
                             : [];
-                          const prizeByHits = new Map<string, number>();
+                          const prizeLookup = new Map<string, number>();
                           escrutinio.forEach((row: any) => {
                             const aciertos = String(
                               row.tipo ?? row.aciertos ?? row.categoria ?? '',
@@ -1071,17 +1166,22 @@ export function SimulationPage() {
                             const key = `${hm}-${hs}`;
                             const premio = parseEuroPremio(row.premio);
                             if (premio > 0) {
-                              prizeByHits.set(key, premio);
+                              prizeLookup.set(key, premio);
                             }
                           });
                           let runningPrize = 0;
                           pool.slice(0, limit).forEach((t) => {
-                            const mains = (t.mains ?? []).map(Number);
-                            const stars = (t.stars ?? []).map(Number);
-                            const hitsMain = mains.filter((n) => mainSet.has(n)).length;
-                            const hitsStar = stars.filter((n) => starSet.has(n)).length;
+                            const anyTicket = t as any;
+                            const mains = (anyTicket.mains ?? []).map(Number);
+                            const starsOrClave = Array.isArray(anyTicket.stars)
+                              ? anyTicket.stars.map(Number)
+                              : anyTicket.clave != null
+                              ? [Number(anyTicket.clave)]
+                              : [];
+                            const hitsMain = mains.filter((n: number) => mainSet.has(n)).length;
+                            const hitsStar = starsOrClave.filter((n: number) => starSet.has(n)).length;
                             const prizePerTicket =
-                              prizeByHits.get(`${hitsMain}-${hitsStar}`) ?? 0;
+                              prizeLookup.get(`${hitsMain}-${hitsStar}`) ?? 0;
                             runningPrize += prizePerTicket;
                           });
                           const totalCost = limit * TICKET_BUDGET_EUR;
