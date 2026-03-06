@@ -181,11 +181,56 @@ export function ElGordoPredictionPage() {
 
   const displayStep = runAllLoading ? runningStep : currentStep;
   const stepItems = [
-    { title: 'Preparar dataset', status: displayStep === 0 && !progress?.dataset_prepared ? 'process' as const : progress?.dataset_prepared ? 'finish' as const : 'wait' as const },
-    { title: 'Entrenar modelos', status: displayStep === 1 && !progress?.models_trained ? 'process' as const : progress?.models_trained ? 'finish' as const : 'wait' as const },
-    { title: 'Probabilidades', status: displayStep === 2 && !progress?.probs_computed ? 'process' as const : progress?.probs_computed ? 'finish' as const : 'wait' as const },
-    { title: 'Generar pool', status: displayStep === 3 && !progress?.rules_applied ? 'process' as const : progress?.rules_applied ? 'finish' as const : 'wait' as const },
-    { title: 'Pool de candidatos', status: (progress?.candidate_pool_count ?? 0) > 0 ? 'finish' as const : displayStep === 4 ? 'process' as const : 'wait' as const },
+    {
+      title: 'Preparar dataset',
+      status: runAllLoading
+        ? (runningStep > 0 ? ('finish' as const) : ('process' as const))
+        : progress?.dataset_prepared
+          ? ('finish' as const)
+          : currentStep === 0
+            ? ('process' as const)
+            : ('wait' as const),
+    },
+    {
+      title: 'Entrenar modelos',
+      status: runAllLoading
+        ? (runningStep > 1 ? ('finish' as const) : runningStep === 1 ? ('process' as const) : ('wait' as const))
+        : progress?.models_trained
+          ? ('finish' as const)
+          : currentStep === 1
+            ? ('process' as const)
+            : ('wait' as const),
+    },
+    {
+      title: 'Probabilidades',
+      status: runAllLoading
+        ? (runningStep > 2 ? ('finish' as const) : runningStep === 2 ? ('process' as const) : ('wait' as const))
+        : progress?.probs_computed
+          ? ('finish' as const)
+          : currentStep === 2
+            ? ('process' as const)
+            : ('wait' as const),
+    },
+    {
+      title: 'Generar pool',
+      status: runAllLoading
+        ? (runningStep > 3 ? ('finish' as const) : runningStep === 3 ? ('process' as const) : ('wait' as const))
+        : progress?.rules_applied
+          ? ('finish' as const)
+          : currentStep === 3
+            ? ('process' as const)
+            : ('wait' as const),
+    },
+    {
+      title: 'Pool de candidatos',
+      status: runAllLoading
+        ? (runningStep >= 4 ? ('process' as const) : ('wait' as const))
+        : (progress?.candidate_pool_count ?? 0) > 0
+          ? ('finish' as const)
+          : currentStep === 4
+            ? ('process' as const)
+            : ('wait' as const),
+    },
   ];
 
   return (

@@ -2,6 +2,7 @@ import { useSearchParams } from 'react-router-dom';
 import { ResultadosPage } from './ResultadosPage';
 import { LaPrimitivaApuestasPanel } from './LaPrimitivaApuestasPanel';
 import { LaPrimitivaFeatureModelPanel } from './LaPrimitivaFeatureModelPanel';
+import { LaPrimitivaPredictionPage } from './LaPrimitivaPredictionPage';
 
 type LaPrimitivaTab = 'results' | 'prediction' | 'grafico';
 
@@ -53,7 +54,11 @@ export function ResultadosLaPrimitiva() {
         {activeTab === 'results' && <ResultadosPage lottery="la-primitiva" />}
         {activeTab === 'prediction' && (
           <div className="resultados-euromillones-features">
-            <LaPrimitivaFeatureModelPanel />
+            {searchParams.get('cutoff_draw_id') ? (
+              <LaPrimitivaPredictionPage />
+            ) : (
+              <LaPrimitivaFeatureModelPanel />
+            )}
           </div>
         )}
         {activeTab === 'grafico' && (

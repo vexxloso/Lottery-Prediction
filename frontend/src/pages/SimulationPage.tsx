@@ -25,6 +25,33 @@ function parseEuroPremio(value: unknown): number {
   return 0;
 }
 
+/**
+ * Build prize lookup from La Primitiva escrutinio.
+ * Keys: "hitsMain-hitsReintegro", and "5-C" for 5 mains + complementario (2ª).
+ * 3+1 same as 3, 4+1 same as 4, 5+1 same as 5.
+ */
+function buildLaPrimitivaPrizeLookup(escrutinio: any[]): Map<string, number> {
+  const prizeLookup = new Map<string, number>();
+  escrutinio.forEach((row: any) => {
+    const tipo = String(row.tipo ?? row.categoria ?? '').trim();
+    const premio = parseEuroPremio(row.premio);
+    let key: string | null = null;
+    if (/Especial|6\s*Aciertos\s*\+\s*R/i.test(tipo)) key = '6-1';
+    else if (/1ª|6\s*Aciertos(?!\s*\+)/i.test(tipo) || /\(\s*6\s*Aciertos\s*\)/i.test(tipo)) key = '6-0';
+    else if (/2ª|5\s*Aciertos\s*\+\s*C/i.test(tipo)) key = '5-C'; // 5 mains + complementario match
+    else if (/3ª|5\s*Aciertos(?!\s*\+)/i.test(tipo) || /\(\s*5\s*Aciertos\s*\)/i.test(tipo)) key = '5-0';
+    else if (/4ª|4\s*Aciertos/i.test(tipo)) key = '4-0';
+    else if (/5ª|3\s*Aciertos/i.test(tipo)) key = '3-0';
+    else if (/Reintegro/i.test(tipo)) key = '0-1';
+    if (key != null) prizeLookup.set(key, premio);
+  });
+  // 3+1 same as 3, 4+1 same as 4, 5+1 same as 5 (reintegro match doesn't change prize for these)
+  const v3 = prizeLookup.get('3-0'); if (v3 != null) prizeLookup.set('3-1', v3);
+  const v4 = prizeLookup.get('4-0'); if (v4 != null) prizeLookup.set('4-1', v4);
+  const v5 = prizeLookup.get('5-0'); if (v5 != null) prizeLookup.set('5-1', v5);
+  return prizeLookup;
+}
+
 interface EuromillonesFeatureRow {
   id_sorteo: string;
   pre_id_sorteo?: string | null;
@@ -99,6 +126,7 @@ export function SimulationPage() {
     fecha_sorteo?: string;
     main: number[];
     stars: number[];
+    complementario?: number | null;
     escrutinio?: any[] | null;
   } | null>(null);
   const [compareProgressLoading, setCompareProgressLoading] = useState(false);
@@ -118,7 +146,8 @@ export function SimulationPage() {
   const [featureRowsError, setFeatureRowsError] = useState('');
   const [featureRows, setFeatureRows] = useState<EuromillonesFeatureRow[]>([]);
 
-  const TICKET_BUDGET_EUR = slug === 'el-gordo' ? 1.5 : 2.5;
+  const TICKET_BUDGET_EUR =
+    slug === 'la-primitiva' ? 1 : slug === 'el-gordo' ? 1.5 : 2.5;
 
   const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
@@ -378,32 +407,45 @@ export function SimulationPage() {
       ? (compareDraw.escrutinio as any[])
       : [];
     const prizeByHits = new Map<string, number>();
-    escrutinio.forEach((row: any) => {
-      const aciertos = String(row.tipo ?? row.aciertos ?? row.categoria ?? '').trim();
-      const m = aciertos.match(/(\d+)\s*\+\s*(\d+)/);
-      if (!m) return;
-      const hm = Number(m[1]);
-      const hs = Number(m[2]);
-      if (!Number.isFinite(hm) || !Number.isFinite(hs)) return;
-      const key = `${hm}-${hs}`;
-      const premio = parseEuroPremio(row.premio);
-      if (premio > 0) {
-        prizeByHits.set(key, premio);
-      }
-    });
+    if (slug === 'la-primitiva') {
+      buildLaPrimitivaPrizeLookup(escrutinio).forEach((v, k) => prizeByHits.set(k, v));
+    } else {
+      escrutinio.forEach((row: any) => {
+        const aciertos = String(row.tipo ?? row.aciertos ?? row.categoria ?? '').trim();
+        const m = aciertos.match(/(\d+)\s*\+\s*(\d+)/);
+        if (!m) return;
+        const hm = Number(m[1]);
+        const hs = Number(m[2]);
+        if (!Number.isFinite(hm) || !Number.isFinite(hs)) return;
+        const key = `${hm}-${hs}`;
+        const premio = parseEuroPremio(row.premio);
+        if (premio > 0) prizeByHits.set(key, premio);
+      });
+    }
     const points: { tickets: number; total: number; cost: number; earning: number }[] = [];
     let runningPrize = 0;
     pool.slice(0, limit).forEach((t, idx) => {
       const anyTicket = t as any;
       const mains = (anyTicket.mains ?? []).map(Number);
-      const starsOrClave = Array.isArray(anyTicket.stars)
-        ? anyTicket.stars.map(Number)
-        : anyTicket.clave != null
-        ? [Number(anyTicket.clave)]
-        : [];
+      const starsOrClave =
+        slug === 'la-primitiva'
+          ? anyTicket.reintegro != null
+            ? [Number(anyTicket.reintegro)]
+            : []
+          : Array.isArray(anyTicket.stars)
+            ? anyTicket.stars.map(Number)
+            : anyTicket.clave != null
+              ? [Number(anyTicket.clave)]
+              : [];
       const hitsMain = mains.filter((n: number) => mainSet.has(n)).length;
       const hitsStar = starsOrClave.filter((n: number) => starSet.has(n)).length;
-      const prizePerTicket = prizeByHits.get(`${hitsMain}-${hitsStar}`) ?? 0;
+      const complementario =
+        slug === 'la-primitiva' ? (compareDraw as { complementario?: number | null }).complementario : undefined;
+      const hitsComplementario =
+        slug === 'la-primitiva' && complementario != null && mains.includes(complementario) ? 1 : 0;
+      const is5C = slug === 'la-primitiva' && hitsMain === 5 && hitsComplementario === 1;
+      const prizePerTicket =
+        is5C ? (prizeByHits.get('5-C') ?? 0) : prizeByHits.get(`${hitsMain}-${hitsStar}`) ?? 0;
       runningPrize += prizePerTicket;
       const ticketNo = idx + 1;
       const cost = ticketNo * TICKET_BUDGET_EUR;
@@ -436,8 +478,12 @@ export function SimulationPage() {
       setCompareDrawError('');
       setCompareDraw(null);
       try {
-        const isEuromillones = slug === 'euromillones';
-        const endpoint = isEuromillones ? '/api/euromillones/draw' : '/api/el-gordo/draw';
+        const endpoint =
+          slug === 'euromillones'
+            ? '/api/euromillones/draw'
+            : slug === 'la-primitiva'
+              ? '/api/la-primitiva/draw'
+              : '/api/el-gordo/draw';
         const res = await fetch(
           `${API_URL}${endpoint}?draw_id=${encodeURIComponent(drawId)}`,
         );
@@ -450,7 +496,7 @@ export function SimulationPage() {
         const combinacionActa = data.combinacion_acta;
         let main: number[] = [];
         let stars: number[] = [];
-        if (isEuromillones) {
+        if (slug === 'euromillones') {
           if (numbers.length >= 7) {
             main = numbers.slice(0, 5).map((n: unknown) => Number(n));
             stars = numbers.slice(5, 7).map((n: unknown) => Number(n));
@@ -462,6 +508,31 @@ export function SimulationPage() {
             main = nums.slice(0, 5);
             stars = nums.slice(5, 7);
           }
+        } else if (slug === 'la-primitiva') {
+          const reintegro = typeof data.reintegro === 'number' ? data.reintegro : undefined;
+          const complementario =
+            typeof data.complementario === 'number' ? data.complementario : undefined;
+          if (numbers.length >= 6) {
+            main = numbers.slice(0, 6).map((n: unknown) => Number(n));
+            stars = reintegro != null ? [reintegro] : [];
+          } else if (combinacionActa && typeof combinacionActa === 'string') {
+            const parts = combinacionActa.split(/[\s\-]+/).filter(Boolean);
+            const nums = parts
+              .map((p: string) => parseInt(p, 10))
+              .filter((n: number) => !Number.isNaN(n));
+            main = nums.slice(0, 6);
+            const r = typeof data.reintegro === 'number' ? data.reintegro : nums[6];
+            stars = r != null ? [Number(r)] : [];
+          }
+          setCompareDraw({
+            id_sorteo: String(data.id_sorteo ?? drawId),
+            fecha_sorteo: data.fecha_sorteo,
+            main,
+            stars,
+            complementario: complementario ?? null,
+            escrutinio: Array.isArray(data.escrutinio) ? data.escrutinio : null,
+          });
+          return;
         } else {
           // El Gordo: numbers -> main_number, reintegro -> clave.
           const reintegro = typeof data.reintegro === 'number' ? data.reintegro : undefined;
@@ -469,7 +540,6 @@ export function SimulationPage() {
             main = numbers.slice(0, 5).map((n: unknown) => Number(n));
             stars = reintegro != null ? [reintegro] : [];
           } else if (combinacionActa && typeof combinacionActa === 'string') {
-            // Fallback: parse strings like "03 - 13 - 25 - 45 - 52 R(0)"
             const mainMatches = combinacionActa.match(/\b\d{1,2}\b/g) || [];
             main = mainMatches.slice(0, 5).map((p) => parseInt(p, 10)).filter((n) => !Number.isNaN(n));
             let claveVal: number | undefined;
@@ -508,10 +578,12 @@ export function SimulationPage() {
       setCompareProgressError('');
       setCompareProgress(null);
       try {
-        const isEuromillones = slug === 'euromillones';
-        const endpoint = isEuromillones
-          ? '/api/euromillones/train/progress'
-          : '/api/el-gordo/train/progress';
+        const endpoint =
+          slug === 'euromillones'
+            ? '/api/euromillones/train/progress'
+            : slug === 'la-primitiva'
+              ? '/api/la-primitiva/train/progress'
+              : '/api/el-gordo/train/progress';
         const res = await fetch(
           `${API_URL}${endpoint}?cutoff_draw_id=${encodeURIComponent(prevId)}`,
         );
@@ -606,7 +678,7 @@ export function SimulationPage() {
           <span>Simulación</span>
         </nav>
 
-        {(slug === 'euromillones' || slug === 'el-gordo') && view !== 'compare' && (
+        {(slug === 'euromillones' || slug === 'el-gordo' || slug === 'la-primitiva') && view !== 'compare' && (
           <div
             className="resultados-tabs"
             role="tablist"
@@ -699,7 +771,7 @@ export function SimulationPage() {
 
             {(compareDraw || compareProgress) && (
               <div className="euromillones-compare-layout">
-                <section className="card resultados-features-card resultados-theme-euromillones euromillones-compare-table-col">
+                <section className={`card resultados-features-card resultados-theme-${slug} euromillones-compare-table-col`}>
                   {compareProgress && compareDraw && (
                     <div className="euromillones-compare-pool">
                       <div
@@ -833,40 +905,65 @@ export function SimulationPage() {
                           string,
                           { label: string; count: number; prizePerTicket: number; totalPrize: number }
                         >();
-                        const prizeLookup = new Map<string, number>();
-                        escrutinio.forEach((row: any) => {
-                          const aciertos = String(
-                            row.tipo ?? row.aciertos ?? row.categoria ?? '',
-                          ).trim();
-                          const m = aciertos.match(/(\d+)\s*\+\s*(\d+)/);
-                          if (!m) return;
-                          const hm = Number(m[1]);
-                          const hs = Number(m[2]);
-                          if (!Number.isFinite(hm) || !Number.isFinite(hs)) return;
-                          const key = `${hm}-${hs}`;
-                          const premio = parseEuroPremio(row.premio);
-                          if (premio > 0) {
-                            prizeLookup.set(key, premio);
-                          }
-                        });
+                        const prizeLookup =
+                          slug === 'la-primitiva'
+                            ? buildLaPrimitivaPrizeLookup(escrutinio)
+                            : (() => {
+                                const m = new Map<string, number>();
+                                escrutinio.forEach((row: any) => {
+                                  const aciertos = String(
+                                    row.tipo ?? row.aciertos ?? row.categoria ?? '',
+                                  ).trim();
+                                  const match = aciertos.match(/(\d+)\s*\+\s*(\d+)/);
+                                  if (!match) return;
+                                  const hm = Number(match[1]);
+                                  const hs = Number(match[2]);
+                                  if (!Number.isFinite(hm) || !Number.isFinite(hs)) return;
+                                  const key = `${hm}-${hs}`;
+                                  const premio = parseEuroPremio(row.premio);
+                                  if (premio > 0) m.set(key, premio);
+                                });
+                                return m;
+                              })();
                         let runningPrize = 0;
                         const rows = pool.slice(0, limit).map((t, idx) => {
                           const anyTicket = t as any;
                           const mains = (anyTicket.mains ?? []).map(Number);
-                          const starsOrClave = Array.isArray(anyTicket.stars)
-                            ? anyTicket.stars.map(Number)
-                            : anyTicket.clave != null
-                            ? [Number(anyTicket.clave)]
-                            : [];
+                          const starsOrClave =
+                            slug === 'la-primitiva'
+                              ? anyTicket.reintegro != null
+                                ? [Number(anyTicket.reintegro)]
+                                : []
+                              : Array.isArray(anyTicket.stars)
+                                ? anyTicket.stars.map(Number)
+                                : anyTicket.clave != null
+                                  ? [Number(anyTicket.clave)]
+                                  : [];
                           const hitsMain = mains.filter((n: number) => mainSet.has(n)).length;
                           const hitsStar = starsOrClave.filter((n: number) => starSet.has(n)).length;
+                          const complementario =
+                            slug === 'la-primitiva'
+                              ? (compareDraw as { complementario?: number | null }).complementario
+                              : undefined;
+                          const hitsComplementario =
+                            slug === 'la-primitiva' &&
+                            complementario != null &&
+                            mains.includes(complementario)
+                              ? 1
+                              : 0;
+                          const is5C =
+                            slug === 'la-primitiva' &&
+                            hitsMain === 5 &&
+                            hitsComplementario === 1;
                           const ticketNo = idx + 1;
                           const costAcc = ticketNo * TICKET_BUDGET_EUR;
                           const prizePerTicket =
-                            prizeLookup.get(`${hitsMain}-${hitsStar}`) ?? 0;
+                            slug === 'la-primitiva' && is5C
+                              ? (prizeLookup.get('5-C') ?? 0)
+                              : prizeLookup.get(`${hitsMain}-${hitsStar}`) ?? 0;
                           runningPrize += prizePerTicket;
                           const earning = runningPrize - costAcc;
-                          const patternKey = `${hitsMain}+${hitsStar}`;
+                          const patternKey = is5C ? '5+C' : `${hitsMain}+${hitsStar}`;
                           if (!prizeByHits.has(patternKey)) {
                             prizeByHits.set(patternKey, {
                               label:
@@ -942,6 +1039,25 @@ export function SimulationPage() {
                                         </span>
                                       ))}
                                     </div>
+                                  ) : slug === 'la-primitiva' ? (
+                                    starsOrClave.length > 0 && (
+                                      <div className="resultados-balls">
+                                        <span
+                                          className="resultados-ball"
+                                          style={
+                                            starSet.has(starsOrClave[0])
+                                              ? {
+                                                  fontWeight: 700,
+                                                  border: '2px solid rgba(255,255,255,0.9)',
+                                                  opacity: 1,
+                                                }
+                                              : { opacity: 0.45 }
+                                          }
+                                        >
+                                          R {starsOrClave[0]}
+                                        </span>
+                                      </div>
+                                    )
                                   ) : (
                                     starsOrClave.length > 0 && (
                                       <div className="resultados-balls">
@@ -1122,6 +1238,53 @@ export function SimulationPage() {
                               </span>
                             ))}
                           </div>
+                        ) : slug === 'la-primitiva' ? (
+                          <>
+                            {compareDraw.complementario != null && (
+                              <div
+                                style={{
+                                  display: 'flex',
+                                  flexWrap: 'wrap',
+                                  gap: 6,
+                                  alignItems: 'center',
+                                  marginBottom: 'var(--space-xs)',
+                                  fontSize: '0.9rem',
+                                }}
+                              >
+                                <span style={{ color: 'var(--color-text-muted)', marginRight: 4 }}>
+                                  Complementario:
+                                </span>
+                                <span
+                                  className="resultados-ball resultados-train-draw-ball"
+                                  style={{ width: 28, height: 28, fontSize: '0.8rem' }}
+                                >
+                                  {String(compareDraw.complementario).padStart(2, '0')}
+                                </span>
+                              </div>
+                            )}
+                            <div
+                              style={{
+                                display: 'flex',
+                                flexWrap: 'wrap',
+                                gap: 6,
+                                alignItems: 'center',
+                                fontSize: '0.9rem',
+                              }}
+                            >
+                              <span style={{ color: 'var(--color-text-muted)', marginRight: 4 }}>
+                                Reintegro:
+                              </span>
+                              {(compareDraw.stars.length ? compareDraw.stars : []).map((n) => (
+                                <span
+                                  key={n}
+                                  className="resultados-ball resultados-train-draw-ball"
+                                  style={{ width: 28, height: 28, fontSize: '0.8rem' }}
+                                >
+                                  {String(n).padStart(2, '0')}
+                                </span>
+                              ))}
+                            </div>
+                          </>
                         ) : (
                           <div
                             style={{
@@ -1153,35 +1316,58 @@ export function SimulationPage() {
                           const escrutinio = Array.isArray(compareDraw.escrutinio)
                             ? (compareDraw.escrutinio as any[])
                             : [];
-                          const prizeLookup = new Map<string, number>();
-                          escrutinio.forEach((row: any) => {
-                            const aciertos = String(
-                              row.tipo ?? row.aciertos ?? row.categoria ?? '',
-                            ).trim();
-                            const m = aciertos.match(/(\d+)\s*\+\s*(\d+)/);
-                            if (!m) return;
-                            const hm = Number(m[1]);
-                            const hs = Number(m[2]);
-                            if (!Number.isFinite(hm) || !Number.isFinite(hs)) return;
-                            const key = `${hm}-${hs}`;
-                            const premio = parseEuroPremio(row.premio);
-                            if (premio > 0) {
-                              prizeLookup.set(key, premio);
-                            }
-                          });
+                          const prizeLookup =
+                            slug === 'la-primitiva'
+                              ? buildLaPrimitivaPrizeLookup(escrutinio)
+                              : (() => {
+                                  const m = new Map<string, number>();
+                                  escrutinio.forEach((row: any) => {
+                                    const aciertos = String(
+                                      row.tipo ?? row.aciertos ?? row.categoria ?? '',
+                                    ).trim();
+                                    const match = aciertos.match(/(\d+)\s*\+\s*(\d+)/);
+                                    if (!match) return;
+                                    const hm = Number(match[1]);
+                                    const hs = Number(match[2]);
+                                    if (!Number.isFinite(hm) || !Number.isFinite(hs)) return;
+                                    const key = `${hm}-${hs}`;
+                                    const premio = parseEuroPremio(row.premio);
+                                    if (premio > 0) m.set(key, premio);
+                                  });
+                                  return m;
+                                })();
+                          const complementario =
+                            slug === 'la-primitiva'
+                              ? (compareDraw as { complementario?: number | null }).complementario
+                              : undefined;
                           let runningPrize = 0;
                           pool.slice(0, limit).forEach((t) => {
                             const anyTicket = t as any;
                             const mains = (anyTicket.mains ?? []).map(Number);
-                            const starsOrClave = Array.isArray(anyTicket.stars)
-                              ? anyTicket.stars.map(Number)
-                              : anyTicket.clave != null
-                              ? [Number(anyTicket.clave)]
-                              : [];
+                            const starsOrClave =
+                              slug === 'la-primitiva'
+                                ? anyTicket.reintegro != null
+                                  ? [Number(anyTicket.reintegro)]
+                                  : []
+                                : Array.isArray(anyTicket.stars)
+                                  ? anyTicket.stars.map(Number)
+                                  : anyTicket.clave != null
+                                    ? [Number(anyTicket.clave)]
+                                    : [];
                             const hitsMain = mains.filter((n: number) => mainSet.has(n)).length;
                             const hitsStar = starsOrClave.filter((n: number) => starSet.has(n)).length;
+                            const hitsComplementario =
+                              slug === 'la-primitiva' &&
+                              complementario != null &&
+                              mains.includes(complementario)
+                                ? 1
+                                : 0;
+                            const is5C =
+                              slug === 'la-primitiva' && hitsMain === 5 && hitsComplementario === 1;
                             const prizePerTicket =
-                              prizeLookup.get(`${hitsMain}-${hitsStar}`) ?? 0;
+                              is5C
+                                ? (prizeLookup.get('5-C') ?? 0)
+                                : prizeLookup.get(`${hitsMain}-${hitsStar}`) ?? 0;
                             runningPrize += prizePerTicket;
                           });
                           const totalCost = limit * TICKET_BUDGET_EUR;

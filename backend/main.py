@@ -48,6 +48,11 @@ from train_el_gordo_model import (
     train_el_gordo_models,
     compute_el_gordo_probabilities,
 )
+from train_la_primitiva_model import (
+    prepare_la_primitiva_dataset,
+    train_la_primitiva_models,
+    compute_la_primitiva_probabilities,
+)
 from itertools import combinations
 
 
@@ -297,6 +302,133 @@ def build_el_gordo_step4_pool(
         "snapshot_clave": [base_clave],
     }
 
+
+def build_la_primitiva_step4_pool(
+    mains_probs: List[Dict],
+    reintegro_probs: List[Dict],
+    prev_main_numbers: Optional[List[int]] = None,
+    prev_reintegro: Optional[int] = None,
+    seed: Optional[int] = None,
+) -> Dict:
+    """
+    Step 4 pool for La Primitiva: mains + reintegro candidates.
+
+    - 4–5 mains + 1 reintegro from previous draw (prev_main_numbers, prev_reintegro) if available,
+      else random. No duplicate with the rest.
+    - Additional mains from Step 3 ranking bands (mains_probs sorted by p), no duplicate:
+        * From 1st–20th select 6–8 (random)
+        * From 21st–35th select 4
+        * From 36th–49th select 4
+      Final mains list is truncated to 20.
+    - Reintegro pool:
+        * 1 reintegro from previous draw (snapshot) if available, else random
+        * Up to 3 additional reintegros from ranking (reintegro_probs sorted by p), no duplicate
+      Final reintegro list is truncated to 4.
+    """
+    if seed is not None:
+        random.seed(seed)
+    MAIN_MIN, MAIN_MAX = 1, 49
+    REIN_MIN, REIN_MAX = 0, 9
+    mains_ranking = sorted(mains_probs, key=lambda x: (x.get("p") or 0), reverse=True)
+    rein_ranking = sorted(reintegro_probs, key=lambda x: (x.get("p") or 0), reverse=True)
+    rules_used: List[str] = []
+    excluded = {"mains": [], "reintegro": []}
+
+    # --- 4–5 mains + 1 reintegro from previous draw or random ---
+    if prev_main_numbers and len(prev_main_numbers) >= 4 and isinstance(prev_reintegro, int):
+        pick_mains = list(prev_main_numbers)[:6]
+        prev_count = len(pick_mains)
+        target_prev = random.choice([4, 5])
+        target_prev = min(target_prev, prev_count)
+        base_mains = random.sample(pick_mains, target_prev)
+        base_rein = int(prev_reintegro)
+        rules_used.append(f"from_previous_draw_{target_prev}m_1r")
+    else:
+        target_prev = random.choice([4, 5])
+        base_mains = random.sample(range(MAIN_MIN, MAIN_MAX + 1), target_prev)
+        base_rein = random.randint(REIN_MIN, REIN_MAX)
+        rules_used.append(f"random_{target_prev}m_1r")
+
+    main_set = set(base_mains)
+    rein_set = {base_rein}
+
+    # --- Mains from ranking bands (avoid duplicates with snapshot mains) ---
+    def take_random_from_ranking(
+        ranking: List[Dict],
+        start_1based: int,
+        end_1based: int,
+        count: int,
+        exclude: set,
+    ) -> List[Dict]:
+        segment = [
+            x
+            for x in ranking[start_1based - 1 : end_1based]
+            if int(x.get("number") or 0) not in exclude
+        ]
+        if len(segment) <= count:
+            chosen = list(segment)
+        else:
+            chosen = random.sample(segment, count)
+        for item in chosen:
+            exclude.add(int(item.get("number") or 0))
+        return chosen
+
+    # Main pool cap 20; distribution: 4–5 prev + (6–8) + 4 + 4 from bands
+    MAIN_POOL_MAX = 20
+    top_count = random.choice([6, 7, 8])
+    from_1_20 = take_random_from_ranking(mains_ranking, 1, 20, top_count, main_set)
+    from_21_35 = take_random_from_ranking(mains_ranking, 21, 35, 4, main_set)
+    from_36_49 = take_random_from_ranking(mains_ranking, 36, 49, 4, main_set)
+    rules_used.append(
+        f"la_primitiva_mains_bands_prev_{len(base_mains)}_top_{top_count}_4_4"
+    )
+
+    filtered_mains_items: List[Dict] = []
+    for n in base_mains:
+        p = next((x.get("p") for x in mains_probs if int(x.get("number") or 0) == n), 0.0)
+        filtered_mains_items.append({"number": n, "p": p})
+    for seg in (from_1_20, from_21_35, from_36_49):
+        filtered_mains_items.extend(seg)
+    filtered_mains = filtered_mains_items[:MAIN_POOL_MAX]
+
+    # --- Reintegro pool (cap 4): snapshot + top ranking reintegros (avoid duplicates) ---
+    REIN_POOL_MAX = 4
+    filtered_rein_items: List[Dict] = []
+    p_rein = next(
+        (x.get("p") for x in reintegro_probs if int(x.get("number") or 0) == base_rein),
+        0.0,
+    )
+    filtered_rein_items.append({"number": base_rein, "p": p_rein})
+
+    extras = [x for x in rein_ranking if int(x.get("number") or 0) not in rein_set]
+    max_extras = max(0, REIN_POOL_MAX - len(filtered_rein_items))
+    filtered_rein_items.extend(extras[:max_extras])
+    filtered_rein = filtered_rein_items[:REIN_POOL_MAX]
+
+    # Randomly reorder mains and reintegro so Step 5 receives shuffled pools.
+    random.shuffle(filtered_mains)
+    random.shuffle(filtered_rein)
+
+    def _stats(rows: List[Dict]) -> Dict:
+        nums = [int(r.get("number") or 0) for r in rows]
+        return {
+            "count": len(nums),
+            "sum": sum(nums),
+            "even": sum(1 for n in nums if n % 2 == 0),
+            "odd": sum(1 for n in nums if n % 2 != 0),
+        }
+
+    stats = {"mains": _stats(filtered_mains), "reintegro": _stats(filtered_rein)}
+    return {
+        "filtered_mains": filtered_mains,
+        "filtered_reintegro": filtered_rein,
+        "rules_used": rules_used,
+        "excluded": excluded,
+        "stats": stats,
+        "snapshot_mains": base_mains,
+        "snapshot_reintegro": [base_rein],
+    }
+
 try:
     from simulation.euromillones.frequency_model import (
         predict_next_frequency_scores,
@@ -394,6 +526,7 @@ COLLECTIONS = {"LAPR": "la_primitiva", "EMIL": "euromillones", "ELGR": "el_gordo
 METADATA_COLLECTION = "scraper_metadata"
 EUROMILLONES_TRAIN_PROGRESS_COLLECTION = "euromillones_train_progress"
 EL_GORDO_TRAIN_PROGRESS_COLLECTION = "el_gordo_train_progress"
+LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION = "la_primitiva_train_progress"
 
 logger = logging.getLogger("lottery")
 
@@ -414,6 +547,7 @@ async def lifespan(app: FastAPI):
         db[coll_name].create_index("id_sorteo", unique=True)
     db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
     db[EL_GORDO_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
+    db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
     yield
     if client:
         client.close()
@@ -984,6 +1118,26 @@ def get_el_gordo_draw_by_id(
     return JSONResponse(content=draw)
 
 
+@app.get("/api/la-primitiva/draw")
+def get_la_primitiva_draw_by_id(
+    draw_id: str | None = Query(None, description="id_sorteo of the La Primitiva draw."),
+):
+    """Return one La Primitiva draw by id_sorteo (escrutinio, combinacion_acta, numbers, complementario, reintegro)."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not draw_id or not draw_id.strip():
+        raise HTTPException(400, detail="draw_id is required")
+    cid = draw_id.strip()
+    coll = db["la_primitiva"]
+    doc = coll.find_one({"id_sorteo": cid})
+    if doc is None and cid.isdigit():
+        doc = coll.find_one({"id_sorteo": int(cid)})
+    if not doc:
+        raise HTTPException(404, detail="Draw not found")
+    draw = _build_draw(doc, "LAPR")
+    return JSONResponse(content=draw)
+
+
 @app.get("/api/debug/euromillones-one")
 def debug_euromillones_one():
     """Return one raw document from euromillones to verify combinacion_acta and escrutinio."""
@@ -1203,6 +1357,56 @@ def api_el_gordo_train_progress(
     )
 
 
+@app.get("/api/la-primitiva/train/progress")
+def api_la_primitiva_train_progress(
+    cutoff_draw_id: str | None = Query(None, description="id_sorteo for this training run (La Primitiva)."),
+):
+    """Return La Primitiva training progress for the given cutoff_draw_id (dataset prepared, models trained)."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        return JSONResponse(
+            content={"progress": None},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one({"cutoff_draw_id": cutoff_draw_id.strip()})
+    if not doc:
+        return JSONResponse(
+            content={"progress": None},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    progress = {
+        "cutoff_draw_id": doc.get("cutoff_draw_id"),
+        "dataset_prepared": bool(doc.get("dataset_prepared")),
+        "dataset_prepared_at": doc.get("dataset_prepared_at"),
+        "main_rows": doc.get("main_rows"),
+        "reintegro_rows": doc.get("reintegro_rows"),
+        "models_trained": bool(doc.get("models_trained")),
+        "trained_at": doc.get("trained_at"),
+        "main_accuracy": doc.get("main_accuracy"),
+        "reintegro_accuracy": doc.get("reintegro_accuracy"),
+        "probs_computed": bool(doc.get("probs_computed")),
+        "probs_computed_at": doc.get("probs_computed_at"),
+        "mains_probs": doc.get("mains_probs"),
+        "reintegro_probs": doc.get("reintegro_probs"),
+        "probs_draw_id": doc.get("probs_draw_id"),
+        "probs_fecha_sorteo": doc.get("probs_fecha_sorteo"),
+        "rules_applied": bool(doc.get("rules_applied")),
+        "rules_applied_at": doc.get("rules_applied_at"),
+        "filtered_mains_probs": doc.get("filtered_mains_probs"),
+        "filtered_reintegro_probs": doc.get("filtered_reintegro_probs"),
+        "rule_flags": doc.get("rule_flags"),
+        "candidate_pool": doc.get("candidate_pool"),
+        "candidate_pool_at": doc.get("candidate_pool_at"),
+        "candidate_pool_count": doc.get("candidate_pool_count"),
+    }
+    return JSONResponse(
+        content={"progress": progress},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
 @app.post("/api/el-gordo/train/prepare-dataset")
 def api_el_gordo_prepare_dataset(
     cutoff_draw_id: str | None = Query(
@@ -1237,6 +1441,47 @@ def api_el_gordo_prepare_dataset(
                     "dataset_prepared_at": now,
                     "main_rows": info.get("main_rows"),
                     "clave_rows": info.get("clave_rows"),
+                }
+            },
+            upsert=True,
+        )
+    return JSONResponse(content={"status": "ok", "info": info})
+
+
+@app.post("/api/la-primitiva/train/prepare-dataset")
+def api_la_primitiva_prepare_dataset(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="Optional id_sorteo: only draws up to this one (inclusive) are used to build the dataset (La Primitiva).",
+    ),
+):
+    """
+    Build / refresh the La Primitiva per-number training datasets from
+    `la_primitiva_feature`.
+
+    This calls `scripts/train_la_primitiva_model.prepare_la_primitiva_dataset`
+    inside the backend process and returns basic metadata so the UI can show
+    where the CSV files were written. Saves progress to la_primitiva_train_progress.
+    """
+    try:
+        info = prepare_la_primitiva_dataset(cutoff_draw_id=cutoff_draw_id, out_dir=None)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error while preparing La Primitiva dataset: {e!s}",
+        )
+    if db is not None and cutoff_draw_id:
+        coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+        now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        coll.update_one(
+            {"cutoff_draw_id": cutoff_draw_id.strip()},
+            {
+                "$set": {
+                    "cutoff_draw_id": cutoff_draw_id.strip(),
+                    "dataset_prepared": True,
+                    "dataset_prepared_at": now,
+                    "main_rows": info.get("main_rows"),
+                    "reintegro_rows": info.get("reintegro_rows"),
                 }
             },
             upsert=True,
@@ -1283,6 +1528,45 @@ def api_el_gordo_train_models(
     return JSONResponse(content={"status": "ok", "info": info})
 
 
+@app.post("/api/la-primitiva/train/models")
+def api_la_primitiva_train_models(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description=(
+            "Optional id_sorteo: only draws up to this one (inclusive) are used "
+            "for both dataset building and model training (La Primitiva)."
+        ),
+    ),
+):
+    """
+    Train Gradient Boosting models for La Primitiva mains and reintegro using the
+    per-number dataset derived from `la_primitiva_feature`. Saves progress to la_primitiva_train_progress.
+    """
+    try:
+        info = train_la_primitiva_models(cutoff_draw_id=cutoff_draw_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error while training La Primitiva models: {e!s}",
+        )
+    if db is not None and cutoff_draw_id:
+        coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+        now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        coll.update_one(
+            {"cutoff_draw_id": cutoff_draw_id.strip()},
+            {
+                "$set": {
+                    "models_trained": True,
+                    "trained_at": now,
+                    "main_accuracy": info.get("main_accuracy"),
+                    "reintegro_accuracy": info.get("reintegro_accuracy"),
+                }
+            },
+            upsert=True,
+        )
+    return JSONResponse(content={"status": "ok", "info": info})
+
+
 @app.get("/api/el-gordo/prediction/ml")
 def api_el_gordo_prediction_ml(
     cutoff_draw_id: str | None = Query(
@@ -1316,6 +1600,49 @@ def api_el_gordo_prediction_ml(
                     "probs_computed_at": now,
                     "mains_probs": info.get("mains"),
                     "clave_probs": info.get("claves"),
+                    "probs_draw_id": info.get("draw_id"),
+                    "probs_fecha_sorteo": info.get("fecha_sorteo"),
+                }
+            },
+            upsert=True,
+        )
+
+    return JSONResponse(content={"status": "ok", "info": info})
+
+
+@app.get("/api/la-primitiva/prediction/ml")
+def api_la_primitiva_prediction_ml(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description=(
+            "Optional id_sorteo: use this draw as cutoff; "
+            "if omitted, use the latest draw in la_primitiva_feature."
+        ),
+    ),
+):
+    """
+    Step 3 (new_flow): generate per-number probabilities for the next La Primitiva draw
+    using the trained Gradient Boosting models.
+    """
+    try:
+        info = compute_la_primitiva_probabilities(cutoff_draw_id=cutoff_draw_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error while computing La Primitiva ML probabilities: {e!s}",
+        )
+
+    if db is not None and info.get("cutoff_draw_id"):
+        coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+        now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        coll.update_one(
+            {"cutoff_draw_id": str(info["cutoff_draw_id"]).strip()},
+            {
+                "$set": {
+                    "probs_computed": True,
+                    "probs_computed_at": now,
+                    "mains_probs": info.get("mains"),
+                    "reintegro_probs": info.get("reintegros"),
                     "probs_draw_id": info.get("draw_id"),
                     "probs_fecha_sorteo": info.get("fecha_sorteo"),
                 }
@@ -1475,6 +1802,174 @@ def api_el_gordo_candidate_pool(
     for idx, mains in enumerate(mains_combos):
         clave = clave_nums[idx % len(clave_nums)]
         tickets.append({"mains": list(mains), "clave": int(clave)})
+
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    coll.update_one(
+        {"cutoff_draw_id": cid},
+        {
+            "$set": {
+                "candidate_pool": tickets,
+                "candidate_pool_at": now,
+                "candidate_pool_count": len(tickets),
+            }
+        },
+    )
+    return JSONResponse(
+        content={"status": "ok", "candidate_pool_count": len(tickets)},
+    )
+
+
+@app.post("/api/la-primitiva/train/rule-filters")
+def api_la_primitiva_rule_filters(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="id_sorteo for this La Primitiva training run (uses saved mains_probs/reintegro_probs).",
+    ),
+):
+    """
+    Step 4 (new_flow): build pool of main numbers + reintegro numbers for La Primitiva.
+    - 4–5 mains + 1 reintegro from row where pre_id_sorteo == current id_sorteo, or random if not found.
+    - Remaining mains from Step 3 ranking bands (1–20: 6–8, 21–35: 4, 36–49: 4); pool capped at 20.
+    - Reintegro pool: snapshot reintegro + up to 5 additional candidates from Step 3 ranking, no duplicate.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        raise HTTPException(400, detail="cutoff_draw_id is required")
+    cid = cutoff_draw_id.strip()
+    progress_coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+    feature_coll = db["la_primitiva_feature"]
+    doc = progress_coll.find_one({"cutoff_draw_id": cid})
+    if not doc:
+        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+    mains = doc.get("mains_probs") or []
+    reintegros = doc.get("reintegro_probs") or []
+    if not mains and not reintegros:
+        raise HTTPException(400, detail="Run step 3 (compute probabilities) first.")
+
+    # Row where pre_id_sorteo == current id_sorteo
+    prev_main_numbers: Optional[List[int]] = None
+    prev_reintegro: Optional[int] = None
+    prev_row = feature_coll.find_one({"pre_id_sorteo": cid})
+    if prev_row:
+        pm = prev_row.get("main_number") or []
+        prev_main_numbers = [int(x) for x in pm if isinstance(x, (int, float))]
+        rein_val = prev_row.get("reintegro")
+        if isinstance(rein_val, (int, float)):
+            prev_reintegro = int(rein_val)
+
+    result = build_la_primitiva_step4_pool(
+        mains_probs=mains,
+        reintegro_probs=reintegros,
+        prev_main_numbers=prev_main_numbers,
+        prev_reintegro=prev_reintegro,
+        seed=None,
+    )
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    progress_coll.update_one(
+        {"cutoff_draw_id": cid},
+        {
+            "$set": {
+                "rules_applied": True,
+                "rules_applied_at": now,
+                "filtered_mains_probs": result["filtered_mains"],
+                "filtered_reintegro_probs": result["filtered_reintegro"],
+                "rule_flags": {
+                    "rules_used": result["rules_used"],
+                    "excluded": result["excluded"],
+                    "stats": result.get("stats"),
+                    "snapshot_mains": result.get("snapshot_mains"),
+                    "snapshot_reintegro": result.get("snapshot_reintegro"),
+                },
+            }
+        },
+    )
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "filtered_mains": result["filtered_mains"],
+            "filtered_reintegro": result["filtered_reintegro"],
+            "rules_used": result["rules_used"],
+            "excluded": result["excluded"],
+        }
+    )
+
+
+@app.post("/api/la-primitiva/train/candidate-pool")
+def api_la_primitiva_candidate_pool(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="id_sorteo for this La Primitiva training run.",
+    ),
+    num_tickets: int = Query(3000, ge=100, le=10000),
+):
+    """
+    Step 5 (new_flow): generate candidate ticket pool for La Primitiva from Step 4 pool.
+
+    - Uses filtered_mains_probs (mains pool) and filtered_reintegro_probs (reintegro pool)
+      produced by Step 4.
+    - Each ticket: 6 distinct mains from the mains pool, 1 reintegro from the pool
+      (assigned in round-robin order).
+    - Saves candidate_pool (list of {mains, reintegro}) and count to la_primitiva_train_progress.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        raise HTTPException(400, detail="cutoff_draw_id is required")
+    cid = cutoff_draw_id.strip()
+    coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one({"cutoff_draw_id": cid})
+    if not doc:
+        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+
+    filtered_mains = doc.get("filtered_mains_probs") or []
+    filtered_rein = doc.get("filtered_reintegro_probs") or []
+    if not filtered_mains or len(filtered_mains) < 6:
+        raise HTTPException(
+            400,
+            detail="Run step 4 (rule filters) first to get mains pool (need at least 6).",
+        )
+    if not filtered_rein:
+        raise HTTPException(
+            400,
+            detail="Run step 4 (rule filters) first to get reintegro pool (need at least 1).",
+        )
+
+    main_nums = [
+        int(x.get("number") or 0)
+        for x in filtered_mains
+        if x.get("number") is not None
+    ]
+    rein_nums = [
+        int(x.get("number") or 0)
+        for x in filtered_rein
+        if x.get("number") is not None
+    ]
+    main_set = sorted(set(main_nums))
+    rein_set = sorted(set(rein_nums))
+    if len(main_set) < 6:
+        raise HTTPException(
+            400,
+            detail="Pool too small: need at least 6 distinct mains.",
+        )
+    if not rein_set:
+        raise HTTPException(
+            400,
+            detail="Pool too small: need at least 1 reintegro.",
+        )
+
+    # Generate mains combinations (6 numbers) in a structured way (no duplicates),
+    # then pair them with reintegros in round-robin fashion.
+    unique_mains_combos = list(combinations(main_set, 6))
+    random.shuffle(unique_mains_combos)
+    max_mains = min(len(unique_mains_combos), num_tickets)
+    mains_combos = unique_mains_combos[:max_mains]
+
+    random.shuffle(rein_set)
+    tickets: List[Dict] = []
+    for idx, mains in enumerate(mains_combos):
+        rein = rein_set[idx % len(rein_set)]
+        tickets.append({"mains": list(mains), "reintegro": int(rein)})
 
     now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     coll.update_one(
