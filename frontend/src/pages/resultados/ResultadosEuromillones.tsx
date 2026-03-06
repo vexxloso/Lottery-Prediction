@@ -2,6 +2,7 @@ import { useSearchParams } from 'react-router-dom';
 import { ResultadosPage } from './ResultadosPage';
 import { EuromillonesFeaturesPanel } from './EuromillonesFeaturesPanel';
 import { EuromillonesApuestasPanel } from './EuromillonesApuestasPanel';
+import { EuromillonesPredictionPage } from './EuromillonesPredictionPage';
 
 type EuromillonesTab = 'results' | 'prediction' | 'grafico';
 
@@ -10,6 +11,7 @@ export function ResultadosEuromillones() {
   const tabParam = (searchParams.get('tab') as EuromillonesTab | null) ?? 'results';
   const activeTab: EuromillonesTab =
     tabParam === 'prediction' || tabParam === 'grafico' ? tabParam : 'results';
+  const hasCutoffDraw = !!searchParams.get('cutoff_draw_id');
 
   const setActiveTab = (tab: EuromillonesTab) => {
     const params = new URLSearchParams(searchParams);
@@ -53,7 +55,7 @@ export function ResultadosEuromillones() {
         {activeTab === 'results' && <ResultadosPage lottery="euromillones" />}
         {activeTab === 'prediction' && (
           <div className="resultados-euromillones-features">
-            <EuromillonesFeaturesPanel />
+            {hasCutoffDraw ? <EuromillonesPredictionPage /> : <EuromillonesFeaturesPanel />}
           </div>
         )}
         {activeTab === 'grafico' && (

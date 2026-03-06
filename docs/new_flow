@@ -1,0 +1,95 @@
+1. Inputs
+Feature collections (per lottery, e.g. Euromillones):
+    *_feature (euromillones_feature, la_primitiva_feature, el_gordo_feature)
+    Fields: main_number, stars/clave/C/R, frequency, gap, etc.
+Model layer (what you’ll train / already have):
+    Frequency / gap / hot models (existing backend).
+    New ML models (LSTM/RNN, RF/GBM, etc.) you will add on top.
+2. Build a per‑number prediction model (from feature collection)
+    For each lottery (start with Euromillones):
+
+    -Create training dataset from *_feature:
+        For draw (t) (row (t) in euromillones_feature):
+            Features X_t:
+            e.g. frequency, gap, main_dx, star_dx, hot/cold flags, weekday…
+        Labels y_{t+1}:
+        one‑hot vectors saying which numbers appear in draw (t+1) (mains 1–50, stars 1–12).
+    -Train per‑number models:
+        For mains: X_t → P(main n in next draw) for all (n=1..50).
+        For stars: X_t → P(star s in next draw) for (s=1..12).
+        Models:
+            Start with RF/GBM or simple NN.
+            Later add LSTM/RNN (sequence of X_t over time) and ensemble them.
+    -Save the trained models (e.g. joblib or Torch) and version them.
+
+3. Generate per‑number probabilities for next draw
+At prediction time:
+
+    -Take the latest row from *_feature (last draw).
+    -Build its feature vector X_T.
+    -Run through the model(s) to get:
+    (p^\text{main}_n = P(\text{main}=n)) for all mains.
+    (p^\text{star}_s = P(\text{star}=s)) for all stars (or C/R/clave, for other lotteries).
+    Optionally ensemble existing frequency/gap/hot models:
+    (p^\text{final} = w_1 p^\text{ML} + w_2 p^\text{freq} + w_3 p^\text{gap} + …)
+    This gives you a probability vector per position.
+
+4. Build a high‑probability number pool
+Using the probabilities:
+    Rank numbers:
+        Sort mains by (p^\text{final}_n), stars (or C/R) by their probabilities.
+        Choose pool sizes:
+            Example (Euromillones):
+                Main pool: top K_main (e.g. 20–30) mains.
+                Star pool: top K_star (e.g. 6–8) stars.
+        Apply neuro‑symbolic / rule filters (optional):
+            Drop numbers that violate rules (e.g. too many consecutive, sum out of band).
+            Or just keep a “soft” score for these constraints for later.
+    Result: number pool P_main, P_star (and P_C, P_R for La Primitiva / P_clave for El Gordo).
+
+5. Produce a candidate ticket pool (~3000 tickets)
+Now you go from number pools to tickets:
+
+    Initial random tickets:
+        Sample many tickets using probabilities:
+            For each ticket:
+                Sample 5 (or 6) mains from P_main (weighted by prob, without replacement).
+            Sample stars/C/R/clave from their pools.
+    Generate more than 3000 (e.g. 10k) to have material for selection.
+Evaluate tickets (Monte Carlo):
+    For each ticket:
+        Approximate its quality:
+            Expected matches w.r.t. the probability model.
+            Or simulate many possible next draws from the model (Monte Carlo) and compute average prize/hits.
+    This uses Monte Carlo simulations (requirement 8).
+(Optional) Genetic algorithm refinement:
+    Treat each ticket (or set of tickets) as a chromosome.
+    Fitness = Monte‑Carlo score (expected hits/return).
+    Run GA:
+        Selection → better tickets.
+        Crossover → mix parts of good tickets.
+        Mutation → tweak numbers randomly.
+    After N generations, keep the best ~3000 tickets.
+Rule‑based post‑filtering (neuro‑symbolic):
+    Apply hard rules (no all‑even, limit high/low, no extreme sums).
+    This is where neuro‑symbolic ideas come in: models + domain rules.
+Result: a ticket pool of ~3000 “best” tickets.
+
+6. Expose to the app
+Backend API:
+    Add e.g. GET /api/euromillones/prediction/tickets:
+        Runs step 3–5 (or uses precomputed results in Mongo).
+        Returns:
+            per‑number probabilities,
+            ticket pool (list of tickets with scores).
+Frontend:
+    In the Euromillones Predicción page, add:
+        Probability charts (bars by number).
+        Ticket pool table/grid (top N tickets, with score, filters, etc.).
+7. Summary pipeline
+Feature collection (*_feature) → training dataset.
+Train per‑number models (NN/RF/LSTM) → save models.
+Latest feature row → per‑number probabilities.
+Probabilities → number pool (mains + stars/C/R/clave).
+Number pool + Monte Carlo + GA + rules → ~3000‑ticket pool.
+Ticket pool → backend API → Predicción UI.

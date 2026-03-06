@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Drawer, Row, Col } from 'antd';
 import {
   ResponsiveContainer,
@@ -267,12 +268,24 @@ export function EuromillonesFeaturesPanel() {
   } = useEuromillonesFeatures();
   const { rows: last10Rows, loading: last10Loading } = useEuromillonesLast10();
 
+  const [searchParams, setSearchParams] = useSearchParams();
   const [selectedRow, setSelectedRow] = useState<EuromillonesFeatureRow | null>(null);
   const [chartMode, setChartMode] = useState<'frequency' | 'gap'>('frequency');
 
   const openDrawer = (row: EuromillonesFeatureRow, mode: 'frequency' | 'gap') => {
     setSelectedRow(row);
     setChartMode(mode);
+  };
+
+  const goToPredictionBacktest = (row: EuromillonesFeatureRow) => {
+    const params = new URLSearchParams(searchParams);
+    params.set('tab', 'prediction');
+    if (row.id_sorteo) {
+      params.set('cutoff_draw_id', row.id_sorteo);
+    } else {
+      params.delete('cutoff_draw_id');
+    }
+    setSearchParams(params, { replace: true });
   };
 
   return (
@@ -328,6 +341,16 @@ export function EuromillonesFeaturesPanel() {
                           title="Ver gráfico de gaps"
                         >
                           <img src="/images/gape.svg" alt="" className="resultados-features-icon" />
+                        </button>
+                        <button
+                          type="button"
+                          className="resultados-features-iconbtn"
+                          style={{ marginLeft: 8 }}
+                          onClick={() => goToPredictionBacktest(row)}
+                          aria-label="Usar este sorteo como corte de backtesting"
+                          title="Usar este sorteo como corte de backtesting"
+                        >
+                          P
                         </button>
                       </td>
                     </tr>

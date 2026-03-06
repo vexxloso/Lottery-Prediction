@@ -7,6 +7,7 @@ Stores combinacion (main), parsed numbers/C/R, and joker combinacion.
 import json
 import logging
 import os
+import random
 import re
 import sys
 from contextlib import asynccontextmanager
@@ -31,40 +32,188 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 
-from simulation.euromillones.frequency_model import (
-    predict_next_frequency_scores,
-    save_frequency_simulation_result,
-    train_all_frequency_models,
+# Ensure we can import helper scripts from the project-level `scripts` folder.
+_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SCRIPTS_DIR = os.path.join(_ROOT_DIR, "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.append(_SCRIPTS_DIR)
+
+from train_euromillones_model import (
+    prepare_euromillones_dataset,
+    train_euromillones_models,
+    compute_euromillones_probabilities,
 )
-from simulation.euromillones.gap_model import (
-    predict_next_gap_scores,
-    save_gap_simulation_result,
-    train_all_gap_models,
-)
-from simulation.euromillones.hot_model import (
-    predict_next_hot_scores,
-    save_hot_simulation_result,
-    train_all_hot_models,
-)
-from simulation.euromillones.prediction_compare import compare_prediction_with_result
-from simulation.euromillones.candidate_pool import build_candidate_pool
-from simulation.el_gordo.candidate_pool import build_el_gordo_candidate_pool
-from simulation.el_gordo.frequency_model import (
-    predict_next_el_gordo_frequency_scores,
-    save_el_gordo_frequency_simulation_result,
-    train_all_el_gordo_frequency_models,
-)
-from simulation.el_gordo.gap_model import (
-    predict_next_el_gordo_gap_scores,
-    save_el_gordo_gap_simulation_result,
-    train_all_el_gordo_gap_models,
-)
-from simulation.el_gordo.hot_model import (
-    predict_next_el_gordo_hot_scores,
-    save_el_gordo_hot_simulation_result,
-    train_all_el_gordo_hot_models,
-)
-from simulation.el_gordo.simple_simulation import run_el_gordo_simple_simulation
+
+
+def build_step4_pool(
+    mains_probs: List[Dict],
+    stars_probs: List[Dict],
+    prev_main_numbers: Optional[List[int]] = None,
+    prev_star_numbers: Optional[List[int]] = None,
+    seed: Optional[int] = None,
+) -> Dict:
+    """
+    Step 4 pool: 20 main numbers + 4 star numbers.
+
+    - 3 mains + 1 star: from previous draw (prev_main_numbers, prev_star_numbers) if available,
+      else random. No duplicate with the rest.
+    - 17 mains: from Step 3 ranking (mains_probs sorted by p), no duplicate with the 3 above:
+      from 1st–20th select 8, 21st–30th select 3, 31st–40th select 3, 41st–50th select 3.
+    - 3 stars: from Step 3 star ranking, no duplicate with the 1 above:
+      from 1st–6th select 2, 7th–12th select 1.
+
+    Returns filtered_mains (20 items), filtered_stars (4 items), rules_used, stats.
+    """
+    if seed is not None:
+        random.seed(seed)
+    MAIN_MIN, MAIN_MAX = 1, 50
+    STAR_MIN, STAR_MAX = 1, 12
+    mains_ranking = sorted(mains_probs, key=lambda x: (x.get("p") or 0), reverse=True)
+    stars_ranking = sorted(stars_probs, key=lambda x: (x.get("p") or 0), reverse=True)
+    rules_used: List[str] = []
+    excluded = {"mains": [], "stars": []}
+
+    # --- 3 mains + 1 star from previous draw or random ---
+    if prev_main_numbers and len(prev_main_numbers) >= 3 and prev_star_numbers and len(prev_star_numbers) >= 1:
+        pick_mains = list(prev_main_numbers)[:5]
+        pick_stars = list(prev_star_numbers)[:2]
+        three_mains = random.sample(pick_mains, min(3, len(pick_mains)))
+        one_star = random.sample(pick_stars, 1)[0]
+        rules_used.append("from_previous_draw")
+    else:
+        three_mains = random.sample(range(MAIN_MIN, MAIN_MAX + 1), 3)
+        one_star = random.randint(STAR_MIN, STAR_MAX)
+        rules_used.append("random_3m_1s")
+
+    main_set = set(three_mains)
+    star_set = {one_star}
+
+    # --- 17 mains from ranking bands: random selection within each band (no duplicate with the 3) ---
+    def take_random_from_ranking(ranking: List[Dict], start_1based: int, end_1based: int, count: int, exclude: set) -> List[Dict]:
+        segment = [x for x in ranking[start_1based - 1 : end_1based] if int(x.get("number") or 0) not in exclude]
+        if len(segment) <= count:
+            chosen = list(segment)
+        else:
+            chosen = random.sample(segment, count)
+        for item in chosen:
+            exclude.add(int(item.get("number") or 0))
+        return chosen
+
+    from_1_20 = take_random_from_ranking(mains_ranking, 1, 20, 8, main_set)
+    from_21_30 = take_random_from_ranking(mains_ranking, 21, 30, 3, main_set)
+    from_31_40 = take_random_from_ranking(mains_ranking, 31, 40, 3, main_set)
+    from_41_50 = take_random_from_ranking(mains_ranking, 41, 50, 3, main_set)
+    rules_used.append("mains_ranking_bands_8_3_3_3")
+
+    filtered_mains_items: List[Dict] = []
+    for n in three_mains:
+        p = next((x.get("p") for x in mains_probs if int(x.get("number") or 0) == n), 0.0)
+        filtered_mains_items.append({"number": n, "p": p})
+    for seg in (from_1_20, from_21_30, from_31_40, from_41_50):
+        filtered_mains_items.extend(seg)
+    filtered_mains = filtered_mains_items[:20]
+
+    # --- 3 stars from ranking bands: random within each band (no duplicate with the 1) ---
+    from_star_1_6 = take_random_from_ranking(stars_ranking, 1, 6, 2, star_set)
+    from_star_7_12 = take_random_from_ranking(stars_ranking, 7, 12, 1, star_set)
+    rules_used.append("stars_ranking_bands_2_1")
+
+    filtered_stars_items: List[Dict] = []
+    p_one = next((x.get("p") for x in stars_probs if int(x.get("number") or 0) == one_star), 0.0)
+    filtered_stars_items.append({"number": one_star, "p": p_one})
+    filtered_stars_items.extend(from_star_1_6)
+    filtered_stars_items.extend(from_star_7_12)
+    filtered_stars = filtered_stars_items[:4]
+
+    def _stats(rows: List[Dict]) -> Dict:
+        nums = [int(r.get("number") or 0) for r in rows]
+        return {
+            "count": len(nums),
+            "sum": sum(nums),
+            "even": sum(1 for n in nums if n % 2 == 0),
+            "odd": sum(1 for n in nums if n % 2 != 0),
+        }
+
+    stats = {"mains": _stats(filtered_mains), "stars": _stats(filtered_stars)}
+    return {
+        "filtered_mains": filtered_mains,
+        "filtered_stars": filtered_stars,
+        "rules_used": rules_used,
+        "excluded": excluded,
+        "stats": stats,
+    }
+
+try:
+    from simulation.euromillones.frequency_model import (
+        predict_next_frequency_scores,
+        save_frequency_simulation_result,
+        train_all_frequency_models,
+    )
+    from simulation.euromillones.gap_model import (
+        predict_next_gap_scores,
+        save_gap_simulation_result,
+        train_all_gap_models,
+    )
+    from simulation.euromillones.hot_model import (
+        predict_next_hot_scores,
+        save_hot_simulation_result,
+        train_all_hot_models,
+    )
+    from simulation.euromillones.prediction_compare import compare_prediction_with_result
+    from simulation.euromillones.candidate_pool import build_candidate_pool
+    from simulation.el_gordo.candidate_pool import build_el_gordo_candidate_pool
+    from simulation.el_gordo.frequency_model import (
+        predict_next_el_gordo_frequency_scores,
+        save_el_gordo_frequency_simulation_result,
+        train_all_el_gordo_frequency_models,
+    )
+    from simulation.el_gordo.gap_model import (
+        predict_next_el_gordo_gap_scores,
+        save_el_gordo_gap_simulation_result,
+        train_all_el_gordo_gap_models,
+    )
+    from simulation.el_gordo.hot_model import (
+        predict_next_el_gordo_hot_scores,
+        save_el_gordo_hot_simulation_result,
+        train_all_el_gordo_hot_models,
+    )
+    from simulation.el_gordo.simple_simulation import run_el_gordo_simple_simulation
+    SIMULATION_AVAILABLE = True
+except ModuleNotFoundError:
+    # Older environments or stripped-down deployments may not include the
+    # optional `simulation` package. In that case we still want the API to
+    # start; the specific simulation endpoints will fail at call time.
+    SIMULATION_AVAILABLE = False
+
+    def _missing_simulation(*_args, **_kwargs):
+        raise RuntimeError("Simulation models are not available in this environment.")
+
+    predict_next_frequency_scores = _missing_simulation  # type: ignore[assignment]
+    save_frequency_simulation_result = _missing_simulation  # type: ignore[assignment]
+    train_all_frequency_models = _missing_simulation  # type: ignore[assignment]
+
+    predict_next_gap_scores = _missing_simulation  # type: ignore[assignment]
+    save_gap_simulation_result = _missing_simulation  # type: ignore[assignment]
+    train_all_gap_models = _missing_simulation  # type: ignore[assignment]
+
+    predict_next_hot_scores = _missing_simulation  # type: ignore[assignment]
+    save_hot_simulation_result = _missing_simulation  # type: ignore[assignment]
+    train_all_hot_models = _missing_simulation  # type: ignore[assignment]
+
+    compare_prediction_with_result = _missing_simulation  # type: ignore[assignment]
+    build_candidate_pool = _missing_simulation  # type: ignore[assignment]
+
+    build_el_gordo_candidate_pool = _missing_simulation  # type: ignore[assignment]
+    predict_next_el_gordo_frequency_scores = _missing_simulation  # type: ignore[assignment]
+    save_el_gordo_frequency_simulation_result = _missing_simulation  # type: ignore[assignment]
+    train_all_el_gordo_frequency_models = _missing_simulation  # type: ignore[assignment]
+    predict_next_el_gordo_gap_scores = _missing_simulation  # type: ignore[assignment]
+    save_el_gordo_gap_simulation_result = _missing_simulation  # type: ignore[assignment]
+    train_all_el_gordo_gap_models = _missing_simulation  # type: ignore[assignment]
+    predict_next_el_gordo_hot_scores = _missing_simulation  # type: ignore[assignment]
+    save_el_gordo_hot_simulation_result = _missing_simulation  # type: ignore[assignment]
+    train_all_el_gordo_hot_models = _missing_simulation  # type: ignore[assignment]
+    run_el_gordo_simple_simulation = _missing_simulation  # type: ignore[assignment]
 
 # Lottery slug -> game_id for loteriasyapuestas.es API (El Gordo = ELGR per site)
 GAME_IDS = {
@@ -89,6 +238,7 @@ SITE_ORIGIN = "https://www.loteriasyapuestas.es"
 # One collection per lottery (El Gordo = ELGR)
 COLLECTIONS = {"LAPR": "la_primitiva", "EMIL": "euromillones", "ELGR": "el_gordo"}
 METADATA_COLLECTION = "scraper_metadata"
+EUROMILLONES_TRAIN_PROGRESS_COLLECTION = "euromillones_train_progress"
 
 logger = logging.getLogger("lottery")
 
@@ -107,6 +257,7 @@ async def lifespan(app: FastAPI):
     db = client[MONGO_DB]
     for coll_name in COLLECTIONS.values():
         db[coll_name].create_index("id_sorteo", unique=True)
+    db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
     yield
     if client:
         client.close()
@@ -712,6 +863,364 @@ def get_euromillones_feature_model(
     cursor = coll.find().sort("fecha_sorteo", -1).skip(skip).limit(limit)
     docs = [_doc_to_json(doc) for doc in cursor]
     return JSONResponse(content={"features": docs, "total": total})
+
+
+@app.get("/api/euromillones/train/progress")
+def api_euromillones_train_progress(
+    cutoff_draw_id: str | None = Query(None, description="id_sorteo for this training run."),
+):
+    """Return training progress for the given cutoff_draw_id (dataset prepared, models trained)."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        return JSONResponse(
+            content={"progress": None},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one({"cutoff_draw_id": cutoff_draw_id.strip()})
+    if not doc:
+        return JSONResponse(
+            content={"progress": None},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    progress = {
+        "cutoff_draw_id": doc.get("cutoff_draw_id"),
+        "dataset_prepared": bool(doc.get("dataset_prepared")),
+        "dataset_prepared_at": doc.get("dataset_prepared_at"),
+        "main_rows": doc.get("main_rows"),
+        "star_rows": doc.get("star_rows"),
+        "models_trained": bool(doc.get("models_trained")),
+        "trained_at": doc.get("trained_at"),
+        "main_accuracy": doc.get("main_accuracy"),
+        "star_accuracy": doc.get("star_accuracy"),
+        "probs_computed": bool(doc.get("probs_computed")),
+        "probs_computed_at": doc.get("probs_computed_at"),
+        "mains_probs": doc.get("mains_probs"),
+        "stars_probs": doc.get("stars_probs"),
+        "probs_draw_id": doc.get("probs_draw_id"),
+        "probs_fecha_sorteo": doc.get("probs_fecha_sorteo"),
+        "rules_applied": bool(doc.get("rules_applied")),
+        "rules_applied_at": doc.get("rules_applied_at"),
+        "filtered_mains_probs": doc.get("filtered_mains_probs"),
+        "filtered_stars_probs": doc.get("filtered_stars_probs"),
+        "rule_flags": doc.get("rule_flags"),
+        "generated_30_mains": doc.get("generated_30_mains"),
+        "generated_30_mains_at": doc.get("generated_30_mains_at"),
+        "candidate_pool": doc.get("candidate_pool"),
+        "candidate_pool_at": doc.get("candidate_pool_at"),
+        "candidate_pool_count": doc.get("candidate_pool_count"),
+    }
+    return JSONResponse(
+        content={"progress": progress},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.post("/api/euromillones/train/prepare-dataset")
+def api_euromillones_prepare_dataset(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="Optional id_sorteo: only draws up to this one (inclusive) are used to build the dataset.",
+    ),
+):
+    """
+    Build / refresh the Euromillones per-number training datasets from
+    `euromillones_feature`.
+
+    This calls `scripts/train_euromillones_model.prepare_euromillones_dataset`
+    inside the backend process and returns basic metadata so the UI can show
+    where the CSV files were written. Saves progress to euromillones_train_progress.
+    """
+    try:
+        info = prepare_euromillones_dataset(cutoff_draw_id=cutoff_draw_id, out_dir=None)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error while preparing Euromillones dataset: {e!s}",
+        )
+    if db is not None and cutoff_draw_id:
+        coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+        now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        coll.update_one(
+            {"cutoff_draw_id": cutoff_draw_id.strip()},
+            {
+                "$set": {
+                    "cutoff_draw_id": cutoff_draw_id.strip(),
+                    "dataset_prepared": True,
+                    "dataset_prepared_at": now,
+                    "main_rows": info.get("main_rows"),
+                    "star_rows": info.get("star_rows"),
+                }
+            },
+            upsert=True,
+        )
+    return JSONResponse(content={"status": "ok", "info": info})
+
+
+@app.post("/api/euromillones/train/models")
+def api_euromillones_train_models(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description=(
+            "Optional id_sorteo: only draws up to this one (inclusive) are used "
+            "for both dataset building and model training."
+        ),
+    ),
+):
+    """
+    Train Gradient Boosting models for Euromillones mains and stars using the
+    per-number dataset derived from `euromillones_feature`. Saves progress to euromillones_train_progress.
+    """
+    try:
+        info = train_euromillones_models(cutoff_draw_id=cutoff_draw_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error while training Euromillones models: {e!s}",
+        )
+    if db is not None and cutoff_draw_id:
+        coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+        now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        coll.update_one(
+            {"cutoff_draw_id": cutoff_draw_id.strip()},
+            {
+                "$set": {
+                    "models_trained": True,
+                    "trained_at": now,
+                    "main_accuracy": info.get("main_accuracy"),
+                    "star_accuracy": info.get("star_accuracy"),
+                }
+            },
+            upsert=True,
+        )
+    return JSONResponse(content={"status": "ok", "info": info})
+
+
+@app.get("/api/euromillones/prediction/ml")
+def api_euromillones_prediction_ml(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description=(
+            "Optional id_sorteo: use this draw as cutoff; "
+            "if omitted, use the latest draw in euromillones_feature."
+        ),
+    ),
+):
+    """
+    Step 3 (new_flow): generate per-number probabilities for the next Euromillones draw
+    using the trained Gradient Boosting models.
+    """
+    try:
+        info = compute_euromillones_probabilities(cutoff_draw_id=cutoff_draw_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error while computing Euromillones ML probabilities: {e!s}",
+        )
+
+    if db is not None and info.get("cutoff_draw_id"):
+        coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+        now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        coll.update_one(
+            {"cutoff_draw_id": str(info["cutoff_draw_id"]).strip()},
+            {
+                "$set": {
+                    "probs_computed": True,
+                    "probs_computed_at": now,
+                    "mains_probs": info.get("mains"),
+                    "stars_probs": info.get("stars"),
+                    "probs_draw_id": info.get("draw_id"),
+                    "probs_fecha_sorteo": info.get("fecha_sorteo"),
+                }
+            },
+            upsert=True,
+        )
+
+    return JSONResponse(content={"status": "ok", "info": info})
+
+
+@app.post("/api/euromillones/train/rule-filters")
+def api_euromillones_rule_filters(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="id_sorteo for this training run (uses saved mains_probs/stars_probs).",
+    ),
+):
+    """
+    Step 4 (new_flow): build pool of 20 main numbers + 4 star numbers.
+    - 3 mains + 1 star from row where pre_id_sorteo == current id_sorteo, or random if not found.
+    - 17 mains from Step 3 ranking bands (1–20: 8, 21–30: 3, 31–40: 3, 41–50: 3), no duplicate.
+    - 3 stars from Step 3 star ranking (1–6: 2, 7–12: 1), no duplicate.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        raise HTTPException(400, detail="cutoff_draw_id is required")
+    cid = cutoff_draw_id.strip()
+    progress_coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    feature_coll = db["euromillones_feature"]
+    doc = progress_coll.find_one({"cutoff_draw_id": cid})
+    if not doc:
+        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+    mains = doc.get("mains_probs") or []
+    stars = doc.get("stars_probs") or []
+    if not mains and not stars:
+        raise HTTPException(400, detail="Run step 3 (compute probabilities) first.")
+
+    # Row where pre_id_sorteo == current id_sorteo (current id_sorteo == row.pre_id_sorteo)
+    prev_main_numbers: Optional[List[int]] = None
+    prev_star_numbers: Optional[List[int]] = None
+    prev_row = feature_coll.find_one({"pre_id_sorteo": cid})
+    if prev_row:
+        pm = prev_row.get("main_number") or []
+        ps = prev_row.get("star_number") or []
+        prev_main_numbers = [int(x) for x in pm if isinstance(x, (int, float))]
+        prev_star_numbers = [int(x) for x in ps if isinstance(x, (int, float))]
+
+    result = build_step4_pool(
+        mains_probs=mains,
+        stars_probs=stars,
+        prev_main_numbers=prev_main_numbers,
+        prev_star_numbers=prev_star_numbers,
+        seed=None,
+    )
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    progress_coll.update_one(
+        {"cutoff_draw_id": cid},
+        {
+            "$set": {
+                "rules_applied": True,
+                "rules_applied_at": now,
+                "filtered_mains_probs": result["filtered_mains"],
+                "filtered_stars_probs": result["filtered_stars"],
+                "rule_flags": {
+                    "rules_used": result["rules_used"],
+                    "excluded": result["excluded"],
+                    "stats": result.get("stats"),
+                },
+            }
+        },
+    )
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "filtered_mains": result["filtered_mains"],
+            "filtered_stars": result["filtered_stars"],
+            "rules_used": result["rules_used"],
+            "excluded": result["excluded"],
+        }
+    )
+
+
+@app.post("/api/euromillones/train/candidate-pool")
+def api_euromillones_candidate_pool(
+    cutoff_draw_id: str | None = Query(None, description="id_sorteo for this training run."),
+    num_tickets: int = Query(3000, ge=100, le=10000),
+):
+    """
+    Step 5: generate candidate ticket pool from Step 4 number pool (20 mains, 4 stars).
+    Each ticket: 5 distinct mains from the 20, 2 distinct stars from the 4.
+    Saves candidate_pool (list of {mains, stars}) and count to progress.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        raise HTTPException(400, detail="cutoff_draw_id is required")
+    cid = cutoff_draw_id.strip()
+    coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one({"cutoff_draw_id": cid})
+    if not doc:
+        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+    filtered_mains = doc.get("filtered_mains_probs") or []
+    filtered_stars = doc.get("filtered_stars_probs") or []
+    if not filtered_mains or len(filtered_mains) < 5:
+        raise HTTPException(400, detail="Run step 4 (rule filters) first to get 20 mains pool.")
+    if not filtered_stars or len(filtered_stars) < 2:
+        raise HTTPException(400, detail="Run step 4 to get 4 stars pool.")
+    main_nums = [int(x.get("number") or 0) for x in filtered_mains if x.get("number") is not None]
+    star_nums = [int(x.get("number") or 0) for x in filtered_stars if x.get("number") is not None]
+    if len(main_nums) < 5 or len(star_nums) < 2:
+        raise HTTPException(400, detail="Pool too small: need at least 5 mains and 2 stars.")
+    tickets: List[Dict] = []
+    for _ in range(num_tickets):
+        mains = random.sample(main_nums, min(5, len(main_nums)))
+        stars = random.sample(star_nums, min(2, len(star_nums)))
+        tickets.append({"mains": sorted(mains), "stars": sorted(stars)})
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    coll.update_one(
+        {"cutoff_draw_id": cid},
+        {
+            "$set": {
+                "candidate_pool": tickets,
+                "candidate_pool_at": now,
+                "candidate_pool_count": len(tickets),
+            }
+        },
+    )
+    return JSONResponse(
+        content={"status": "ok", "candidate_pool_count": len(tickets)},
+    )
+
+
+@app.post("/api/euromillones/train/generate-30-mains")
+def api_euromillones_generate_30_mains(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="id_sorteo for this training run.",
+    ),
+):
+    """
+    Step 5: generate exactly 30 main numbers from the pool (filtered if step 4 was run,
+    else top 30 by probability). Saves generated_30_mains to progress.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        raise HTTPException(400, detail="cutoff_draw_id is required")
+    coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one({"cutoff_draw_id": cutoff_draw_id.strip()})
+    if not doc:
+        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+    mains_probs = doc.get("mains_probs") or []
+    filtered = doc.get("filtered_mains_probs") or []
+    if not mains_probs:
+        raise HTTPException(
+            400,
+            detail="Run step 3 (compute probabilities) first.",
+        )
+    # Prefer filtered pool (step 4) if available, else use full mains_probs
+    pool = filtered if filtered else mains_probs
+    sorted_pool = sorted(pool, key=lambda x: (x.get("p") or 0), reverse=True)
+    numbers_so_far: List[int] = []
+    for item in sorted_pool:
+        n = item.get("number")
+        if n is not None and int(n) not in numbers_so_far:
+            numbers_so_far.append(int(n))
+        if len(numbers_so_far) >= 30:
+            break
+    # If we have fewer than 30 (e.g. after consecutive filter), fill from mains_probs by prob
+    by_num = {int(x.get("number")): x for x in mains_probs if x.get("number") is not None}
+    for item in sorted(mains_probs, key=lambda x: (x.get("p") or 0), reverse=True):
+        if len(numbers_so_far) >= 30:
+            break
+        n = int(item.get("number"))
+        if n not in numbers_so_far:
+            numbers_so_far.append(n)
+    generated = numbers_so_far[:30]
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    coll.update_one(
+        {"cutoff_draw_id": cutoff_draw_id.strip()},
+        {
+            "$set": {
+                "generated_30_mains": generated,
+                "generated_30_mains_at": now,
+            }
+        },
+    )
+    return JSONResponse(
+        content={"status": "ok", "generated_30_mains": generated},
+    )
 
 
 @app.get("/api/el-gordo/feature-model")

@@ -47,3 +47,24 @@ Fecha	Resultado (6 + C + R)	Hot mains	Cold mains	Hot C	Cold C	Hot R	Cold R	Todo
 Presencia (dot) (main and star)
 Gap — Números principales (main and star)
 Frecuencia (dot) — Números principales (main and star)
+
+
+i will update this rule
+i will selete 20 main_number and 3 star_number pool
+    3 main, 1 star: 
+        on euromillones_feature model find pre_id_sorteo == current id
+        true->on main_number select any 3 number, on star_number select any 1 number
+        else->generate randomaly any 3 main number and any 1 star number
+    and i will select 17 main number on ranking array(step 3) but don't duplicate
+    1th~20th select 8
+    21th~30th select 3
+    31th~40th select 3
+    41th~50th select 3
+    also select 3 star number on ranking star array (step 3)
+    star
+        1th~6th select 2
+        7th~12th select 1
+
+so step 4 result is 20 main number and 4 star number
+
+
