@@ -126,4 +126,39 @@ so i can see any one and this is swap every 0.5
 so i can see 10 ticket during 5s
 display this full line and add here card
 
+-------------------------------betting bot------------------------------------
+first try on el-gordo
+when i click buy icon on buket
+and selenium create new chrome and redirect to https://juegos.loteriasyapuestas.es/jugar/gordo-primitiva/apuesta
 
+and loop buket ticket one by one
+    select 5 main number then select one Clave
+    <div class="modulo-botonera">
+		<div class="botonera-combinaciones">	
+			<button value="1" name="" class="boton-boleto">1</button>
+			<button value="2" name="" class="boton-boleto">2</button>
+			<button value="3" name="" class="boton-boleto">3</button>
+		    <button value="4" name="" class="boton-boleto">4</button>
+					...     ...     ...
+			<button value="54" name="" class="boton-boleto">54</button>
+		</div>
+		<div class="botonera-num-clave">
+			<strong class="literal">Nº Clave</strong>
+			<span class="tooltipNumClave">
+				<i class="ico"></i>
+				<span class="texto">
+					Selecciona el Nº Clave
+				</span>
+			</span> 	 	
+			<div class="botones">			
+				<button value="0" name="" class="boton-boleto">0</button>
+				<button value="1" name="" class="boton-boleto">1</button>
+                        ...     ...     ...
+				<button value="9" name="" class="boton-boleto">9</button>
+			</div>
+		</div>
+	</div>
+after all select 6 ticket and click "confirm tu apuesta" button
+    <div class="modulo-bloque-seleccion bloque-boton">				
+		<button class="boton-confirmar">CONFIRMA TU APUESTA</button>
+	</div> 
