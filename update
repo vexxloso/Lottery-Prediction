@@ -85,3 +85,34 @@ i have to create el-gordo generate ticket system and cpmpare system like Euromil
 but there is some difference so i will implement one by one with you
 so you have to lead me like Euromillones and i will confirm same or not and i will give you what changed 
 where can we start this work?
+
+now i will make betting page(first i will try on el-gordo)
+so make one more tab betting with Resultados, Predicción, Gráfico
+here display prediction lottery pool
+read scraper_metadata and find last_draw_date
+find last_draw_date == probs_fecha_sorteo in el_gordo_train_progress collection
+and display candidate pool
+
+i will select tickets on this pool and save this on real_pool 
+and i can select 6 tickets at once after buy and i can select again
+so on dashboard have to display candidate pool, real pool, and buket
+
+i will update ui like this
+split screen 16:8
+left:16 display card like galery and when i click card and move to buket
+right: 8 top- display buket(like galery), bottom - display real tiket pool
+use fantastic ui and add some animations so looks like moredern
+
+
+find last_draw_date from scraper_metadata collection
+    there is exist three last date with three document
+and with this date find *train_progress data probs_fecha_sorteo === last_draw_date
+so now i use date instead of id for betting tab
+
+now i am working on la-primitiva compare page
+here system compare cadidate pool ticket & real result
+here i will add compre bought_tickes & real result
+(this is all same as compare cadidate pool ticket & real result)
+just read bought_tickes item with candidate_pool
+so select button prediction or real bougth
+and display all same as just use an other ticket pool(bought_ticket)

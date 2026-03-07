@@ -45,7 +45,12 @@ function buildLaPrimitivaPrizeLookup(escrutinio: any[]): Map<string, number> {
     else if (/Reintegro/i.test(tipo)) key = '0-1';
     if (key != null) prizeLookup.set(key, premio);
   });
-  // 3+1 same as 3, 4+1 same as 4, 5+1 same as 5 (reintegro match doesn't change prize for these)
+  // 1+1 and 2+1 = reintegro prize (0+1); 3+1 = 3+0, 4+1 = 4+0, 5+1 = 5+0
+  const v0_1 = prizeLookup.get('0-1');
+  if (v0_1 != null) {
+    prizeLookup.set('1-1', v0_1);
+    prizeLookup.set('2-1', v0_1);
+  }
   const v3 = prizeLookup.get('3-0'); if (v3 != null) prizeLookup.set('3-1', v3);
   const v4 = prizeLookup.get('4-0'); if (v4 != null) prizeLookup.set('4-1', v4);
   const v5 = prizeLookup.get('5-0'); if (v5 != null) prizeLookup.set('5-1', v5);
@@ -133,14 +138,22 @@ export function SimulationPage() {
   const [compareProgressError, setCompareProgressError] = useState('');
   type CompareTicket =
     | { mains: number[]; stars: number[] }
-    | { mains: number[]; clave: number };
+    | { mains: number[]; clave: number }
+    | { mains: number[]; reintegro: number };
 
   const [compareProgress, setCompareProgress] = useState<{
     cutoff_draw_id: string;
     candidate_pool?: CompareTicket[];
     candidate_pool_count?: number;
+    bought_tickets?: CompareTicket[];
   } | null>(null);
   const [comparePoolLimit, setComparePoolLimit] = useState(20);
+  /** La Primitiva: which ticket pool to compare vs real result — prediction or bought. */
+  const [compareLaPrimitivaSource, setCompareLaPrimitivaSource] = useState<'prediction' | 'bought'>('prediction');
+  /** Euromillones: which ticket pool to compare vs real result — prediction or bought. */
+  const [compareEuromillonesSource, setCompareEuromillonesSource] = useState<'prediction' | 'bought'>('prediction');
+  /** El Gordo: which ticket pool to compare vs real result — prediction or bought. */
+  const [compareElGordoSource, setCompareElGordoSource] = useState<'prediction' | 'bought'>('prediction');
   const [showComparePoolTable, setShowComparePoolTable] = useState(false);
   const [featureRowsLoading, setFeatureRowsLoading] = useState(false);
   const [featureRowsError, setFeatureRowsError] = useState('');
@@ -398,8 +411,26 @@ export function SimulationPage() {
 
   const openComparePoolGraph = () => {
     if (!compareProgress || !compareDraw) return;
-    const pool = compareProgress.candidate_pool ?? [];
-    const limit = Math.min(comparePoolLimit, pool.length);
+    const pool =
+      slug === 'la-primitiva'
+        ? (compareLaPrimitivaSource === 'bought'
+            ? (compareProgress.bought_tickets ?? [])
+            : (compareProgress.candidate_pool ?? []))
+        : slug === 'euromillones'
+          ? (compareEuromillonesSource === 'bought'
+              ? (compareProgress.bought_tickets ?? [])
+              : (compareProgress.candidate_pool ?? []))
+          : slug === 'el-gordo'
+            ? (compareElGordoSource === 'bought'
+                ? (compareProgress.bought_tickets ?? [])
+                : (compareProgress.candidate_pool ?? []))
+            : (compareProgress.candidate_pool ?? []);
+    const limit =
+      (slug === 'la-primitiva' && compareLaPrimitivaSource === 'bought') ||
+      (slug === 'euromillones' && compareEuromillonesSource === 'bought') ||
+      (slug === 'el-gordo' && compareElGordoSource === 'bought')
+        ? pool.length
+        : Math.min(comparePoolLimit, pool.length);
     if (!limit) return;
     const mainSet = new Set(compareDraw.main.map(Number));
     const starSet = new Set(compareDraw.stars.map(Number));
@@ -598,10 +629,15 @@ export function SimulationPage() {
           return;
         }
         const pool = progress.candidate_pool;
+        const bought = progress.bought_tickets;
         setCompareProgress({
           cutoff_draw_id: progress.cutoff_draw_id ?? prevId,
           candidate_pool: Array.isArray(pool) ? (pool as CompareTicket[]) : undefined,
           candidate_pool_count: progress.candidate_pool_count,
+          bought_tickets:
+            (slug === 'la-primitiva' || slug === 'euromillones' || slug === 'el-gordo') && Array.isArray(bought)
+              ? (bought as CompareTicket[])
+              : undefined,
         });
       } catch (e) {
         setCompareProgressError(e instanceof Error ? e.message : 'Error al cargar progreso');
@@ -774,6 +810,24 @@ export function SimulationPage() {
                 <section className={`card resultados-features-card resultados-theme-${slug} euromillones-compare-table-col`}>
                   {compareProgress && compareDraw && (
                     <div className="euromillones-compare-pool">
+                      {(() => {
+                        const comparePool =
+                          slug === 'la-primitiva'
+                            ? (compareLaPrimitivaSource === 'bought'
+                                ? (compareProgress.bought_tickets ?? [])
+                                : (compareProgress.candidate_pool ?? [])) as CompareTicket[]
+                            : slug === 'euromillones'
+                              ? (compareEuromillonesSource === 'bought'
+                                  ? (compareProgress.bought_tickets ?? [])
+                                  : (compareProgress.candidate_pool ?? [])) as CompareTicket[]
+                              : slug === 'el-gordo'
+                                ? (compareElGordoSource === 'bought'
+                                    ? (compareProgress.bought_tickets ?? [])
+                                    : (compareProgress.candidate_pool ?? [])) as CompareTicket[]
+                                : (compareProgress.candidate_pool ?? []) as CompareTicket[];
+                        const comparePoolCount = comparePool.length;
+                        return (
+                      <>
                       <div
                         style={{
                           display: 'flex',
@@ -785,12 +839,95 @@ export function SimulationPage() {
                       >
                         <div>
                           <h4 style={{ margin: '0 0 0.25rem 0', fontSize: '0.95rem' }}>
-                            Predicción (pool con cutoff {compareProgress.cutoff_draw_id})
+                            {slug === 'la-primitiva'
+                              ? compareLaPrimitivaSource === 'bought'
+                                ? 'Boletos comprados'
+                                : 'Predicción'
+                              : slug === 'euromillones'
+                                ? compareEuromillonesSource === 'bought'
+                                  ? 'Boletos comprados'
+                                  : 'Predicción'
+                                : slug === 'el-gordo'
+                                  ? compareElGordoSource === 'bought'
+                                    ? 'Boletos comprados'
+                                    : 'Predicción'
+                                  : `Predicción (pool con cutoff ${compareProgress.cutoff_draw_id})`}
                           </h4>
+                          {(slug === 'la-primitiva' || slug === 'euromillones' || slug === 'el-gordo') && (
+                            <div
+                              className="resultados-tabs"
+                              role="tablist"
+                              aria-label="Origen de boletos"
+                              style={{ marginBottom: '0.5rem', gap: 0 }}
+                            >
+                              <button
+                                type="button"
+                                role="tab"
+                                aria-selected={
+                                  slug === 'la-primitiva'
+                                    ? compareLaPrimitivaSource === 'prediction'
+                                    : slug === 'euromillones'
+                                      ? compareEuromillonesSource === 'prediction'
+                                      : compareElGordoSource === 'prediction'
+                                }
+                                className={`resultados-tab ${
+                                  (slug === 'la-primitiva'
+                                    ? compareLaPrimitivaSource
+                                    : slug === 'euromillones'
+                                      ? compareEuromillonesSource
+                                      : compareElGordoSource) === 'prediction'
+                                    ? 'resultados-tab--active'
+                                    : ''
+                                }`}
+                                onClick={() =>
+                                  slug === 'la-primitiva'
+                                    ? setCompareLaPrimitivaSource('prediction')
+                                    : slug === 'euromillones'
+                                      ? setCompareEuromillonesSource('prediction')
+                                      : setCompareElGordoSource('prediction')
+                                }
+                              >
+                                Predicción
+                              </button>
+                              <button
+                                type="button"
+                                role="tab"
+                                aria-selected={
+                                  slug === 'la-primitiva'
+                                    ? compareLaPrimitivaSource === 'bought'
+                                    : slug === 'euromillones'
+                                      ? compareEuromillonesSource === 'bought'
+                                      : compareElGordoSource === 'bought'
+                                }
+                                className={`resultados-tab ${
+                                  (slug === 'la-primitiva'
+                                    ? compareLaPrimitivaSource
+                                    : slug === 'euromillones'
+                                      ? compareEuromillonesSource
+                                      : compareElGordoSource) === 'bought'
+                                    ? 'resultados-tab--active'
+                                    : ''
+                                }`}
+                                onClick={() =>
+                                  slug === 'la-primitiva'
+                                    ? setCompareLaPrimitivaSource('bought')
+                                    : slug === 'euromillones'
+                                      ? setCompareEuromillonesSource('bought')
+                                      : setCompareElGordoSource('bought')
+                                }
+                              >
+                                Boletos comprados
+                              </button>
+                            </div>
+                          )}
                           <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--color-text-muted)' }}>
-                            {compareProgress.candidate_pool_count ??
-                              (compareProgress.candidate_pool?.length ?? 0)}{' '}
-                            boletos en el pool.
+                            {slug === 'la-primitiva'
+                              ? `${comparePoolCount} boletos${compareLaPrimitivaSource === 'bought' ? ' comprados' : ' en el pool'}.`
+                              : slug === 'euromillones'
+                                ? `${comparePoolCount} boletos${compareEuromillonesSource === 'bought' ? ' comprados' : ' en el pool'}.`
+                                : slug === 'el-gordo'
+                                  ? `${comparePoolCount} boletos${compareElGordoSource === 'bought' ? ' comprados' : ' en el pool'}.`
+                                  : `${compareProgress.candidate_pool_count ?? (compareProgress.candidate_pool?.length ?? 0)} boletos en el pool.`}
                           </p>
                         </div>
 
@@ -802,33 +939,39 @@ export function SimulationPage() {
                             flexWrap: 'wrap',
                           }}
                         >
-                          <label
-                            className="form-label"
-                            style={{
-                              margin: 0,
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: '0.5rem',
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
-                            <span>Ver</span>
-                            <select
-                              className="form-input"
-                              value={comparePoolLimit}
-                              onChange={(e) =>
-                                setComparePoolLimit(Math.max(1, Number(e.target.value) || 20))
-                              }
-                              style={{ width: '7rem' }}
+                          {!(
+                            (slug === 'la-primitiva' && compareLaPrimitivaSource === 'bought') ||
+                            (slug === 'euromillones' && compareEuromillonesSource === 'bought') ||
+                            (slug === 'el-gordo' && compareElGordoSource === 'bought')
+                          ) && (
+                            <label
+                              className="form-label"
+                              style={{
+                                margin: 0,
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.5rem',
+                                whiteSpace: 'nowrap',
+                              }}
                             >
-                              {[10, 20, 30, 50, 100, 500, 1000, 3000].map((opt) => (
-                                <option key={opt} value={opt}>
-                                  {opt}
-                                </option>
-                              ))}
-                            </select>
-                            <span>boletos</span>
-                          </label>
+                              <span>Ver</span>
+                              <select
+                                className="form-input"
+                                value={comparePoolLimit}
+                                onChange={(e) =>
+                                  setComparePoolLimit(Math.max(1, Number(e.target.value) || 20))
+                                }
+                                style={{ width: '7rem' }}
+                              >
+                                {[10, 20, 30, 50, 100, 500, 1000, 3000].map((opt) => (
+                                  <option key={opt} value={opt}>
+                                    {opt}
+                                  </option>
+                                ))}
+                              </select>
+                              <span>boletos</span>
+                            </label>
+                          )}
                           <button
                             type="button"
                             className="form-input"
@@ -894,8 +1037,13 @@ export function SimulationPage() {
                       </div>
 
                       {(() => {
-                        const pool = compareProgress.candidate_pool ?? [];
-                        const limit = Math.min(comparePoolLimit, pool.length);
+                        const pool = comparePool;
+                        const limit =
+                          (slug === 'la-primitiva' && compareLaPrimitivaSource === 'bought') ||
+                          (slug === 'euromillones' && compareEuromillonesSource === 'bought') ||
+                          (slug === 'el-gordo' && compareElGordoSource === 'bought')
+                            ? pool.length
+                            : Math.min(comparePoolLimit, pool.length);
                         const mainSet = new Set(compareDraw.main.map(Number));
                         const starSet = new Set(compareDraw.stars.map(Number));
                         const escrutinio = Array.isArray(compareDraw.escrutinio)
@@ -1143,11 +1291,11 @@ export function SimulationPage() {
                                 <table className="resultados-features-table">
                                   <thead>
                                     <tr>
-                                      <th style={{ width: 60 }}>#</th>
-                                      <th>Boletos (pool)</th>
-                                      <th style={{ width: 180 }}>Aciertos / premio</th>
-                                      <th style={{ width: 150 }}>Coste acumulado</th>
-                                      <th style={{ width: 150 }}>Premio acumulado</th>
+                                    <th style={{ width: 60 }}>#</th>
+                                    <th style={{ minWidth: 380 }}>Boletos (pool)</th>
+                                    <th style={{ width: 180 }}>Aciertos</th>
+                                      <th style={{ width: 150 }}>Coste</th>
+                                      <th style={{ width: 150 }}>Premio</th>
                                       <th style={{ width: 150 }}>Ganancia</th>
                                     </tr>
                                   </thead>
@@ -1156,6 +1304,9 @@ export function SimulationPage() {
                               </div>
                             )}
                           </div>
+                        );
+                      })()}
+                    </>
                         );
                       })()}
                     </div>
@@ -1309,8 +1460,26 @@ export function SimulationPage() {
 
                       {compareProgress && (
                         (() => {
-                          const pool = compareProgress.candidate_pool ?? [];
-                          const limit = Math.min(comparePoolLimit, pool.length);
+                          const pool =
+                            slug === 'la-primitiva'
+                              ? (compareLaPrimitivaSource === 'bought'
+                                  ? (compareProgress.bought_tickets ?? [])
+                                  : (compareProgress.candidate_pool ?? []))
+                              : slug === 'euromillones'
+                                ? (compareEuromillonesSource === 'bought'
+                                    ? (compareProgress.bought_tickets ?? [])
+                                    : (compareProgress.candidate_pool ?? []))
+                                : slug === 'el-gordo'
+                                  ? (compareElGordoSource === 'bought'
+                                      ? (compareProgress.bought_tickets ?? [])
+                                      : (compareProgress.candidate_pool ?? []))
+                                  : (compareProgress.candidate_pool ?? []);
+                          const limit =
+                            (slug === 'la-primitiva' && compareLaPrimitivaSource === 'bought') ||
+                            (slug === 'euromillones' && compareEuromillonesSource === 'bought') ||
+                            (slug === 'el-gordo' && compareElGordoSource === 'bought')
+                              ? pool.length
+                              : Math.min(comparePoolLimit, pool.length);
                           const mainSet = new Set(compareDraw.main.map(Number));
                           const starSet = new Set(compareDraw.stars.map(Number));
                           const escrutinio = Array.isArray(compareDraw.escrutinio)

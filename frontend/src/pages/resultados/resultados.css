@@ -1545,3 +1545,378 @@
 .resultados-pagination button:disabled {
   opacity: 0.5;
 }
+
+/* El Gordo Betting — 16:8 split, gallery cards, animations */
+.el-gordo-betting {
+  --betting-card-radius: 12px;
+  --betting-card-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+  --betting-card-shadow-hover: 0 8px 24px rgba(196, 18, 48, 0.18);
+}
+
+.el-gordo-betting-split {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: var(--space-lg);
+  align-items: stretch;
+  min-height: 0;
+  animation: fadeIn 0.4s ease-out;
+}
+
+@media (max-width: 900px) {
+  .el-gordo-betting-split {
+    grid-template-columns: 1fr;
+  }
+}
+
+.el-gordo-betting-left {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.el-gordo-betting-right {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-height: 0;
+}
+
+.el-gordo-betting-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: var(--space-sm);
+  overflow-y: auto;
+  padding: var(--space-xs);
+}
+
+.el-gordo-betting-gallery--compact {
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: var(--space-xs);
+}
+
+@keyframes betting-card-in {
+  from {
+    opacity: 0;
+    transform: scale(0.92) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.el-gordo-betting-ticket-card-wrap {
+  position: relative;
+}
+
+.el-gordo-betting-ticket-card {
+  background: var(--color-bg-elevated, #fff);
+  border: 1px solid var(--color-border);
+  border-radius: var(--betting-card-radius);
+  box-shadow: var(--betting-card-shadow);
+  padding: var(--space-sm);
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+  animation: betting-card-in 0.3s ease-out backwards;
+}
+
+.el-gordo-betting-ticket-card:hover {
+  transform: scale(1.03);
+  box-shadow: var(--betting-card-shadow-hover);
+  border-color: var(--resultados-primary, #c41230);
+}
+
+.el-gordo-betting-ticket-card:active {
+  transform: scale(0.98);
+}
+
+.el-gordo-betting-ticket-card--disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.el-gordo-betting-ticket-card--disabled:hover {
+  transform: none;
+  box-shadow: var(--betting-card-shadow);
+  border-color: var(--color-border);
+}
+
+.el-gordo-betting-ticket-card .resultados-balls {
+  justify-content: center;
+  gap: 2px;
+  margin-bottom: 4px;
+}
+
+.el-gordo-betting-ticket-card .resultados-ball {
+  width: 22px;
+  height: 22px;
+  font-size: 0.7rem;
+}
+
+.el-gordo-betting-ticket-card .resultados-ball.clave {
+  margin-top: 2px;
+  width: 24px;
+  height: 24px;
+  font-size: 0.75rem;
+}
+
+.resultados-theme-euromillones .el-gordo-betting-ticket-card .resultados-ball.star {
+  width: 22px;
+  height: 22px;
+  font-size: 0.7rem;
+}
+
+.resultados-theme-la-primitiva .el-gordo-betting-ticket-card .resultados-ball.reintegro {
+  width: 22px;
+  height: 22px;
+  font-size: 0.7rem;
+  margin-top: 2px;
+}
+
+.el-gordo-betting-ticket-card-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.2s ease, background 0.2s ease;
+}
+
+.el-gordo-betting-ticket-card-wrap:hover .el-gordo-betting-ticket-card-remove {
+  opacity: 1;
+}
+
+.el-gordo-betting-ticket-card-remove:hover {
+  background: var(--color-error, #c41230);
+}
+
+.el-gordo-betting-panel-card {
+  background: var(--color-bg-elevated, #fff);
+  border-radius: var(--betting-card-radius);
+  box-shadow: var(--betting-card-shadow);
+  border: 1px solid var(--color-border);
+  padding: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.el-gordo-betting-panel-card h3 {
+  margin: 0 0 var(--space-sm);
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.el-gordo-betting-candidate-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  margin-bottom: 2px;
+}
+
+.el-gordo-betting-candidate-header h3 {
+  margin: 0;
+}
+
+.el-gordo-betting-candidate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.el-gordo-betting-random-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(135deg, var(--resultados-primary, #c41230) 0%, #a00d26 100%);
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(196, 18, 48, 0.35);
+  transition: transform 0.15s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+}
+
+.el-gordo-betting-random-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(196, 18, 48, 0.45);
+  opacity: 1;
+}
+
+.el-gordo-betting-random-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.el-gordo-betting-random-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.resultados-theme-euromillones .el-gordo-betting-random-btn {
+  background: linear-gradient(135deg, #013399 0%, #002266 100%);
+  box-shadow: 0 2px 8px rgba(1, 51, 153, 0.35);
+}
+
+.resultados-theme-euromillones .el-gordo-betting-random-btn:hover:not(:disabled) {
+  box-shadow: 0 4px 14px rgba(1, 51, 153, 0.45);
+}
+
+.resultados-theme-la-primitiva .el-gordo-betting-random-btn {
+  background: linear-gradient(135deg, #006633 0%, #004d26 100%);
+  box-shadow: 0 2px 8px rgba(0, 102, 51, 0.35);
+}
+
+.resultados-theme-la-primitiva .el-gordo-betting-random-btn:hover:not(:disabled) {
+  box-shadow: 0 4px 14px rgba(0, 102, 51, 0.45);
+}
+
+.el-gordo-betting-count-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+}
+
+.el-gordo-betting-count-select select {
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-elevated, #fff);
+  color: var(--color-text);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.el-gordo-betting-count-select select:hover,
+.el-gordo-betting-count-select select:focus {
+  border-color: var(--resultados-primary, #c41230);
+  outline: none;
+}
+
+.el-gordo-betting-panel-card .el-gordo-betting-gallery {
+  flex: 1;
+  min-height: 120px;
+}
+
+.el-gordo-betting-bucket-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  margin-bottom: 8px;
+}
+
+.el-gordo-betting-bucket-header h3 {
+  margin: 0;
+}
+
+.el-gordo-betting-bucket-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.el-gordo-betting-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-elevated, #fff);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+}
+
+.el-gordo-betting-btn-icon:hover:not(:disabled) {
+  color: var(--color-error, #c41230);
+  border-color: var(--color-error, #c41230);
+  background: rgba(196, 18, 48, 0.06);
+}
+
+.el-gordo-betting-btn-icon:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.el-gordo-betting-gallery--start {
+  justify-content: start;
+  align-content: start;
+}
+
+/* Reintegro modal (La Primitiva betting) */
+.el-gordo-betting-reintegro-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.el-gordo-betting-reintegro-modal {
+  background: var(--color-bg-elevated, #fff);
+  border-radius: var(--betting-card-radius);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+  padding: var(--space-lg);
+  max-width: 320px;
+  width: 90%;
+}
+
+.el-gordo-betting-reintegro-modal h3 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.el-gordo-betting-reintegro-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+.el-gordo-betting-reintegro-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 2px solid var(--color-border);
+  background: var(--resultados-ball-bg, var(--resultados-primary));
+  color: var(--resultados-ball-text, #fff);
+  font-size: 1.1rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.el-gordo-betting-reintegro-btn:hover {
+  transform: scale(1.08);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}

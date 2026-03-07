@@ -411,14 +411,14 @@ def _predict_next_funds_for_lottery(db, lottery_slug: str) -> dict:
 def run_daily() -> list[dict]:
     """
     Run daily scrape for all lotteries (Euromillones → La Primitiva → El Gordo).
-    Scrape window: 3 days ago → today. Saves/updates draws in DB; updates last_draw_date.
+    Scrape window: 7 days ago → today. Saves/updates draws in DB; updates last_draw_date.
     Uses Selenium + MongoDB directly; no HTTP call. Returns list of result dicts.
     """
     client = MongoClient(MONGO_URI)
     db = client[MONGO_DB]
     today = datetime.now().strftime("%Y-%m-%d")
     today_yyyymmdd = today.replace("-", "")
-    from_d = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+    from_d = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
     start_yyyymmdd = from_d.replace("-", "")
     results = []
     lottery_proximo_bote: dict[str, float | None] = {}

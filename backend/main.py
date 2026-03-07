@@ -21,7 +21,7 @@ load_dotenv()
 from datetime import datetime as dt, timedelta
 
 from bson import ObjectId
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pymongo import MongoClient
@@ -1259,6 +1259,7 @@ def api_euromillones_train_progress(
         "candidate_pool": doc.get("candidate_pool"),
         "candidate_pool_at": doc.get("candidate_pool_at"),
         "candidate_pool_count": doc.get("candidate_pool_count"),
+        "bought_tickets": doc.get("bought_tickets"),
     }
     return JSONResponse(
         content={"progress": progress},
@@ -1350,9 +1351,474 @@ def api_el_gordo_train_progress(
         "candidate_pool": doc.get("candidate_pool"),
         "candidate_pool_at": doc.get("candidate_pool_at"),
         "candidate_pool_count": doc.get("candidate_pool_count"),
+        "bought_tickets": doc.get("bought_tickets"),
     }
     return JSONResponse(
         content={"progress": progress},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/el-gordo/betting/last-id")
+def api_el_gordo_betting_last_id():
+    """Return cutoff_draw_id of the last el_gordo_train_progress doc by probs_fecha_sorteo (desc) then _id (desc)."""
+    if db is None:
+        return JSONResponse(content={"cutoff_draw_id": None})
+    coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one(
+        projection={"cutoff_draw_id": 1, "probs_fecha_sorteo": 1},
+        sort=[("probs_fecha_sorteo", -1), ("_id", -1)],
+    )
+    cid = doc.get("cutoff_draw_id") if doc else None
+    return JSONResponse(
+        content={"cutoff_draw_id": str(cid) if cid is not None else None},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/el-gordo/betting/last-draw-date")
+def api_el_gordo_betting_last_draw_date():
+    """Return last_draw_date for el-gordo from scraper_metadata. Betting tab uses this to find train_progress by probs_fecha_sorteo."""
+    if db is None:
+        return JSONResponse(content={"last_draw_date": None})
+    last_draw_date = _get_last_draw_date("el-gordo")
+    return JSONResponse(
+        content={"last_draw_date": last_draw_date},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/el-gordo/betting/pool")
+def api_el_gordo_betting_pool(
+    draw_date: str | None = Query(None, description="Draw date YYYY-MM-DD; find train_progress by probs_fecha_sorteo (from scraper_metadata last_draw_date)."),
+    cutoff_draw_id: str | None = Query(None, description="Optional id_sorteo; used when draw_date not provided."),
+):
+    """
+    Return candidate pool for betting. Prefer draw_date (from scraper_metadata): find *train_progress by probs_fecha_sorteo === draw_date.
+    Else use cutoff_draw_id; else use last_draw_date from scraper_metadata.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    date_str = (draw_date or "").strip()[:10] or None
+    cutoff = (cutoff_draw_id or "").strip() or None
+    if not date_str and not cutoff:
+        date_str = (_get_last_draw_date("el-gordo") or "").strip()[:10] or None
+    if date_str:
+        doc = coll.find_one({"probs_fecha_sorteo": date_str})
+        if not doc:
+            return JSONResponse(
+                content={
+                    "last_draw_date": date_str,
+                    "cutoff_draw_id": None,
+                    "candidate_pool": [],
+                    "candidate_pool_count": 0,
+                    "bought_tickets": [],
+                },
+                headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+            )
+    elif cutoff:
+        doc = coll.find_one({"cutoff_draw_id": cutoff})
+        if doc is None and cutoff.isdigit():
+            doc = coll.find_one({"cutoff_draw_id": int(cutoff)})
+        if not doc:
+            return JSONResponse(
+                content={
+                    "last_draw_date": None,
+                    "cutoff_draw_id": cutoff,
+                    "candidate_pool": [],
+                    "candidate_pool_count": 0,
+                    "bought_tickets": [],
+                },
+                headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+            )
+    else:
+        return JSONResponse(
+            content={
+                "last_draw_date": None,
+                "cutoff_draw_id": None,
+                "candidate_pool": [],
+                "candidate_pool_count": 0,
+                "bought_tickets": [],
+            },
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    pool = doc.get("candidate_pool") or []
+    bought = doc.get("bought_tickets") or []
+    return JSONResponse(
+        content={
+            "last_draw_date": (doc.get("probs_fecha_sorteo") or "").strip()[:10] or None,
+            "cutoff_draw_id": doc.get("cutoff_draw_id"),
+            "candidate_pool": pool,
+            "candidate_pool_count": len(pool),
+            "bought_tickets": bought,
+        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.post("/api/el-gordo/betting/bought")
+async def api_el_gordo_betting_bought(request: Request):
+    """
+    Save bought tickets into el_gordo_train_progress. Body may include optional "cutoff_draw_id" (same as La Primitiva).
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    try:
+        body = await request.json() or {}
+    except Exception:
+        body = {}
+    tickets = body.get("tickets")
+    if not isinstance(tickets, list):
+        raise HTTPException(400, detail="Body must contain 'tickets' array")
+    draw_date = (body.get("draw_date") or "").strip()[:10] or None
+    cutoff = (body.get("cutoff_draw_id") or "").strip() or None
+    coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    if draw_date:
+        result = coll.update_one(
+            {"probs_fecha_sorteo": draw_date},
+            {"$set": {"bought_tickets": tickets, "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+        )
+    elif cutoff:
+        result = coll.update_one(
+            {"cutoff_draw_id": cutoff},
+            {"$set": {"bought_tickets": tickets, "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+        )
+        if result.matched_count == 0 and cutoff.isdigit():
+            result = coll.update_one(
+                {"cutoff_draw_id": int(cutoff)},
+                {"$set": {"bought_tickets": tickets, "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+            )
+    else:
+        last_draw_date = _get_last_draw_date("el-gordo")
+        if not last_draw_date:
+            raise HTTPException(400, detail="No last_draw_date for el-gordo")
+        date_str = (last_draw_date or "").strip()[:10]
+        result = coll.update_one(
+            {"probs_fecha_sorteo": date_str},
+            {"$set": {"bought_tickets": tickets, "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+        )
+    if result.matched_count == 0:
+        raise HTTPException(404, detail="No progress found for draw_date or cutoff_draw_id")
+    return JSONResponse(
+        content={"status": "ok", "saved_count": len(tickets)},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/euromillones/betting/last-id")
+def api_euromillones_betting_last_id():
+    """Return cutoff_draw_id of the last euromillones_train_progress doc by probs_fecha_sorteo (desc) then _id (desc)."""
+    if db is None:
+        return JSONResponse(content={"cutoff_draw_id": None})
+    coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one(
+        projection={"cutoff_draw_id": 1, "probs_fecha_sorteo": 1},
+        sort=[("probs_fecha_sorteo", -1), ("_id", -1)],
+    )
+    cid = doc.get("cutoff_draw_id") if doc else None
+    return JSONResponse(
+        content={"cutoff_draw_id": str(cid) if cid is not None else None},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/euromillones/betting/last-draw-date")
+def api_euromillones_betting_last_draw_date():
+    """Return last_draw_date for euromillones from scraper_metadata. Betting tab uses this to find train_progress by probs_fecha_sorteo."""
+    if db is None:
+        return JSONResponse(content={"last_draw_date": None})
+    last_draw_date = _get_last_draw_date("euromillones")
+    return JSONResponse(
+        content={"last_draw_date": last_draw_date},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/euromillones/betting/pool")
+def api_euromillones_betting_pool(
+    draw_date: str | None = Query(None, description="Draw date YYYY-MM-DD; find train_progress by probs_fecha_sorteo (from scraper_metadata last_draw_date)."),
+    cutoff_draw_id: str | None = Query(None, description="Optional id_sorteo; used when draw_date not provided."),
+):
+    """
+    Return candidate pool for betting. Prefer draw_date (from scraper_metadata): find *train_progress by probs_fecha_sorteo === draw_date.
+    Else use cutoff_draw_id; else use last_draw_date from scraper_metadata.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    date_str = (draw_date or "").strip()[:10] or None
+    cutoff = (cutoff_draw_id or "").strip() or None
+    if not date_str and not cutoff:
+        date_str = (_get_last_draw_date("euromillones") or "").strip()[:10] or None
+    if date_str:
+        doc = coll.find_one({"probs_fecha_sorteo": date_str})
+        if not doc:
+            return JSONResponse(
+                content={
+                    "last_draw_date": date_str,
+                    "cutoff_draw_id": None,
+                    "candidate_pool": [],
+                    "candidate_pool_count": 0,
+                    "bought_tickets": [],
+                },
+                headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+            )
+    elif cutoff:
+        doc = coll.find_one({"cutoff_draw_id": cutoff})
+        if doc is None and cutoff.isdigit():
+            doc = coll.find_one({"cutoff_draw_id": int(cutoff)})
+        if not doc:
+            return JSONResponse(
+                content={
+                    "last_draw_date": None,
+                    "cutoff_draw_id": cutoff,
+                    "candidate_pool": [],
+                    "candidate_pool_count": 0,
+                    "bought_tickets": [],
+                },
+                headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+            )
+    else:
+        return JSONResponse(
+            content={
+                "last_draw_date": None,
+                "cutoff_draw_id": None,
+                "candidate_pool": [],
+                "candidate_pool_count": 0,
+                "bought_tickets": [],
+            },
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    pool = doc.get("candidate_pool") or []
+    bought = doc.get("bought_tickets") or []
+    return JSONResponse(
+        content={
+            "last_draw_date": (doc.get("probs_fecha_sorteo") or "").strip()[:10] or None,
+            "cutoff_draw_id": doc.get("cutoff_draw_id"),
+            "candidate_pool": pool,
+            "candidate_pool_count": len(pool),
+            "bought_tickets": bought,
+        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.post("/api/euromillones/betting/bought")
+async def api_euromillones_betting_bought(request: Request):
+    """
+    Save bought tickets into euromillones_train_progress. Body may include optional "cutoff_draw_id" (same as La Primitiva).
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    try:
+        body = await request.json() or {}
+    except Exception:
+        body = {}
+    tickets = body.get("tickets")
+    if not isinstance(tickets, list):
+        raise HTTPException(400, detail="Body must contain 'tickets' array")
+    draw_date = (body.get("draw_date") or "").strip()[:10] or None
+    cutoff = (body.get("cutoff_draw_id") or "").strip() or None
+    coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    if draw_date:
+        result = coll.update_one(
+            {"probs_fecha_sorteo": draw_date},
+            {"$set": {"bought_tickets": tickets, "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+        )
+    elif cutoff:
+        result = coll.update_one(
+            {"cutoff_draw_id": cutoff},
+            {"$set": {"bought_tickets": tickets, "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+        )
+        if result.matched_count == 0 and cutoff.isdigit():
+            result = coll.update_one(
+                {"cutoff_draw_id": int(cutoff)},
+                {"$set": {"bought_tickets": tickets, "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+            )
+    else:
+        last_draw_date = _get_last_draw_date("euromillones")
+        if not last_draw_date:
+            raise HTTPException(400, detail="No last_draw_date for euromillones")
+        date_str = (last_draw_date or "").strip()[:10]
+        result = coll.update_one(
+            {"probs_fecha_sorteo": date_str},
+            {"$set": {"bought_tickets": tickets, "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+        )
+    if result.matched_count == 0:
+        raise HTTPException(404, detail="No progress found for draw_date or cutoff_draw_id")
+    return JSONResponse(
+        content={"status": "ok", "saved_count": len(tickets)},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+def _get_la_primitiva_cutoff_from_last_draw_date(last_draw_date: str | None) -> str | None:
+    """Resolve cutoff_draw_id (id_sorteo) from last_draw_date by finding the draw in la_primitiva."""
+    if not db or not last_draw_date:
+        return None
+    last_date_str = (last_draw_date or "").strip()[:10]
+    if not last_date_str:
+        return None
+    coll = db["la_primitiva"]
+    doc = coll.find_one(
+        {"fecha_sorteo": {"$regex": f"^{re.escape(last_date_str)}"}},
+        projection={"id_sorteo": 1},
+        sort=[("fecha_sorteo", -1)],
+    )
+    if not doc:
+        doc = coll.find_one(sort=[("fecha_sorteo", -1)], projection={"id_sorteo": 1})
+    if not doc:
+        return None
+    cid = doc.get("id_sorteo")
+    return str(cid) if cid is not None else None
+
+
+def _la_primitiva_betting_pool_response(
+    last_draw_date: str | None,
+    cutoff_draw_id: str | None,
+    candidate_pool: list,
+    bought_tickets: list,
+) -> JSONResponse:
+    last_date_str = (last_draw_date or "").strip()[:10] if last_draw_date else ""
+    return JSONResponse(
+        content={
+            "last_draw_date": last_date_str or None,
+            "cutoff_draw_id": cutoff_draw_id,
+            "candidate_pool": candidate_pool,
+            "candidate_pool_count": len(candidate_pool),
+            "bought_tickets": bought_tickets,
+        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/la-primitiva/betting/last-cutoff")
+def api_la_primitiva_betting_last_cutoff():
+    """
+    Return cutoff_draw_id of the last la_primitiva_train_progress doc by probs_fecha_sorteo (desc) then _id (desc).
+    """
+    if db is None:
+        return JSONResponse(content={"cutoff_draw_id": None})
+    coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one(
+        projection={"cutoff_draw_id": 1, "probs_fecha_sorteo": 1},
+        sort=[("probs_fecha_sorteo", -1), ("_id", -1)],
+    )
+    cid = doc.get("cutoff_draw_id") if doc else None
+    return JSONResponse(
+        content={"cutoff_draw_id": str(cid) if cid is not None else None},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/la-primitiva/betting/last-draw-date")
+def api_la_primitiva_betting_last_draw_date():
+    """Return last_draw_date for la-primitiva from scraper_metadata. Betting tab uses this to find train_progress by probs_fecha_sorteo."""
+    if db is None:
+        return JSONResponse(content={"last_draw_date": None})
+    last_draw_date = _get_last_draw_date("la-primitiva")
+    return JSONResponse(
+        content={"last_draw_date": last_draw_date},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/la-primitiva/betting/pool")
+def api_la_primitiva_betting_pool(
+    draw_date: str | None = Query(None, description="Draw date YYYY-MM-DD; find train_progress by probs_fecha_sorteo (from scraper_metadata last_draw_date)."),
+    cutoff_draw_id: str | None = Query(None, description="Optional id_sorteo; used when draw_date not provided."),
+):
+    """
+    Return candidate pool for betting. Prefer draw_date (from scraper_metadata): find *train_progress by probs_fecha_sorteo === draw_date.
+    Else use cutoff_draw_id; else use last_draw_date from scraper_metadata.
+    candidate_pool items are { mains, reintegro }; frontend may use mains-only for selection.
+    """
+    try:
+        if db is None:
+            return _la_primitiva_betting_pool_response(None, None, [], [])
+        coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+        date_str = (draw_date or "").strip()[:10] or None
+        cutoff: str | None = (cutoff_draw_id or "").strip() or None
+        if not date_str and not cutoff:
+            last_draw_date = _get_last_draw_date("la-primitiva")
+            if not last_draw_date:
+                return _la_primitiva_betting_pool_response(None, None, [], [])
+            date_str = (last_draw_date or "").strip()[:10]
+        if date_str:
+            doc = coll.find_one({"probs_fecha_sorteo": date_str})
+            if not doc:
+                return _la_primitiva_betting_pool_response(date_str, None, [], [])
+            cutoff = str(doc.get("cutoff_draw_id") or "") or None
+        elif cutoff:
+            doc = coll.find_one({"cutoff_draw_id": cutoff})
+            if doc is None and cutoff.isdigit():
+                doc = coll.find_one({"cutoff_draw_id": int(cutoff)})
+            if not doc:
+                return _la_primitiva_betting_pool_response(None, cutoff, [], [])
+            date_str = (doc.get("probs_fecha_sorteo") or "").strip()[:10] or None
+        else:
+            return _la_primitiva_betting_pool_response(None, None, [], [])
+        pool = doc.get("candidate_pool") or []
+        bought = doc.get("bought_tickets") or []
+        return _la_primitiva_betting_pool_response(date_str or None, cutoff, pool, bought)
+    except Exception as e:
+        logger.exception("la-primitiva betting pool: %s", e)
+        return _la_primitiva_betting_pool_response(None, None, [], [])
+
+
+@app.post("/api/la-primitiva/betting/bought")
+async def api_la_primitiva_betting_bought(request: Request):
+    """
+    Save bought tickets into la_primitiva_train_progress. Body may include draw_date (prefer) or cutoff_draw_id.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    try:
+        body = await request.json() or {}
+    except Exception:
+        body = {}
+    tickets = body.get("tickets")
+    if not isinstance(tickets, list):
+        raise HTTPException(400, detail="Body must contain 'tickets' array")
+    draw_date = (body.get("draw_date") or "").strip()[:10] or None
+    cutoff = (body.get("cutoff_draw_id") or "").strip() or None
+    coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+    if draw_date:
+        result = coll.update_one(
+            {"probs_fecha_sorteo": draw_date},
+            {"$set": {"bought_tickets": tickets, "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+        )
+    elif cutoff:
+        result = coll.update_one(
+            {"cutoff_draw_id": cutoff},
+            {"$set": {"bought_tickets": tickets, "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+        )
+        if result.matched_count == 0 and cutoff.isdigit():
+            result = coll.update_one(
+                {"cutoff_draw_id": int(cutoff)},
+                {"$set": {"bought_tickets": tickets, "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+            )
+    else:
+        last_draw_date = _get_last_draw_date("la-primitiva")
+        if not last_draw_date:
+            raise HTTPException(400, detail="No last_draw_date for la-primitiva")
+        cutoff = _get_la_primitiva_cutoff_from_last_draw_date(last_draw_date)
+        if not cutoff:
+            raise HTTPException(404, detail="No draw found for last_draw_date")
+        result = coll.update_one(
+            {"cutoff_draw_id": cutoff},
+            {"$set": {"bought_tickets": tickets, "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+        )
+        if result.matched_count == 0 and cutoff.isdigit():
+            result = coll.update_one(
+                {"cutoff_draw_id": int(cutoff)},
+                {"$set": {"bought_tickets": tickets, "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+            )
+    if result.matched_count == 0:
+        raise HTTPException(404, detail="No progress found for draw_date or cutoff_draw_id")
+    return JSONResponse(
+        content={"status": "ok", "saved_count": len(tickets)},
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
 
@@ -1400,6 +1866,7 @@ def api_la_primitiva_train_progress(
         "candidate_pool": doc.get("candidate_pool"),
         "candidate_pool_at": doc.get("candidate_pool_at"),
         "candidate_pool_count": doc.get("candidate_pool_count"),
+        "bought_tickets": doc.get("bought_tickets"),
     }
     return JSONResponse(
         content={"progress": progress},

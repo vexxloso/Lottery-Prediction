@@ -1,6 +1,6 @@
 """
 Daily scrape: runs automatically every day at 00:02 (local time).
-Scrapes 3 days ago → today for all lotteries. Order: Euromillones → La Primitiva → El Gordo.
+Scrapes 7 days ago (1 week) → today for all lotteries. Order: Euromillones → La Primitiva → El Gordo.
 Last history date is read from DB only (no file/cache). Leave this script running (e.g. in a terminal).
 """
 import os
