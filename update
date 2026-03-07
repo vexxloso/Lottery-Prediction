@@ -202,3 +202,5 @@ here click JUEGA button
         JUEGA
     </button>
 </div>
+
+<div id="CybotCookiebotDialogBodyButtonsWrapper"><button id="CybotCookiebotDialogBodyButtonDecline" class="CybotCookiebotDialogBodyButton" tabindex="0" lang="en">Only the necessary</button> <button id="CybotCookiebotDialogBodyLevelButtonLevelOptinAllowallSelection" class="CybotCookiebotDialogBodyButton CybotCookiebotDialogHide" tabindex="0" lang="en">Allow selection</button> <button id="CybotCookiebotDialogBodyLevelButtonCustomize" class="CybotCookiebotDialogBodyButton CybotCookiebotDialogHide" tabindex="0" lang="en">Customize<div class="CybotCookiebotDialogArrow"></div></button> <button id="CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll" class="CybotCookiebotDialogBodyButton" tabindex="0" lang="en">Allow all</button></div>

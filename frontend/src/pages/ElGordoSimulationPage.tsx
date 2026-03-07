@@ -15,7 +15,7 @@ import type { LotterySlug } from './resultados/types';
 import { LOTTERY_CONFIG } from './resultados/types';
 import './resultados/resultados.css';
 
-interface RouteParams {
+interface RouteParams extends Record<string, string | undefined> {
   drawId?: string;
 }
 
@@ -66,12 +66,12 @@ export function ElGordoSimulationPage() {
   const [candidatePool, setCandidatePool] = useState<any | null>(null);
   const [poolExpanded, setPoolExpanded] = useState(true);
 
-  const [wheelLoading, setWheelLoading] = useState(false);
+  const [wheelLoading, _setWheelLoading] = useState(false);
   const [wheelError, setWheelError] = useState('');
   const [wheelTickets, setWheelTickets] = useState<ElGordoTicket[] | null>(null);
   const [wheelCount, setWheelCount] = useState(20);
 
-  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareLoading, _setCompareLoading] = useState(false);
   const [compareError, setCompareError] = useState('');
   const [compareResult, setCompareResult] = useState<any | null>(null);
   const [compareTicketCount, setCompareTicketCount] = useState(10);

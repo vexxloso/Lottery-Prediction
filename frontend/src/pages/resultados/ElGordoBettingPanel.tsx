@@ -119,7 +119,7 @@ function TicketCard({
 export function ElGordoBettingPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [lastDrawDate, setLastDrawDate] = useState<string | null>(null);
+  const [_lastDrawDate, setLastDrawDate] = useState<string | null>(null);
   const [candidatePool, setCandidatePool] = useState<ElGordoTicket[]>([]);
   const [bucket, setBucket] = useState<ElGordoTicket[]>([]);
   const [realPool, setRealPool] = useState<ElGordoTicket[]>([]);
@@ -279,10 +279,6 @@ export function ElGordoBettingPanel() {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Error al guardar boletos');
     }
-  };
-
-  const clearRealPool = () => {
-    setRealPool([]);
   };
 
   const bucketFull = bucket.length >= BUCKET_MAX;

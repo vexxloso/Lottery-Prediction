@@ -200,7 +200,7 @@ function PremiosBoteChart({
           />
         );
       }
-      return null;
+      return <circle cx={cx} cy={cy} r={0} fill="transparent" />;
     };
 
   return (
@@ -217,9 +217,10 @@ function PremiosBoteChart({
               tickFormatter={(v: number) => `${v.toFixed(0)}%`}
             />
             <Tooltip
-              formatter={(value: number | null, name: string, props: { payload?: { premios?: number | null; premio_bote?: number | null } }) => {
+              formatter={(value, name, props) => {
+                const v = value as number | null;
                 const raw = name === 'Premios' ? props?.payload?.premios : props?.payload?.premio_bote;
-                const pct = value != null ? `${value.toFixed(1)}%` : '-';
+                const pct = v != null ? `${Number(v).toFixed(1)}%` : '-';
                 return [`${pct} · ${formatEuro(raw)}`, name];
               }}
               labelFormatter={(label: string, payload?: { payload?: { isNext?: boolean } }[]) =>

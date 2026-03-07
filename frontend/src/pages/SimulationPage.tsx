@@ -73,13 +73,15 @@ export function SimulationPage() {
   const { lottery, drawId } = useParams<'lottery' | 'drawId'>();
   const [searchParams, setSearchParams] = useSearchParams();
   const viewParam = searchParams.get('view');
-  const view: 'compare' | 'sim' | 'pool' | 'wheel' | 'pred' =
+  const view = (
+    viewParam === 'compare' ||
     viewParam === 'sim' ||
     viewParam === 'pool' ||
     viewParam === 'wheel' ||
     viewParam === 'pred'
-      ? (viewParam as 'sim' | 'pool' | 'wheel' | 'pred')
-      : 'compare';
+      ? viewParam
+      : 'compare'
+  ) as 'compare' | 'sim' | 'pool' | 'wheel' | 'pred';
 
   const slug = (lottery as LotterySlug) || 'euromillones';
   const config = LOTTERY_CONFIG[slug];
@@ -114,11 +116,11 @@ export function SimulationPage() {
     null,
   );
   const [wheelCount, setWheelCount] = useState(20);
-  const [compareLoading] = useState(false);
-  const [compareError, setCompareError] = useState('');
+  const [_compareLoading] = useState(false);
+  const [_compareError, setCompareError] = useState('');
   const [compareResult, setCompareResult] = useState<any | null>(null);
-  const [compareTicketCount, setCompareTicketCount] = useState(10);
-  const [showCompareTickets, setShowCompareTickets] = useState(false);
+  const [compareTicketCount, _setCompareTicketCount] = useState(10);
+  const [_showCompareTickets, _setShowCompareTickets] = useState(false);
   const [showCompareGraph, setShowCompareGraph] = useState(false);
   const [compareGraphPoints, setCompareGraphPoints] = useState<
     { tickets: number; total: number; cost: number; earning: number }[]
@@ -722,9 +724,9 @@ export function SimulationPage() {
           >
             <button
               type="button"
-              className={`resultados-tab ${view === 'compare' ? 'resultados-tab--active' : ''}`}
+              className={`resultados-tab ${(view as string) === 'compare' ? 'resultados-tab--active' : ''}`}
               role="tab"
-              aria-selected={view === 'compare'}
+              aria-selected={(view as string) === 'compare'}
               onClick={() => {
                 const next = new URLSearchParams(searchParams);
                 next.set('view', 'compare');
@@ -1145,7 +1147,7 @@ export function SimulationPage() {
                                   }}
                                 >
                                   <div className="resultados-balls">
-                                    {mains.map((n, i) => (
+                                    {mains.map((n: number, i: number) => (
                                       <span
                                         key={`m-${idx}-${i}`}
                                         className="resultados-ball"
@@ -1165,7 +1167,7 @@ export function SimulationPage() {
                                   </div>
                                   {slug === 'euromillones' ? (
                                     <div className="resultados-balls">
-                                      {starsOrClave.map((n, i) => (
+                                      {starsOrClave.map((n: number, i: number) => (
                                         <span
                                           key={`s-${idx}-${i}`}
                                           className="resultados-ball-star-wrap"
@@ -1209,7 +1211,7 @@ export function SimulationPage() {
                                   ) : (
                                     starsOrClave.length > 0 && (
                                       <div className="resultados-balls">
-                                        {starsOrClave.map((n, i) => (
+                                        {starsOrClave.map((n: number, i: number) => (
                                           <span
                                             key={`c-${idx}-${i}`}
                                             className="resultados-ball"
@@ -1258,9 +1260,6 @@ export function SimulationPage() {
                             </tr>
                           );
                         });
-                        const totalCost = limit * TICKET_BUDGET_EUR;
-                        const totalPrize = runningPrize;
-                        const totalEarning = totalPrize - totalCost;
                         return (
                           <div style={{ marginTop: 'var(--space-md)' }}>
                             <div className="resultados-features-table-wrap" style={{ marginBottom: 'var(--space-md)' }}>

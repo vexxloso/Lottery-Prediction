@@ -196,10 +196,6 @@ export function EuromillonesBettingPanel() {
     }
   };
 
-  const clearRealPool = () => {
-    setRealPool([]);
-  };
-
   const bucketFull = bucket.length >= BUCKET_MAX;
   const addRandomToBucket = () => {
     const need = Math.min(BUCKET_MAX - bucket.length, availableCandidates.length);

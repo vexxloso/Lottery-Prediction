@@ -422,7 +422,7 @@ export function ElGordoPredictionPage() {
                       {' · '}
                       <span style={{ opacity: 0.8 }}>
                         Clave:{' '}
-                        {progress.rule_flags.snapshot_clave.join
+                        {Array.isArray(progress.rule_flags.snapshot_clave)
                           ? (progress.rule_flags.snapshot_clave as number[]).join(' ')
                           : String(progress.rule_flags.snapshot_clave)}
                       </span>
