@@ -830,6 +830,43 @@ def get_next_draws_metadata():
     return JSONResponse(content={"items": items})
 
 
+@app.get("/api/dashboard/sample-tickets")
+def api_dashboard_sample_tickets(
+    count: int = Query(10, ge=1, le=20, description="Number of random tickets per lottery"),
+):
+    """
+    For homepage alert: get last_draw_date from scraper_metadata per lottery,
+    find *train_progress by probs_fecha_sorteo === last_draw_date,
+    return random `count` tickets from candidate_pool for each lottery.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    result = {}
+    for lottery_slug, coll_name in [
+        ("euromillones", EUROMILLONES_TRAIN_PROGRESS_COLLECTION),
+        ("la-primitiva", LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION),
+        ("el-gordo", EL_GORDO_TRAIN_PROGRESS_COLLECTION),
+    ]:
+        last_draw_date = _get_last_draw_date(lottery_slug)
+        date_str = (last_draw_date or "").strip()[:10] if last_draw_date else None
+        tickets = []
+        if date_str:
+            coll = db[coll_name]
+            doc = coll.find_one({"probs_fecha_sorteo": date_str}, projection=["candidate_pool"])
+            pool = doc.get("candidate_pool") or [] if doc else []
+            if pool:
+                n = min(count, len(pool))
+                tickets = list(random.sample(pool, n))
+        result[lottery_slug] = {
+            "last_draw_date": date_str,
+            "tickets": tickets,
+        }
+    return JSONResponse(
+        content=result,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
 def _compute_next_draw_date(lottery_slug: str, last_date_str: str) -> str | None:
     """
     Given the date of the last draw, compute the next draw date for that lottery.

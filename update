@@ -116,3 +116,14 @@ here i will add compre bought_tickes & real result
 just read bought_tickes item with candidate_pool
 so select button prediction or real bougth
 and display all same as just use an other ticket pool(bought_ticket)
+
+on hompage i will some alert
+so read last_draw_date from scraper_metadata
+and with this date find *train_progress data probs_fecha_sorteo === last_draw_date
+read random 10 ticket from candidate pool 
+with this make card and display one and flow 
+so i can see any one and this is swap every 0.5
+so i can see 10 ticket during 5s
+display this full line and add here card
+
+

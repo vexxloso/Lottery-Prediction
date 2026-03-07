@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import FullCalendar from '@fullcalendar/react';
 import dayGridPlugin from '@fullcalendar/daygrid';
 import type { EventContentArg } from '@fullcalendar/core';
@@ -268,9 +269,25 @@ function PremiosBoteChart({
   );
 }
 
+interface SampleTicketsLottery {
+  last_draw_date: string | null;
+  tickets: Array<
+    | { mains: number[]; stars?: number[] }
+    | { mains: number[]; reintegro?: number }
+    | { mains: number[]; clave?: number }
+  >;
+}
+
 export function Dashboard() {
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [metaItems, setMetaItems] = useState<NextDrawItem[]>([]);
+  const [sampleTickets, setSampleTickets] = useState<{
+    euromillones: SampleTicketsLottery;
+    'la-primitiva': SampleTicketsLottery;
+    'el-gordo': SampleTicketsLottery;
+  } | null>(null);
+  const [sampleTicketsIndex, setSampleTicketsIndex] = useState(0);
+  const sampleIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const formatEuro = (value?: number) => {
     if (value == null) return '-';
@@ -320,18 +337,46 @@ export function Dashboard() {
     loadNextDraws();
   }, []);
 
+  useEffect(() => {
+    const loadSampleTickets = async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/dashboard/sample-tickets?count=10`);
+        const data = await res.json();
+        if (!res.ok) return;
+        setSampleTickets({
+          euromillones: data.euromillones ?? { last_draw_date: null, tickets: [] },
+          'la-primitiva': data['la-primitiva'] ?? { last_draw_date: null, tickets: [] },
+          'el-gordo': data['el-gordo'] ?? { last_draw_date: null, tickets: [] },
+        });
+      } catch {
+        setSampleTickets(null);
+      }
+    };
+    loadSampleTickets();
+  }, []);
+
+  useEffect(() => {
+    if (!sampleTickets) return;
+    const hasAny =
+      (sampleTickets.euromillones.tickets?.length ?? 0) > 0 ||
+      (sampleTickets['la-primitiva'].tickets?.length ?? 0) > 0 ||
+      (sampleTickets['el-gordo'].tickets?.length ?? 0) > 0;
+    if (!hasAny) return;
+    sampleIntervalRef.current = setInterval(() => {
+      setSampleTicketsIndex((i) => (i + 1) % 10);
+    }, 4000);
+    return () => {
+      if (sampleIntervalRef.current) {
+        clearInterval(sampleIntervalRef.current);
+        sampleIntervalRef.current = null;
+      }
+    };
+  }, [sampleTickets]);
+
   return (
     <>
-      <div
-        style={{
-          marginBottom: 'var(--space-sm)',
-          display: 'flex',
-          justifyContent: 'flex-end',
-          gap: '1.25rem',
-          fontSize: '0.75rem',
-        }}
-      >
-        {['euromillones', 'la-primitiva', 'el-gordo'].map((slug) => {
+      <section className="dashboard-lottery-cards" aria-label="Próximo bote, premios y muestra del pool">
+        {(['euromillones', 'la-primitiva', 'el-gordo'] as const).map((slug) => {
           const m = metaItems.find((it) => it.lottery === slug);
           const boteMedian = m?.next_funds_prediction?.bote_stats?.median;
           const premiosMedian = m?.next_funds_prediction?.premios_stats?.median;
@@ -339,36 +384,86 @@ export function Dashboard() {
             slug === 'euromillones'
               ? 'Euromillones'
               : slug === 'la-primitiva'
-              ? 'La Primitiva'
-              : 'El Gordo';
+                ? 'La Primitiva'
+                : 'El Gordo';
           const imgSrc =
             slug === 'euromillones'
               ? '/images/euromillones.png'
               : slug === 'la-primitiva'
-              ? '/images/la-primitiva.png'
-              : '/images/el-gordo.png';
+                ? '/images/la-primitiva.png'
+                : '/images/el-gordo.png';
+          const data = sampleTickets?.[slug];
+          const tickets = data?.tickets ?? [];
+          const idx = tickets.length > 0 ? sampleTicketsIndex % tickets.length : 0;
+          const ticket = tickets[idx];
+          const bettingHref =
+            slug === 'el-gordo'
+              ? '/resultados/el-gordo?tab=betting'
+              : `/resultados/${slug}?tab=apuestas`;
           return (
-            <div key={slug} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <img
-                src={imgSrc}
-                alt={label}
-                style={{ width: 16, height: 16, objectFit: 'contain' }}
-              />
-              <div
-                style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}
-              >
-                <span>{label}</span>
-                <span style={{ color: '#6b7280', fontSize: '0.7rem' }}>
-                  Próx. bote: {formatEuro(boteMedian)}
-                </span>
-                <span style={{ color: '#9ca3af', fontSize: '0.68rem' }}>
-                  Premios: {formatEuro(premiosMedian)}
-                </span>
+            <Link
+              key={slug}
+              to={bettingHref}
+              className="dashboard-lottery-card"
+              aria-label={`${label}, ir a apuestas`}
+            >
+              <div className="dashboard-lottery-card-top">
+                <div className="dashboard-lottery-card-header">
+                <img src={imgSrc} alt="" className="dashboard-lottery-card-img" aria-hidden />
+                <div className="dashboard-lottery-card-heading">
+                  <h3 className="dashboard-lottery-card-title">{label}</h3>
+                  <p className="dashboard-lottery-card-row">
+                    Próx. bote: {formatEuro(boteMedian)}
+                  </p>
+                  <p className="dashboard-lottery-card-row">
+                    Premios: {formatEuro(premiosMedian)}
+                  </p>
+                </div>
               </div>
-            </div>
+                {data?.last_draw_date ? (
+                  <div className="dashboard-lottery-card-date-top" aria-label="Fecha del sorteo">
+                    {data.last_draw_date}
+                  </div>
+                ) : null}
+              </div>
+              <div className="dashboard-lottery-card-sample">
+                <div className="dashboard-sample-ticket-balls" key={`${slug}-${idx}`}>
+                  {ticket ? (
+                    <>
+                      {(ticket.mains ?? []).map((n, i) => (
+                        <span key={`m-${i}`} className="dashboard-sample-ticket-ball">
+                          {String(n).padStart(2, '0')}
+                        </span>
+                      ))}
+                      {'stars' in ticket && (ticket.stars ?? []).length > 0 && (
+                        <>
+                          {(ticket.stars ?? []).map((s, i) => (
+                            <span key={`s-${i}`} className="dashboard-sample-ticket-ball star">
+                              {String(s).padStart(2, '0')}
+                            </span>
+                          ))}
+                        </>
+                      )}
+                      {'clave' in ticket && ticket.clave != null && (
+                        <span className="dashboard-sample-ticket-ball star">
+                          {String(ticket.clave).padStart(2, '0')}
+                        </span>
+                      )}
+                      {'reintegro' in ticket && ticket.reintegro != null && (
+                        <span className="dashboard-sample-ticket-ball star">
+                          R {ticket.reintegro}
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="dashboard-lottery-card-no-pool">Sin pool</span>
+                  )}
+                </div>
+              </div>
+            </Link>
           );
         })}
-      </div>
+      </section>
 
       <section className="dashboard-graph-section" aria-label="Premios y Bote últimos 2 meses">
         <h2 className="dashboard-graph-heading">Premios y Bote (últimos 2 meses)</h2>
