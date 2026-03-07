@@ -162,3 +162,43 @@ after all select 6 ticket and click "confirm tu apuesta" button
     <div class="modulo-bloque-seleccion bloque-boton">				
 		<button class="boton-confirmar">CONFIRMA TU APUESTA</button>
 	</div> 
+
+now bot open login page
+good and now you have to login with email and password
+this is login page(form)
+    <div class="formulario-login">
+
+        <div class="form-grupo" id="contentUsuario">
+            <label for="username">E-mail or NIF/NIE *</label>
+            <input type="text" autocomplete="off" id="username" name="username" value=""><span class="campo-validado ico-error hidden"></span>
+            (username)
+            <div class="mensaje-error hidden">The field you entered is invalid. Make sure you typed it correctly</div>
+        </div>
+
+        <div class="form-grupo contenedor_password" id="contentRegistro">
+            <label for="password">Password*</label>
+            <input type="password" id="password" maxlength="15" autocomplete="new-password" name="password" value=""><span class="button-invisible" id="mostrar-ocultar-passwd" action="hide" data-hide="Mostrar contraseña" data-show="Ocultar contraseña"></span>
+            (password)
+            <span class="campo-validado ico-error hidden"></span>
+            <div class="mensaje-error hidden">Fill in the fields correctly</div>
+        </div>
+
+
+
+        <button type="button" class="btn-entrar" id="btnLogin" value="Entrar" disabled="disabled">LOG IN</button>
+        (signin button)
+        <p class="olvidar-pasword">
+            Did you forget your password? <a href="https://juegos.loteriasyapuestas.es/jugar/solicitar-contrasena?lang=en">
+                Request a new one </a>
+        </p>
+        <div class="contenedor-obligatorio">(*) Required fields</div>
+    </div>
+for this make .env file i will add username and password for login
+
+now you see confirm page
+here click JUEGA button
+<div class="modulo-bloque-seleccion bloque-boton">
+    <button class="boton-confirmar" id="submitFresguardoCompra">
+        JUEGA
+    </button>
+</div>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Spin } from 'antd';
 
@@ -35,6 +35,16 @@ function BuyIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="M20 6L9 17l-5-5" />
+    </svg>
+  );
+}
+
+function RealPlatformIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
+      <polyline points="15 3 21 3 21 9" />
+      <line x1="10" y1="14" x2="21" y2="3" />
     </svg>
   );
 }
@@ -165,6 +175,82 @@ export function ElGordoBettingPanel() {
     setBucket((prev) => prev.filter((_, i) => i !== index));
   };
 
+  const [openRealPlatformLoading, setOpenRealPlatformLoading] = useState(false);
+  const [botProgress, setBotProgress] = useState<{ status: string; step: string; error?: string; has_pending_confirm?: boolean }>({ status: 'idle', step: '' });
+  const [confirmBotBoughtLoading, setConfirmBotBoughtLoading] = useState(false);
+  const botPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const openRealPlatform = async () => {
+    if (bucket.length === 0) return;
+    setOpenRealPlatformLoading(true);
+    setError('');
+    try {
+      const body: { tickets: ElGordoTicket[]; draw_date?: string; cutoff_draw_id?: string } = { tickets: bucket };
+      if (drawDate) body.draw_date = drawDate;
+      else if (cutoffDrawId) body.cutoff_draw_id = cutoffDrawId;
+      const res = await fetch(`${API_URL}/api/el-gordo/betting/open-real-platform`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(data.detail ?? res.statusText ?? 'Error al abrir la plataforma');
+      } else {
+        setBotProgress({ status: 'running', step: 'Iniciando...' });
+        if (botPollRef.current) clearInterval(botPollRef.current);
+        botPollRef.current = setInterval(async () => {
+          try {
+            const pr = await fetch(`${API_URL}/api/el-gordo/betting/bot-progress`, { cache: 'no-store' });
+            const data = await pr.json();
+            setBotProgress({
+              status: data.status ?? 'idle',
+              step: data.step ?? '',
+              error: data.error,
+              has_pending_confirm: data.has_pending_confirm,
+            });
+            if (data.status === 'success' || data.status === 'error') {
+              if (botPollRef.current) {
+                clearInterval(botPollRef.current);
+                botPollRef.current = null;
+              }
+              if (data.status === 'error') setError(data.error ?? 'Error en el bot');
+            }
+          } catch {
+            // ignore poll errors
+          }
+        }, 2000);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error al abrir la plataforma');
+    } finally {
+      setOpenRealPlatformLoading(false);
+    }
+  };
+
+  useEffect(() => () => {
+    if (botPollRef.current) clearInterval(botPollRef.current);
+  }, []);
+
+  const confirmBotBought = async () => {
+    setConfirmBotBoughtLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/api/el-gordo/betting/confirm-bot-bought`, { method: 'POST' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(data.detail ?? res.statusText ?? 'Error al confirmar');
+      } else {
+        setBucket([]);
+        setBotProgress({ status: 'idle', step: '' });
+        fetchBettingPool();
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error al confirmar');
+    } finally {
+      setConfirmBotBoughtLoading(false);
+    }
+  };
+
   const buyBucket = async () => {
     if (bucket.length === 0) return;
     const combined = [...realPool, ...bucket];
@@ -221,8 +307,10 @@ export function ElGordoBettingPanel() {
     );
   }
 
+  const botRunning = botProgress.status === 'running';
+
   return (
-    <section className="card resultados-features-card resultados-theme-el-gordo el-gordo-betting">
+    <section className="card resultados-features-card resultados-theme-el-gordo el-gordo-betting" style={{ position: 'relative' }}>
       <h2 style={{ marginTop: 0, marginBottom: 'var(--space-sm)', fontSize: '1rem' }}>
         El Gordo — Apuestas
       </h2>
@@ -230,7 +318,40 @@ export function ElGordoBettingPanel() {
         <p style={{ color: 'var(--color-error)', marginBottom: 'var(--space-md)' }}>{error}</p>
       )}
 
-      <div className="el-gordo-betting-split">
+      {/* While bot is running, block all interaction and show only progress */}
+      {botRunning && (
+        <div
+          className="el-gordo-betting-bot-overlay"
+          role="alert"
+          aria-busy="true"
+          style={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 20,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 'var(--space-md)',
+            background: 'rgba(0,0,0,0.65)',
+            borderRadius: 'var(--radius)',
+            color: 'var(--color-text)',
+            pointerEvents: 'auto',
+            padding: 'var(--space-lg)',
+          }}
+        >
+          <Spin size="large" />
+          <span style={{ fontWeight: 600, fontSize: '1rem' }}>Bot en curso</span>
+          <span style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', textAlign: 'center' }}>
+            {botProgress.step || 'Rellenando boletos en Loterías…'}
+          </span>
+          <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
+            No se puede usar la página hasta que termine.
+          </span>
+        </div>
+      )}
+
+      <div className="el-gordo-betting-split" style={botRunning ? { pointerEvents: 'none', userSelect: 'none', opacity: 0.7 } : undefined}>
         {/* Left 16: candidate pool as gallery — click card → add to bucket */}
         <div className="el-gordo-betting-left">
           <div className="el-gordo-betting-panel-card" style={{ flex: 1, minHeight: 280 }}>
@@ -288,10 +409,64 @@ export function ElGordoBettingPanel() {
 
         {/* Right 8: top = bucket gallery, bottom = real pool */}
         <div className="el-gordo-betting-right">
+          {botProgress.status !== 'idle' && (
+            <div
+              className="el-gordo-betting-bot-progress"
+              role="status"
+              aria-live="polite"
+              style={{
+                marginBottom: 'var(--space-sm)',
+                padding: 'var(--space-sm) var(--space-md)',
+                borderRadius: 'var(--radius)',
+                background: botProgress.status === 'error' ? 'rgba(200,60,60,0.12)' : botProgress.status === 'success' ? 'rgba(40,160,80,0.12)' : 'rgba(0,0,0,0.04)',
+                border: `1px solid ${botProgress.status === 'error' ? 'rgba(200,60,60,0.4)' : botProgress.status === 'success' ? 'rgba(40,160,80,0.4)' : 'var(--color-border)'}`,
+                fontSize: '0.8rem',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                {botProgress.status === 'running' && <Spin size="small" />}
+                <span style={{ fontWeight: 600 }}>
+                  {botProgress.status === 'running' && 'Bot en curso: '}
+                  {botProgress.status === 'success' && 'Completado: '}
+                  {botProgress.status === 'error' && 'Error: '}
+                </span>
+                <span>{botProgress.status === 'error' ? (botProgress.error ?? botProgress.step) : botProgress.step}</span>
+                {botProgress.status === 'success' && botProgress.has_pending_confirm && (
+                  <button
+                    type="button"
+                    style={{
+                      marginLeft: 8,
+                      padding: '4px 10px',
+                      fontSize: '0.75rem',
+                      fontWeight: 600,
+                      borderRadius: 'var(--radius)',
+                      border: '1px solid var(--color-border)',
+                      background: 'var(--color-surface)',
+                      cursor: confirmBotBoughtLoading ? 'wait' : 'pointer',
+                    }}
+                    disabled={confirmBotBoughtLoading}
+                    onClick={confirmBotBought}
+                  >
+                    {confirmBotBoughtLoading ? '...' : 'Añadir a guardados'}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
           <div className="el-gordo-betting-panel-card">
             <div className="el-gordo-betting-bucket-header">
               <h3>Cesta ({bucket.length}/{BUCKET_MAX})</h3>
               <div className="el-gordo-betting-bucket-toolbar">
+                <button
+                  type="button"
+                  className="el-gordo-betting-btn-icon"
+                  disabled={bucket.length === 0 || openRealPlatformLoading}
+                  onClick={openRealPlatform}
+                  aria-label="Comprar en Loterías — abre Chrome y rellena los boletos"
+                  title="Comprar en Loterías — abre Chrome y rellena los boletos"
+                >
+                  <RealPlatformIcon />
+                </button>
                 <button
                   type="button"
                   className="el-gordo-betting-btn-icon"

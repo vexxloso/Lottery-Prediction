@@ -10,6 +10,7 @@ import os
 import random
 import re
 import sys
+import threading
 from contextlib import asynccontextmanager
 from statistics import mean
 from typing import Optional, List, Dict
@@ -48,6 +49,108 @@ from train_el_gordo_model import (
     train_el_gordo_models,
     compute_el_gordo_probabilities,
 )
+
+def _append_el_gordo_bought_tickets(
+    tickets: list,
+    draw_date: str | None = None,
+    cutoff_draw_id: str | None = None,
+) -> None:
+    """Append tickets to bought_tickets in el_gordo_train_progress (merge, dedupe by mains+clave)."""
+    if db is None or not tickets:
+        return
+    draw_date = (draw_date or "").strip()[:10] or None
+    cutoff = (cutoff_draw_id or "").strip() or None
+    coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    doc = None
+    if draw_date:
+        doc = coll.find_one({"probs_fecha_sorteo": draw_date}, projection={"bought_tickets": 1})
+    elif cutoff:
+        doc = coll.find_one({"cutoff_draw_id": cutoff}, projection={"bought_tickets": 1, "cutoff_draw_id": 1})
+        if not doc and cutoff.isdigit():
+            doc = coll.find_one({"cutoff_draw_id": int(cutoff)}, projection={"bought_tickets": 1, "cutoff_draw_id": 1})
+    if not doc and not draw_date and not cutoff:
+        last = _get_last_draw_date("el-gordo")
+        if last:
+            doc = coll.find_one({"probs_fecha_sorteo": (last or "").strip()[:10]}, projection={"bought_tickets": 1})
+    if not doc:
+        return
+    existing = doc.get("bought_tickets") or []
+    seen = {(tuple(t.get("mains") or []), int(t.get("clave", 0))) for t in existing}
+    merged = list(existing)
+    for t in tickets:
+        mains = t.get("mains") or []
+        clave = int(t.get("clave", 0))
+        key = (tuple(mains), clave)
+        if key not in seen:
+            seen.add(key)
+            merged.append({"mains": list(mains), "clave": clave})
+    query = {"_id": doc["_id"]}
+    coll.update_one(
+        query,
+        {"$set": {"bought_tickets": merged, "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+    )
+    logger.info("el_gordo: appended %s bot tickets to bought_tickets (total %s)", len(tickets), len(merged))
+
+
+# Progress state for El Gordo bot (read by GET /api/el-gordo/betting/bot-progress)
+# last_tickets/draw_date/cutoff_draw_id: stored after bot run so user can confirm purchase and add to bought_tickets
+_el_gordo_bot_progress: dict = {
+    "status": "idle",
+    "step": "",
+    "started_at": None,
+    "finished_at": None,
+    "error": None,
+    "last_tickets": None,
+    "last_draw_date": None,
+    "last_cutoff_draw_id": None,
+}
+
+
+def _run_el_gordo_real_platform_bot(
+    tickets: list,
+    draw_date: str | None = None,
+    cutoff_draw_id: str | None = None,
+) -> None:
+    """Run El Gordo real-platform Selenium bot in a thread. Does NOT add to bought_tickets; user confirms via confirm-bot-bought."""
+    progress = _el_gordo_bot_progress
+    progress["status"] = "running"
+    progress["step"] = "Iniciando..."
+    progress["started_at"] = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    progress["finished_at"] = None
+    progress["error"] = None
+    progress["last_tickets"] = None
+    progress["last_draw_date"] = None
+    progress["last_cutoff_draw_id"] = None
+    try:
+        from el_gordo_real_platform_bot import run_el_gordo_real_platform_bot as run_bot
+
+        def on_step(step: str) -> None:
+            progress["step"] = step
+
+        result = run_bot(tickets, progress_callback=on_step)
+        progress["status"] = "success"
+        progress["finished_at"] = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        bought = result.get("bought") is True
+        if bought:
+            _append_el_gordo_bought_tickets(tickets, draw_date=draw_date, cutoff_draw_id=cutoff_draw_id)
+            progress["step"] = "Compra realizada y añadida a guardados."
+            progress["last_tickets"] = None
+            progress["last_draw_date"] = None
+            progress["last_cutoff_draw_id"] = None
+        else:
+            progress["step"] = "Formulario rellenado. Si compraste en Loterías, pulsa «Añadir a guardados»."
+            progress["last_tickets"] = tickets
+            progress["last_draw_date"] = draw_date
+            progress["last_cutoff_draw_id"] = cutoff_draw_id
+    except Exception as e:
+        logger.exception("el_gordo open-real-platform bot: %s", e)
+        progress["status"] = "error"
+        progress["step"] = ""
+        progress["error"] = str(e)
+        progress["finished_at"] = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        progress["last_tickets"] = None
+        progress["last_draw_date"] = None
+        progress["last_cutoff_draw_id"] = None
 from train_la_primitiva_model import (
     prepare_la_primitiva_dataset,
     train_la_primitiva_models,
@@ -127,7 +230,7 @@ def build_step4_pool(
     # - From ranks 1–20: select between 6 and 7 numbers (randomly)
     # - From ranks 21–30: select 3
     # - From ranks 31–40: select 3
-    # - From ranks 41–50: select 3
+    # - From ranks 41–50: select 3 
     top_count = random.choice([6, 7])
     from_1_20 = take_random_from_ranking(mains_ranking, 1, 20, top_count, main_set)
     from_21_30 = take_random_from_ranking(mains_ranking, 21, 30, 3, main_set)
@@ -1537,6 +1640,82 @@ async def api_el_gordo_betting_bought(request: Request):
         )
     if result.matched_count == 0:
         raise HTTPException(404, detail="No progress found for draw_date or cutoff_draw_id")
+    return JSONResponse(
+        content={"status": "ok", "saved_count": len(tickets)},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.post("/api/el-gordo/betting/open-real-platform")
+async def api_el_gordo_betting_open_real_platform(request: Request):
+    """
+    Start Selenium bot; fill bucket tickets on loteriasyapuestas.es (see scripts/el_gordo_real_platform_bot.py).
+    Headless Chrome fills the form and clicks JUEGA but cannot complete payment; the site usually
+    shows a payment step after JUEGA, so the bot rarely reaches the success page. When success
+    is detected, tickets are added to bought_tickets; otherwise use "Añadir a guardados" after buying.
+    Body: { "tickets": [...], "draw_date"?: "YYYY-MM-DD", "cutoff_draw_id"?: "..." } (max 6 tickets).
+    """
+    try:
+        body = await request.json() or {}
+    except Exception:
+        body = {}
+    tickets = body.get("tickets")
+    if not isinstance(tickets, list) or len(tickets) == 0 or len(tickets) > 6:
+        raise HTTPException(400, detail="Body must contain 'tickets' array with 1–6 items")
+    normalized = []
+    for t in tickets:
+        mains = t.get("mains")
+        if not isinstance(mains, list) or len(mains) != 5:
+            raise HTTPException(400, detail="Each ticket must have 'mains' array of 5 numbers")
+        clave = t.get("clave", 0)
+        try:
+            clave = int(clave)
+            if not (0 <= clave <= 9):
+                raise ValueError("clave must be 0–9")
+        except (TypeError, ValueError):
+            raise HTTPException(400, detail="Each ticket must have 'clave' 0–9")
+        normalized.append({"mains": [int(m) for m in mains], "clave": clave})
+    draw_date = (body.get("draw_date") or "").strip()[:10] or None
+    cutoff_draw_id = (body.get("cutoff_draw_id") or "").strip() or None
+    thread = threading.Thread(
+        target=_run_el_gordo_real_platform_bot,
+        args=(normalized, draw_date, cutoff_draw_id),
+        daemon=True,
+    )
+    thread.start()
+    return JSONResponse(
+        content={"status": "ok", "message": "Chrome abierto. Completa el login y pago en el navegador.", "tickets_count": len(normalized)},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/el-gordo/betting/bot-progress")
+def api_el_gordo_betting_bot_progress():
+    """Return current El Gordo bot progress for UI polling. status: idle | running | success | error."""
+    out = {k: v for k, v in _el_gordo_bot_progress.items() if k != "last_tickets"}
+    out["has_pending_confirm"] = bool(_el_gordo_bot_progress.get("last_tickets"))
+    return JSONResponse(
+        content=out,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.post("/api/el-gordo/betting/confirm-bot-bought")
+def api_el_gordo_betting_confirm_bot_bought():
+    """
+    User confirms they completed the purchase on the real site. Appends last bot-run tickets to bought_tickets.
+    Call this only after the user has actually bought the tickets on Loterías.
+    """
+    progress = _el_gordo_bot_progress
+    tickets = progress.get("last_tickets")
+    if not tickets:
+        raise HTTPException(400, detail="No hay boletos pendientes de confirmar. Ejecuta el bot primero.")
+    draw_date = progress.get("last_draw_date")
+    cutoff_draw_id = progress.get("last_cutoff_draw_id")
+    _append_el_gordo_bought_tickets(tickets, draw_date=draw_date, cutoff_draw_id=cutoff_draw_id)
+    progress["last_tickets"] = None
+    progress["last_draw_date"] = None
+    progress["last_cutoff_draw_id"] = None
     return JSONResponse(
         content={"status": "ok", "saved_count": len(tickets)},
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
