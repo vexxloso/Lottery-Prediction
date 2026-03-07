@@ -25,6 +25,35 @@ completing in headless, success page text/URL different from what we check, or s
 We verify login (wait for JUEGA button), widen success detection, and retry after JUEGA.
 
 ChromeDriver: prefers env CHROMEDRIVER_PATH if set; else Selenium built-in manager.
+
+=== VPS setup (fix "Could not start ChromeDriver") ===
+
+1) Install Chrome or Chromium and dependencies (Ubuntu/Debian):
+
+   # Chrome (recommended)
+   sudo apt-get update
+   sudo apt-get install -y wget gnupg
+   wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+   echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+   sudo apt-get update
+   sudo apt-get install -y google-chrome-stable
+
+   # Or Chromium instead:
+   # sudo apt-get install -y chromium-browser
+
+   sudo apt-get install -y libgbm1 libasound2 libnss3 libxss1 libxtst6 fonts-liberation
+
+2) Install chromedriver matching your Chrome version:
+
+   # Option A: Use the chromedriver package (version may lag)
+   sudo apt-get install -y chromium-chromedriver
+   # Then set in .env: CHROMEDRIVER_PATH=/usr/bin/chromedriver  (or wherever it is: which chromedriver)
+
+   # Option B: Download from Chrome for Testing (match your chrome version: google-chrome --version)
+   # https://googlechromelabs.github.io/chrome-for-testing/  → Linux64 chromedriver, extract and set CHROMEDRIVER_PATH
+
+3) Optional for headed mode: Xvfb + DISPLAY=:99 (see project docs).
+
 Env (in .env): LOTTERY_LOGIN_USERNAME, LOTTERY_LOGIN_PASSWORD.
   LOTTERY_BOT_HEADLESS=false  → visible Chrome on PC for testing; default true (headless) for VPS.
 """
@@ -213,7 +242,8 @@ def create_chrome_driver() -> webdriver.Chrome:
             driver = webdriver.Chrome(service=service, options=options)
         except Exception as e:
             raise RuntimeError(
-                "Could not start ChromeDriver. Set CHROMEDRIVER_PATH or install Chrome/Chromium on VPS."
+                "Could not start ChromeDriver. On VPS: install Chrome/Chromium and chromedriver (see script docstring), "
+                "or set CHROMEDRIVER_PATH to the chromedriver binary. Original error: %s" % (e,)
             ) from e
 
     driver.set_page_load_timeout(60)
