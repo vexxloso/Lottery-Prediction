@@ -16,14 +16,13 @@ Runs when POST /api/el-gordo/betting/open-real-platform is called.
 Delays are used throughout so headless behaviour looks human (e.g. after page load, between numbers,
 before/after confirm, before login typing, before JUEGA).
 
-=== Why headless often does NOT complete a purchase ===
+=== Payment ===
 
-- Many sites (including loterías) detect headless/automation (navigator.webdriver, Chrome flags)
-  and may block or use a different flow. We add anti-detection (hide webdriver, disable automation
-  flags) to reduce detection; it can still fail in headless.
-- After JUEGA, the site typically shows a PAYMENT step. The bot cannot complete payment or 3D Secure.
-- On PC use LOTTERY_BOT_HEADLESS=false to run with a visible browser; purchase often works there.
-  bought_tickets is auto-added only when the success page is detected; otherwise use "Añadir a guardados".
+This platform uses the account balance when you are signed in: after JUEGA there is no payment
+screen – the bet is charged to your account. So once login succeeds, the flow is: JUEGA → 
+confirmation page. If tickets still aren't detected as purchased, possible causes: login not
+completing in headless, success page text/URL different from what we check, or slow redirect.
+We verify login (wait for JUEGA button), widen success detection, and retry after JUEGA.
 
 ChromeDriver: prefers env CHROMEDRIVER_PATH if set; else Selenium built-in manager.
 Env (in .env): LOTTERY_LOGIN_USERNAME, LOTTERY_LOGIN_PASSWORD.
@@ -34,7 +33,7 @@ import os
 import random
 import sys
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 # Load .env from project root or backend so LOTTERY_LOGIN_* are available
 try:
@@ -76,7 +75,9 @@ DELAY_BETWEEN_USER_PASS = (0.3, 0.7)
 DELAY_BEFORE_SIGNIN_CLICK = (0.5, 1.0)
 DELAY_AFTER_LOGIN = (2.0, 3.5)
 DELAY_BEFORE_JUEGA = (0.8, 1.8)
-DELAY_AFTER_JUEGA_BEFORE_CHECK = (2.5, 4.0)
+DELAY_AFTER_JUEGA_BEFORE_CHECK = (3.0, 5.0)
+JUEGA_SUCCESS_CHECK_RETRIES = 3
+JUEGA_SUCCESS_CHECK_INTERVAL = (2.0, 3.0)
 
 
 def _human_delay(min_sec: float, max_sec: float) -> None:
@@ -230,33 +231,64 @@ def create_chrome_driver() -> webdriver.Chrome:
     return driver
 
 
-def _detect_purchase_success(driver: webdriver.Chrome) -> bool:
+def _detect_purchase_success(driver: webdriver.Chrome) -> Tuple[bool, str]:
     """
-    After clicking JUEGA, check if we appear to be on a success/confirmation page.
-    Returns True only when we detect clear success (so backend can add to bought_tickets).
+    After clicking JUEGA, check what page we're on. Account pays automatically when logged in
+    (no payment screen). Returns (True, msg) if success/confirmation page.
     """
+    _human_delay(DELAY_AFTER_JUEGA_BEFORE_CHECK[0], DELAY_AFTER_JUEGA_BEFORE_CHECK[1])
+    url_success_keys = (
+        "confirmacion", "resumen", "exito", "compra", "guardado", "recibo", "apuesta-realizada",
+        "apuesta/confirmacion", "operacion", "validada",
+    )
+    body_success_phrases = (
+        "apuesta realizada",
+        "apuesta ha sido",
+        "ha sido registrada",
+        "resumen de tu apuesta",
+        "confirmación",
+        "tu apuesta se ha",
+        "apuesta registrada",
+        "operación realizada",
+        "correctamente",
+        "número de operación",
+        "resumen de la apuesta",
+        "tu apuesta ha sido",
+    )
     try:
-        _human_delay(DELAY_AFTER_JUEGA_BEFORE_CHECK[0], DELAY_AFTER_JUEGA_BEFORE_CHECK[1])
         url = (driver.current_url or "").lower()
-        # Common success URL patterns
-        if any(k in url for k in ("confirmacion", "resumen", "exito", "compra", "guardado", "recibo", "apuesta-realizada")):
-            return True
         body_text = (driver.find_element(By.TAG_NAME, "body").text or "").lower()
-        if any(
-            phrase in body_text
-            for phrase in (
-                "apuesta realizada",
-                "apuesta ha sido",
-                "ha sido registrada",
-                "resumen de tu apuesta",
-                "confirmación",
-                "tu apuesta se ha",
-            )
-        ):
-            return True
+        if any(k in url for k in url_success_keys):
+            return (True, "Compra confirmada.")
+        if any(phrase in body_text for phrase in body_success_phrases):
+            return (True, "Compra confirmada.")
     except Exception as e:
         logger.debug("el_gordo_real_platform_bot: success check failed: %s", e)
-    return False
+
+    # Retry after short waits (redirect may be slow)
+    for _ in range(JUEGA_SUCCESS_CHECK_RETRIES - 1):
+        _human_delay(JUEGA_SUCCESS_CHECK_INTERVAL[0], JUEGA_SUCCESS_CHECK_INTERVAL[1])
+        try:
+            url = (driver.current_url or "").lower()
+            body_text = (driver.find_element(By.TAG_NAME, "body").text or "").lower()
+            if any(k in url for k in url_success_keys):
+                return (True, "Compra confirmada.")
+            if any(phrase in body_text for phrase in body_success_phrases):
+                return (True, "Compra confirmada.")
+        except Exception:
+            pass
+
+    # Log what we actually see so we can add the right phrase if needed
+    try:
+        url = driver.current_url or ""
+        body_snippet = (driver.find_element(By.TAG_NAME, "body").text or "")[:400]
+        logger.info(
+            "el_gordo_real_platform_bot: no success page detected. url=%s body_snippet=%s",
+            url, body_snippet.replace("\n", " ").strip(),
+        )
+    except Exception:
+        pass
+    return (False, "No se detectó página de confirmación. Si ya compraste, usa «Añadir a guardados».")
 
 
 def run_el_gordo_real_platform_bot(
@@ -364,17 +396,26 @@ def run_el_gordo_real_platform_bot(
         _click_cookiebot_allow_all(driver)
         _human_delay(*DELAY_AFTER_COOKIE_POST_CONFIRM)
 
-        # 5) Login: input username/password, sign in
+        # 5) Login: input username/password, sign in (account pays from balance – no payment screen)
         _progress("Iniciando sesión")
-        _do_login(driver)
+        login_done = _do_login(driver)
         _human_delay(*DELAY_AFTER_LOGIN)
+        if login_done:
+            _progress("Comprobando que la sesión está activa")
+            try:
+                WebDriverWait(driver, 12).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "#submitFresguardoCompra"))
+                )
+                _human_delay(0.5, 1.0)
+            except Exception:
+                logger.warning("el_gordo_real_platform_bot: JUEGA button not found after login; page may still be loading or login failed")
 
         # 6) Click JUEGA
         _progress("Pulsando JUEGA")
         _human_delay(*DELAY_BEFORE_JUEGA)
         _click_juega_if_present(driver)
-        bought = _detect_purchase_success(driver)
-        _progress("Finalizado" + (" (compra detectada)" if bought else ""))
+        bought, step_msg = _detect_purchase_success(driver)
+        _progress("Finalizado. " + step_msg)
         if os.environ.get("LOTTERY_BOT_HEADLESS", "true").strip().lower() in ("0", "false", "no"):
             pass  # visible mode: leave browser open for payment
         else:
