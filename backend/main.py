@@ -635,6 +635,7 @@ EL_GORDO_BUY_QUEUE_COLLECTION = "el_gordo_buy_queue"
 LA_PRIMITIVA_BUY_QUEUE_COLLECTION = "la_primitiva_buy_queue"
 EUROMILLONES_BUY_QUEUE_COLLECTION = "euromillones_buy_queue"
 LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION = "la_primitiva_train_progress"
+BOT_CREDENTIALS_COLLECTION = "bot_credentials"
 
 logger = logging.getLogger("lottery")
 
@@ -657,7 +658,7 @@ async def lifespan(app: FastAPI):
     db[EL_GORDO_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
     db[EL_GORDO_BUY_QUEUE_COLLECTION].create_index([("status", 1), ("created_at", 1)])
     db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
-    # El Gordo buy queue is processed by a standalone bot (scripts/el_gordo_buy_queue_bot.py), not by the backend.
+    # bot_credentials: no index on "order" at startup (optional; avoids conflict if one already exists)
     yield
     if client:
         client.close()
@@ -938,6 +939,125 @@ def get_next_draws_metadata():
         }
         items.append(d)
     return JSONResponse(content={"items": items})
+
+
+# --- Bot credentials (DB-stored username/password for lottery site; bot fetches active one) ---
+BOT_CREDENTIALS_SECRET = (os.getenv("BOT_CREDENTIALS_SECRET") or "").strip() or None
+
+
+@app.get("/api/bot/credentials")
+def api_bot_credentials_list():
+    """List all bot credentials (username, is_active, order); no password in response."""
+    if db is None:
+        raise HTTPException(503, detail="Database not connected")
+    coll = db[BOT_CREDENTIALS_COLLECTION]
+    cursor = coll.find({}, projection={"username": 1, "is_active": 1, "order": 1, "created_at": 1}).sort("order", 1)
+    items = []
+    for doc in cursor:
+        items.append({
+            "id": str(doc["_id"]),
+            "username": doc.get("username") or "",
+            "is_active": doc.get("is_active") is True,
+            "order": doc.get("order", 0),
+            "created_at": doc.get("created_at"),
+        })
+    return JSONResponse(content={"items": items}, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/bot/credentials")
+async def api_bot_credentials_add(request: Request):
+    """Add a bot credential. First one is set active by default."""
+    if db is None:
+        raise HTTPException(503, detail="Database not connected")
+    try:
+        body = await request.json() or {}
+    except Exception:
+        body = {}
+    username = (body.get("username") or "").strip()
+    password = (body.get("password") or "").strip()
+    if not username or not password:
+        raise HTTPException(400, detail="username and password required")
+    coll = db[BOT_CREDENTIALS_COLLECTION]
+    count = coll.count_documents({})
+    is_active = count == 0
+    order = count
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    doc = {
+        "username": username,
+        "password": password,
+        "is_active": is_active,
+        "order": order,
+        "created_at": now,
+    }
+    ins = coll.insert_one(doc)
+    return JSONResponse(
+        content={"id": str(ins.inserted_id), "is_active": is_active, "order": order},
+        status_code=201,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.patch("/api/bot/credentials/{credential_id}")
+def api_bot_credentials_set_active(credential_id: str):
+    """Set this credential as active; all others become inactive."""
+    if db is None:
+        raise HTTPException(503, detail="Database not connected")
+    try:
+        oid = ObjectId(credential_id)
+    except Exception:
+        raise HTTPException(400, detail="Invalid id")
+    coll = db[BOT_CREDENTIALS_COLLECTION]
+    if coll.find_one({"_id": oid}) is None:
+        raise HTTPException(404, detail="Credential not found")
+    coll.update_many({}, {"$set": {"is_active": False}})
+    coll.update_one({"_id": oid}, {"$set": {"is_active": True}})
+    return JSONResponse(content={"status": "ok"}, headers={"Cache-Control": "no-store"})
+
+
+@app.delete("/api/bot/credentials/{credential_id}")
+def api_bot_credentials_delete(credential_id: str):
+    """Delete a credential. If it was active, the first remaining becomes active."""
+    if db is None:
+        raise HTTPException(503, detail="Database not connected")
+    try:
+        oid = ObjectId(credential_id)
+    except Exception:
+        raise HTTPException(400, detail="Invalid id")
+    coll = db[BOT_CREDENTIALS_COLLECTION]
+    doc = coll.find_one({"_id": oid})
+    if doc is None:
+        raise HTTPException(404, detail="Credential not found")
+    was_active = doc.get("is_active") is True
+    coll.delete_one({"_id": oid})
+    if was_active:
+        first = coll.find_one({}, sort=[("order", 1)])
+        if first:
+            coll.update_one({"_id": first["_id"]}, {"$set": {"is_active": True}})
+    return JSONResponse(content={"status": "ok"}, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/bot/active-credentials")
+def api_bot_active_credentials(request: Request):
+    """
+    Return active bot credential (username, password) from DB (bot_credentials collection).
+    Finds document with is_active: true and returns it.
+    When BOT_CREDENTIALS_SECRET is set in backend env, requires header X-Bot-Secret to match.
+    When BOT_CREDENTIALS_SECRET is not set, returns active credential without auth (for local/same-machine bot).
+    """
+    if db is None:
+        raise HTTPException(503, detail="Database not connected")
+    if BOT_CREDENTIALS_SECRET:
+        secret = (request.headers.get("X-Bot-Secret") or "").strip()
+        if secret != BOT_CREDENTIALS_SECRET:
+            raise HTTPException(401, detail="Invalid or missing X-Bot-Secret")
+    coll = db[BOT_CREDENTIALS_COLLECTION]
+    doc = coll.find_one({"is_active": True}, projection={"username": 1, "password": 1})
+    if not doc:
+        raise HTTPException(404, detail="No active bot credential")
+    return JSONResponse(
+        content={"username": doc.get("username") or "", "password": doc.get("password") or ""},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/dashboard/sample-tickets")

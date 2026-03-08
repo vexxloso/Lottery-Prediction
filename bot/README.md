@@ -2,7 +2,26 @@
 
 Bots run on a separate device: they claim jobs from the API, open Chrome on loteriasyapuestas.es, fill and buy tickets, then report success/failure.
 
-## One process for all (recommended)
+## Build bot.exe (Windows)
+
+From the `bot/` folder:
+
+```bat
+build_exe.bat
+```
+
+Requires Python and `pip install pyinstaller` (the script installs it if missing). Output: `dist\bot.exe`.
+
+Copy **bot.exe** and your **.env** into the same folder on the PC where you run the bot. The exe reads `.env` from its own directory. Chrome must be installed on that PC.
+
+Run:
+
+- `bot.exe` — poll all three lotteries
+- `bot.exe --lottery el_gordo`
+- `bot.exe --lottery euromillones`
+- `bot.exe --lottery la_primitiva`
+
+## One process for all (Python, recommended)
 
 From the `bot/` directory:
 
@@ -33,7 +52,8 @@ python la_primitiva.py
 ## Env (`bot/.env`)
 
 - `API_URL` – backend base URL (e.g. `http://localhost:8000`)
-- `LOTTERY_LOGIN_USERNAME` / `LOTTERY_LOGIN_PASSWORD` – loteriasyapuestas.es login (form is filled; you click “Log in”)
+- **DB accounts (recommended):** set `BOT_CREDENTIALS_SECRET` to the same value as the backend env. The bot then uses the **active** account from the app’s “Cuentas bot” page.
+- **Or .env login:** `LOTTERY_LOGIN_USERNAME` / `LOTTERY_LOGIN_PASSWORD` – used if `BOT_CREDENTIALS_SECRET` is not set or API fails.
 - `LOTTERY_BOT_HEADLESS` – `false` to see Chrome (e.g. on Windows)
 - `CHROMEDRIVER_PATH` – optional path to ChromeDriver
 

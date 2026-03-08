@@ -83,8 +83,8 @@ DELAY_AFTER_REINTEGRO = (0.4, 0.9)
 DELAY_BETWEEN_TICKETS = (1.0, 2.0)
 DELAY_BEFORE_CONFIRM = (1.0, 2.0)
 DELAY_AFTER_CONFIRM = (2.0, 3.5)
-DELAY_BEFORE_LOGIN_TYPING = (0.5, 1.0)
-DELAY_BETWEEN_USER_PASS = (0.3, 0.7)
+DELAY_BEFORE_LOGIN_TYPING = (0.15, 0.35)
+DELAY_BETWEEN_USER_PASS = (0.1, 0.25)
 MANUAL_LOGIN_WAIT = (18.0, 25.0)
 DELAY_BEFORE_PLAY = (0.8, 1.8)
 DELAY_AFTER_PLAY_CHECK = (3.0, 5.0)
@@ -94,6 +94,49 @@ PLAY_SUCCESS_CHECK_INTERVAL = (2.0, 3.0)
 
 def _human_delay(min_sec: float, max_sec: float) -> None:
     time.sleep(random.uniform(min_sec, max_sec))
+
+
+def _get_login_credentials() -> Tuple[str, str]:
+    """Return (username, password): from API active-credentials (DB bot_credentials, is_active: true), else from env."""
+    try:
+        headers = {}
+        secret = (os.environ.get("BOT_CREDENTIALS_SECRET") or "").strip()
+        if secret:
+            headers["X-Bot-Secret"] = secret
+        r = _session().get(
+            f"{API_URL}/api/bot/active-credentials",
+            headers=headers or None,
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            u = (data.get("username") or "").strip()
+            p = (data.get("password") or "").strip()
+            if u and p:
+                return (u, p)
+        elif r.status_code in (401, 404):
+            logger.info("Bot credentials API returned %s; using .env LOTTERY_LOGIN_*", r.status_code)
+    except Exception as e:
+        logger.warning("Failed to fetch active credentials from API: %s; using .env", e)
+    u = (os.environ.get("LOTTERY_LOGIN_USERNAME") or "").strip()
+    p = (os.environ.get("LOTTERY_LOGIN_PASSWORD") or "").strip()
+    if not u or not p:
+        logger.warning("No credentials: add active account in app (Cuentas bot) or set LOTTERY_LOGIN_USERNAME and LOTTERY_LOGIN_PASSWORD in .env")
+    return (u, p)
+
+
+def _set_input_value(driver: webdriver.Chrome, element, value: str) -> None:
+    """Set input value so it sticks: JavaScript value + events, then send_keys."""
+    driver.execute_script(
+        "var el = arguments[0]; var v = arguments[1]; el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));",
+        element,
+        value or "",
+    )
+    try:
+        element.clear()
+        element.send_keys(value or "")
+    except Exception:
+        pass
 
 
 def _click_cookiebot_allow_all(driver: webdriver.Chrome) -> bool:
@@ -108,11 +151,9 @@ def _click_cookiebot_allow_all(driver: webdriver.Chrome) -> bool:
         return False
 
 
-def _do_login(driver: webdriver.Chrome) -> bool:
-    username = (os.environ.get("LOTTERY_LOGIN_USERNAME") or "").strip()
-    password = (os.environ.get("LOTTERY_LOGIN_PASSWORD") or "").strip()
+def _do_login(driver: webdriver.Chrome, username: str, password: str) -> bool:
     if not username or not password:
-        logger.warning("LOTTERY_LOGIN_USERNAME / LOTTERY_LOGIN_PASSWORD not set; skipping login")
+        logger.warning("No username/password passed to login; abort")
         return False
     wait = WebDriverWait(driver, LOGIN_WAIT_TIMEOUT)
     try:
@@ -121,35 +162,32 @@ def _do_login(driver: webdriver.Chrome) -> bool:
         return False
     _human_delay(*DELAY_BEFORE_LOGIN_TYPING)
     try:
-        allow_btn = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll"))
-        )
+        allow_btn = driver.find_element(By.CSS_SELECTOR, "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll")
         driver.execute_script("arguments[0].click();", allow_btn)
-        _human_delay(*DELAY_AFTER_COOKIE)
+        _human_delay(0.2, 0.4)
     except Exception:
         pass
     try:
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#username")))
-    except Exception:
-        return False
-    _human_delay(*DELAY_BEFORE_LOGIN_TYPING)
-    try:
+        wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, "#username")))
         user_el = driver.find_element(By.CSS_SELECTOR, "#username")
         pass_el = driver.find_element(By.CSS_SELECTOR, "#password")
-        user_el.clear()
-        user_el.send_keys(username)
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", user_el)
+        _human_delay(0.1, 0.2)
+        print("Inputting username on login page:", username)
+        print("Inputting password on login page:", password)
+        _set_input_value(driver, user_el, username)
         _human_delay(*DELAY_BETWEEN_USER_PASS)
-        pass_el.clear()
-        pass_el.send_keys(password)
+        _set_input_value(driver, pass_el, password)
+        _human_delay(0.15, 0.35)
         try:
             btn = driver.find_element(By.CSS_SELECTOR, "#btnLogin")
             driver.execute_script("arguments[0].removeAttribute('disabled');", btn)
         except Exception:
             pass
-        logger.info("Filled username/password; click LOG IN manually")
+        logger.info("Filled username and password on login page; click LOG IN to continue")
         return True
     except Exception as e:
-        logger.warning("Login form fill failed: %s", e)
+        logger.warning("Login form fill failed (username/password not input): %s", e)
         return False
 
 
@@ -276,7 +314,12 @@ document.querySelectorAll('iframe').forEach(function(f) { try { if (f.contentDoc
 """
 
 
-def _run_selenium_buy(tickets: list, progress_callback: Optional[Callable[[str], None]] = None) -> dict:
+def _run_selenium_buy(
+    tickets: list,
+    progress_callback: Optional[Callable[[str], None]] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> dict:
     def _progress(msg: str) -> None:
         if progress_callback:
             try:
@@ -287,6 +330,13 @@ def _run_selenium_buy(tickets: list, progress_callback: Optional[Callable[[str],
     if not tickets or len(tickets) > 8:
         logger.warning("La Primitiva: need 1–8 tickets, got %s", len(tickets or []))
         return {"bought": False}
+
+    if not username or not password:
+        username, password = _get_login_credentials()
+    if not username or not password:
+        logger.warning("No credentials: stop. Set active account in app (Cuentas bot) or LOTTERY_LOGIN_USERNAME and LOTTERY_LOGIN_PASSWORD in .env")
+        return {"bought": False, "error": "No credentials configured"}
+    logger.info("Using credentials for username: %s", username)
 
     driver = None
     try:
@@ -382,17 +432,19 @@ def _run_selenium_buy(tickets: list, progress_callback: Optional[Callable[[str],
         _human_delay(0.5, 1.2)
 
         _progress("Iniciando sesión")
-        login_done = _do_login(driver)
+        login_done = _do_login(driver, username, password)
         _human_delay(*MANUAL_LOGIN_WAIT)
-        if login_done:
-            _progress("Comprobando sesión")
-            try:
-                WebDriverWait(driver, 12).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "#submitFresguardoCompra"))
-                )
-                _human_delay(0.5, 1.0)
-            except Exception:
-                logger.warning("PLAY button (#submitFresguardoCompra) not found after login")
+        if not login_done:
+            logger.warning("Login failed: could not fill or submit username/password; stopping")
+            return {"bought": False, "error": "Login failed: could not fill username/password on page"}
+        _progress("Comprobando sesión")
+        try:
+            WebDriverWait(driver, 12).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "#submitFresguardoCompra"))
+            )
+            _human_delay(0.5, 1.0)
+        except Exception:
+            logger.warning("PLAY button (#submitFresguardoCompra) not found after login")
 
         _progress("Pulsando PLAY")
         _human_delay(*DELAY_BEFORE_PLAY)
@@ -425,9 +477,14 @@ def _run_selenium_buy(tickets: list, progress_callback: Optional[Callable[[str],
         raise
 
 
-def run_buy(tickets: list, progress_callback: Optional[Callable[[str], None]] = None) -> dict:
-    """Public entry for combined runner. Runs Selenium buy flow; returns {bought: bool}."""
-    return _run_selenium_buy(tickets, progress_callback)
+def run_buy(
+    tickets: list,
+    progress_callback: Optional[Callable[[str], None]] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> dict:
+    """Public entry for combined runner. Runs Selenium buy flow; returns {bought: bool}. Optional username/password from runner."""
+    return _run_selenium_buy(tickets, progress_callback, username=username, password=password)
 
 
 def _on_stop(*_args):

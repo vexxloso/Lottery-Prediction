@@ -176,9 +176,14 @@ input, select {
   flex-wrap: wrap;
   gap: var(--space-xs);
 }
+.app-nav--right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
 
 .theme-toggle {
-  margin-left: auto;
   margin-right: var(--space-xs);
   padding: var(--space-sm);
   min-width: 44px;

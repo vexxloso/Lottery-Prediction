@@ -369,3 +369,21 @@ then click BUY button
         <div class="tooltip">Select the draws in which you participate: Monday/Thursday/Saturday (next draw to be held) or weekly (the remaining draws to be held in the week up to Sunday).</div>
     </div>
 </ul></div>
+
+
+now bot use username and password from .env file
+i will use DB instead of this
+for this make new page and here i can input several username and password pair
+and i will select active one username and password firt input is active(default)
+so if bot find ticket what to buy first read activteed username and password from DB
+and buy ticket with this username and password
+
+
+delete this
+Cuentas
+christianbernardo1973@hotmail.com
+Activa
+🗑
+El bot (bot.exe) debe tener en .env BOT_CREDENTIALS_SECRET igual que en el backend para obtener la cuenta activa. Si no, usará LOTTERY_LOGIN_USERNAME y LOTTERY_LOGIN_PASSWORD del .env.
+and instead of this display this on right with new card 
+and move user icon to right on header

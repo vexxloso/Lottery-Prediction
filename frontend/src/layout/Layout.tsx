@@ -6,6 +6,9 @@ const navItems = [
   { to: '/resultados/euromillones', label: 'Euromillones', icon: '/images/euromillones.png' },
   { to: '/resultados/el-gordo', label: 'El Gordo', icon: '/images/el-gordo.png' },
 ];
+const navRightItems = [
+  { to: '/bot-cuentas', label: 'Cuentas bot', icon: null },
+];
 
 export function Layout() {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -40,6 +43,20 @@ export function Layout() {
               aria-label={label}
             >
               <img src={icon} alt="" className="nav-link-icon" aria-hidden />
+            </NavLink>
+          ))}
+        </nav>
+        <nav className="app-nav app-nav--right" aria-label="Cuentas y configuración">
+          {navRightItems.map(({ to, label, icon }) => (
+            <NavLink
+              key={to}
+              to={to}
+              className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
+              onClick={() => setMenuOpen(false)}
+              title={label}
+              aria-label={label}
+            >
+              <span className="nav-link-icon" style={{ fontSize: '1.1rem' }}>👤</span>
             </NavLink>
           ))}
         </nav>
