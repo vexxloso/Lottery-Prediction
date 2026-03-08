@@ -56,7 +56,8 @@ function QueueStatusIcon({ status }: { status: string }) {
   const s = status ?? '';
   if (s === 'waiting') {
     return (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden title="En cola">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+        <title>En cola</title>
         <circle cx="12" cy="12" r="10" />
         <path d="M12 6v6l4 2" />
       </svg>
@@ -64,21 +65,24 @@ function QueueStatusIcon({ status }: { status: string }) {
   }
   if (s === 'in_progress') {
     return (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden title="Comprando">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+        <title>Comprando</title>
         <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
       </svg>
     );
   }
   if (s === 'bought') {
     return (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden title="Comprado">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+        <title>Comprado</title>
         <path d="M20 6L9 17l-5-5" />
       </svg>
     );
   }
   if (s === 'failed') {
     return (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden title="Error">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+        <title>Error</title>
         <circle cx="12" cy="12" r="10" />
         <path d="M15 9l-6 6M9 9l6 6" />
       </svg>
@@ -500,6 +504,16 @@ export function ElGordoBettingPanel() {
                   title="Comprar en Loterías — añade a la cola, el bot comprará en breve"
                 >
                   <RealPlatformIcon />
+                </button>
+                <button
+                  type="button"
+                  className="el-gordo-betting-btn-icon"
+                  disabled={bucket.length === 0}
+                  onClick={buyBucket}
+                  aria-label="Añadir a guardados"
+                  title="Añadir a guardados (sin comprar en web)"
+                >
+                  <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>Guardar</span>
                 </button>
                 <button
                   type="button"
