@@ -452,6 +452,11 @@ def _run_selenium_buy(tickets: list, progress_callback: Optional[Callable[[str],
         raise
 
 
+def run_buy(tickets: list, progress_callback: Optional[Callable[[str], None]] = None) -> dict:
+    """Public entry for combined runner. Runs Selenium buy flow; returns {bought: bool}."""
+    return _run_selenium_buy(tickets, progress_callback)
+
+
 def _on_stop(*_args):
     global _current_queue_id
     if _current_queue_id:
