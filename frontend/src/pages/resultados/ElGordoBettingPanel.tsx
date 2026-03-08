@@ -307,36 +307,6 @@ export function ElGordoBettingPanel() {
     }
   };
 
-  const buyBucket = async () => {
-    if (bucket.length === 0) return;
-    const combined = [...realPool, ...bucket];
-    const seen = new Set<string>();
-    const newRealPool = combined.filter((t) => {
-      const k = ticketKey(t);
-      if (seen.has(k)) return false;
-      seen.add(k);
-      return true;
-    });
-    setRealPool(newRealPool);
-    setBucket([]);
-    try {
-      const body: { tickets: ElGordoTicket[]; draw_date?: string; cutoff_draw_id?: string } = { tickets: newRealPool };
-      if (drawDate) body.draw_date = drawDate;
-      else if (cutoffDrawId) body.cutoff_draw_id = cutoffDrawId;
-      const res = await fetch(`${API_URL}/api/el-gordo/betting/bought`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data.detail ?? res.statusText ?? 'Error al guardar boletos');
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Error al guardar boletos');
-    }
-  };
-
   const bucketFull = bucket.length >= BUCKET_MAX;
   const addRandomToBucket = () => {
     const need = Math.min(BUCKET_MAX - bucket.length, availableCandidates.length);
@@ -504,16 +474,6 @@ export function ElGordoBettingPanel() {
                   title="Comprar en Loterías — añade a la cola, el bot comprará en breve"
                 >
                   <RealPlatformIcon />
-                </button>
-                <button
-                  type="button"
-                  className="el-gordo-betting-btn-icon"
-                  disabled={bucket.length === 0}
-                  onClick={buyBucket}
-                  aria-label="Añadir a guardados"
-                  title="Añadir a guardados (sin comprar en web)"
-                >
-                  <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>Guardar</span>
                 </button>
                 <button
                   type="button"
