@@ -204,3 +204,168 @@ here click JUEGA button
 </div>
 
 <div id="CybotCookiebotDialogBodyButtonsWrapper"><button id="CybotCookiebotDialogBodyButtonDecline" class="CybotCookiebotDialogBodyButton" tabindex="0" lang="en">Only the necessary</button> <button id="CybotCookiebotDialogBodyLevelButtonLevelOptinAllowallSelection" class="CybotCookiebotDialogBodyButton CybotCookiebotDialogHide" tabindex="0" lang="en">Allow selection</button> <button id="CybotCookiebotDialogBodyLevelButtonCustomize" class="CybotCookiebotDialogBodyButton CybotCookiebotDialogHide" tabindex="0" lang="en">Customize<div class="CybotCookiebotDialogArrow"></div></button> <button id="CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll" class="CybotCookiebotDialogBodyButton" tabindex="0" lang="en">Allow all</button></div>
+
+i will update bot workflow
+when i click buy icon on buket and save ticket on DB and wating
+and i will run bot real time
+ and if find new ticket on DB then buy this 
+and on dashboard display buy ticket status
+
+first discuss algorithm without coding and then implement with you
+
+i will clearly workflow again
+
+when i click buy icon on buket and save ticket on DB and wating
+
+
+bot have to run another device 
+for this make new folder and make bot with one file(here make env file)
+and this bot can't access db directly so you have to use api(backend) to access db
+
+if ticket added on queue then ticket candidate pool don't have to display this ticket
+when i delete ticket can be display again
+i can't delete inprogress or bought ticket
+wating or faild queeu can delete
+and bought tickets have to save bought_tickets item on el_gordo_train_progress collection
+and on ui when i mouse hover on queue show tickets 
+and use icon to show status 
+
+now i will make euromillones bot same as el-gordo bot
+for this i change folder el_gordo bot name here make euromillones bot
+go to https://juegos.loteriasyapuestas.es/jugar/euromillones/apuesta
+confirm cookie
+first click this button for one lottery not weekly
+<div class="tabs">					
+    <div class="tabs_left">      
+            <button class="tabs_inactive_left" id="boton_diaria">
+                <span>Tuesday</span>
+            </button>
+    </div>
+    <div class="tabs_right">       
+            <button type="button" class="tabs_active_right" id="boton_semanal">
+                <img src="/f/loterias/estaticos/imagenes/saga/ico_success.png" alt="Confirmation Icon" title="Confirmation Icon"><span>Weekly</span>
+            </button>
+    </div>
+    <ul class="contenedor-rifas"> 
+            <li class="activo">Participo <img src="/f/loterias/estaticos/imagenes/saga/logo_rifaelMillon.png" id="sorteoElMillon" alt="El Millón" title="El Millón"> Tuesday</li>
+            <li class="activo">Participo <img src="/f/loterias/estaticos/imagenes/saga/logo_rifaelMillon.png" id="sorteoElMillon" alt="El Millón" title="El Millón"> Friday</li>
+    </ul>
+</div>
+here click "tabs_inactive_left"
+and same as el-gordo bot 
+this is html pattern for select main number and start number and confrim(CONTINUE)
+
+after select all tickets
+click next button
+<form id="formBoleto" name="boleto" action="/jugar/euromillones/opciones?access=headercms&amp;lang=en" method="post" class="botones_boleto">
+    <input type="hidden" value="/jugar/euromillones/apuesta?access=headercms&amp;lang=en" id="urlAccionValidar"> 
+    <input type="hidden" id="joker" name="joker" value="false">
+    <input type="hidden" id="pronostico" name="pronostico" value="">
+    <input type="hidden" id="numeros" name="numeros" value="">
+    <input type="hidden" id="estrellas" name="estrellas" value="">
+    <input type="hidden" id="columna" name="columna" value="1">
+    <input type="hidden" id="accionController" name="accionController" value="">
+    <input type="hidden" id="automatica" name="automatica" value="">
+    
+        <button id="botonSiguiente">
+            <span>
+                NEXT
+            </span>
+        </button>
+    
+</form>
+and wait then click next button again(this has a diffrence id)
+<div class="content-botones">
+    <button class="siguiente_paso2" id="siguiente_paso2">
+        NEXT
+    </button>
+</div>
+confirm cookie
+then input username and password and i will click login button
+<div class="formulario-login">
+
+    <div class="form-grupo" id="contentUsuario">
+        <label for="username" class="float">E-mail or NIF/NIE *</label>
+        <input type="text" autocomplete="off" id="username" name="username" value=""><span class="campo-validado ico-error hidden"></span>
+        <div class="mensaje-error hidden">The field you entered is invalid. Make sure you typed it correctly</div>
+    </div>
+
+    <div class="form-grupo contenedor_password" id="contentRegistro">
+        <label for="password" class="float">Password*</label>
+        <input type="password" id="password" maxlength="15" autocomplete="new-password" name="password" value=""><span class="button-invisible" id="mostrar-ocultar-passwd" action="hide" data-hide="Mostrar contraseña" data-show="Ocultar contraseña"></span>
+        <span class="campo-validado ico-error hidden"></span>
+        <div class="mensaje-error hidden">Fill in the fields correctly</div>
+    </div>
+
+
+
+    <button type="button" class="btn-entrar btn-three" id="btnLogin" value="Entrar">LOG IN</button>
+    <p class="olvidar-pasword">
+        Did you forget your password? <a href="https://juegos.loteriasyapuestas.es/jugar/solicitar-contrasena?lang=en">
+            Request a new one </a>
+    </p>
+    <div class="contenedor-obligatorio">(*) Required fields</div>
+</div>
+
+and confrim buy with click BUY button
+<button class="boton_guardar" id="confirmarCompra" value="COMPRAR">
+    BUY
+</button>
+-----------------------------------------------------------------
+now i will make la-primitiva bot same as el-gordo and euromillones bot
+go to https://juegos.loteriasyapuestas.es/jugar/la-primitiva/apuesta
+
+confirm cookie
+refer b.htm this is number pattern
+here first main number 6*count
+after select RECOUP number this is same all so you just onec input this number
+
+then click this button
+<button class="boton-confirmar">CONFIRM YOUR BET </button>
+confirm cookie
+then input username and password and i will click login button
+<div class="formulario-login">
+
+    <div class="form-grupo activa" id="contentUsuario">
+        <label for="username" class="float">E-mail or NIF/NIE *</label>
+        <input type="text" autocomplete="off" id="username" name="username" value=""><span class="campo-validado ico-error hidden"></span>
+        <div class="mensaje-error hidden">The field you entered is invalid. Make sure you typed it correctly</div>
+    </div>
+
+    <div class="form-grupo contenedor_password" id="contentRegistro">
+        <label for="password" class="float">Password*</label>
+        <input type="password" id="password" maxlength="15" autocomplete="new-password" name="password" value=""><span class="button-invisible" id="mostrar-ocultar-passwd" action="hide" data-hide="Mostrar contraseña" data-show="Ocultar contraseña"></span>
+        <span class="campo-validado ico-error hidden"></span>
+        <div class="mensaje-error hidden">Fill in the fields correctly</div>
+    </div>
+
+
+
+    <button type="button" class="btn-entrar btn-three" id="btnLogin" value="Entrar">LOG IN</button>
+    <p class="olvidar-pasword">
+        Did you forget your password? <a href="https://juegos.loteriasyapuestas.es/jugar/solicitar-contrasena?lang=en">
+            Request a new one </a>
+    </p>
+    <div class="contenedor-obligatorio">(*) Required fields</div>
+</div>
+then click BUY button
+<button class="boton-confirmar" id="submitFresguardoCompra">
+    PLAY
+</button>
+
+
+<div class="modulo-sorteo"><ul class="modulo-sorteo-juego">
+    <li>
+        <button data-tiposorteo="DIARIA" class="boton-sorteo-juego tipo-seleccionado">
+            <em class="ico-tipo-activo"></em>Monday</button>
+            
+    </li>
+    <li>
+        <button data-tiposorteo="SEMANAL" class="boton-sorteo-juego">
+            <em class="ico-tipo-activo"></em>WEEKLY</button>
+    </li>
+    <div class="mas-informacion">
+        <span class="ico">i</span>
+        <div class="tooltip">Select the draws in which you participate: Monday/Thursday/Saturday (next draw to be held) or weekly (the remaining draws to be held in the week up to Sunday).</div>
+    </div>
+</ul></div>

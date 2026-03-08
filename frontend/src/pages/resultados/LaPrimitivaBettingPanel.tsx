@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Spin } from 'antd';
+import { Spin, Tooltip } from 'antd';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
@@ -26,19 +26,21 @@ function mainsKey(t: LaPrimitivaMains): string {
   return (t.mains ?? []).slice().sort((a, b) => a - b).join(',');
 }
 
+function RealPlatformIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
+      <polyline points="15 3 21 3 21 9" />
+      <line x1="10" y1="14" x2="21" y2="3" />
+    </svg>
+  );
+}
+
 function DeleteIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
       <path d="M10 11v6M14 11v6M8 6v12M16 6v12" />
-    </svg>
-  );
-}
-
-function BuyIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M20 6L9 17l-5-5" />
     </svg>
   );
 }
@@ -49,6 +51,41 @@ function ShuffleIcon() {
       <path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5" />
     </svg>
   );
+}
+
+function QueueStatusIcon({ status }: { status: string }) {
+  const s = status ?? '';
+  if (s === 'waiting') {
+    return (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden title="En cola">
+        <circle cx="12" cy="12" r="10" />
+        <path d="M12 6v6l4 2" />
+      </svg>
+    );
+  }
+  if (s === 'in_progress') {
+    return (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden title="Comprando">
+        <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+      </svg>
+    );
+  }
+  if (s === 'bought') {
+    return (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden title="Comprado">
+        <path d="M20 6L9 17l-5-5" />
+      </svg>
+    );
+  }
+  if (s === 'failed') {
+    return (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden title="Error">
+        <circle cx="12" cy="12" r="10" />
+        <path d="M15 9l-6 6M9 9l6 6" />
+      </svg>
+    );
+  }
+  return null;
 }
 
 function TicketCardMains({
@@ -134,14 +171,15 @@ export function LaPrimitivaBettingPanel() {
   const [bucket, setBucket] = useState<LaPrimitivaMains[]>([]);
   const [realPool, setRealPool] = useState<LaPrimitivaTicket[]>([]);
   const [candidateCount, setCandidateCount] = useState(100);
-  const [reintegroModalOpen, setReintegroModalOpen] = useState(false);
   const [searchParams] = useSearchParams();
   const drawDate = searchParams.get('draw_date') ?? '';
   const cutoffDrawId = searchParams.get('cutoff_draw_id') ?? '';
 
-  const fetchBettingPool = useCallback(async () => {
-    setLoading(true);
-    setError('');
+  const fetchBettingPool = useCallback(async (showLoading = true) => {
+    if (showLoading) {
+      setLoading(true);
+      setError('');
+    }
     try {
       const params = new URLSearchParams();
       if (drawDate) params.set('draw_date', drawDate);
@@ -152,8 +190,10 @@ export function LaPrimitivaBettingPanel() {
       const res = await fetch(url, { cache: 'no-store' });
       const data = await res.json();
       if (!res.ok) {
-        setError(data.detail ?? res.statusText ?? 'Error al cargar pool');
-        setCandidatePool([]);
+        if (showLoading) {
+          setError(data.detail ?? res.statusText ?? 'Error al cargar pool');
+          setCandidatePool([]);
+        }
         return;
       }
       const rawPool = Array.isArray(data.candidate_pool) ? data.candidate_pool : [];
@@ -171,11 +211,13 @@ export function LaPrimitivaBettingPanel() {
         }))
       );
     } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Error al cargar pool';
-      setError(msg.includes('fetch') || msg.includes('Failed') ? 'Error de conexión con el servidor. Comprueba que el backend esté en marcha (puerto 8000).' : msg);
-      setCandidatePool([]);
+      if (showLoading) {
+        const msg = e instanceof Error ? e.message : 'Error al cargar pool';
+        setError(msg.includes('fetch') || msg.includes('Failed') ? 'Error de conexión con el servidor. Comprueba que el backend esté en marcha (puerto 8000).' : msg);
+        setCandidatePool([]);
+      }
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   }, [drawDate, cutoffDrawId]);
 
@@ -194,47 +236,90 @@ export function LaPrimitivaBettingPanel() {
     setBucket((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const openBuyReintegro = () => {
-    if (bucket.length === 0) return;
-    setReintegroModalOpen(true);
-  };
+  const [enqueueLoading, setEnqueueLoading] = useState(false);
+  const [reintegroModalOpen, setReintegroModalOpen] = useState(false);
+  const [buyQueue, setBuyQueue] = useState<{ id: string; status: string; tickets_count: number; tickets?: { mains?: number[]; reintegro?: number }[]; error?: string }[]>([]);
 
-  const confirmBuyWithReintegro = async (reintegro: number) => {
-    setReintegroModalOpen(false);
-    const newTickets: LaPrimitivaTicket[] = bucket.map((m) => ({ mains: [...m.mains], reintegro }));
-    const combined = [...realPool, ...newTickets];
-    const seen = new Set<string>();
-    const newRealPool = combined.filter((t) => {
-      const k = mainsKey(t);
-      if (seen.has(k)) return false;
-      seen.add(k);
-      return true;
-    });
-    setRealPool(newRealPool);
-    setBucket([]);
+  const fetchBuyQueue = useCallback(async () => {
     try {
-      const body: { tickets: LaPrimitivaTicket[]; draw_date?: string; cutoff_draw_id?: string } = { tickets: newRealPool };
+      const res = await fetch(`${API_URL}/api/la-primitiva/betting/buy-queue?limit=10`, { cache: 'no-store' });
+      const data = await res.json();
+      setBuyQueue(Array.isArray(data.items) ? data.items : []);
+    } catch {
+      setBuyQueue([]);
+    }
+  }, []);
+
+  const saveBoughtFromQueue = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/la-primitiva/betting/save-bought-from-queue`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if ((data.saved_count ?? 0) > 0) fetchBettingPool(false);
+      }
+    } catch {
+      // ignore
+    }
+  }, [fetchBettingPool]);
+
+  useEffect(() => {
+    fetchBuyQueue();
+    saveBoughtFromQueue();
+    const intervalMs = 8000;
+    const t = setInterval(() => {
+      fetchBuyQueue();
+      saveBoughtFromQueue();
+      fetchBettingPool(false);
+    }, intervalMs);
+    return () => clearInterval(t);
+  }, [fetchBuyQueue, fetchBettingPool, saveBoughtFromQueue]);
+
+  const enqueueBuy = async (reintegro: number) => {
+    if (bucket.length === 0) return;
+    setReintegroModalOpen(false);
+    setEnqueueLoading(true);
+    setError('');
+    try {
+      const body: { tickets: { mains: number[]; reintegro: number }[]; draw_date?: string; cutoff_draw_id?: string } = {
+        tickets: bucket.map((m) => ({ mains: m.mains, reintegro })),
+      };
       if (drawDate) body.draw_date = drawDate;
       else if (cutoffDrawId) body.cutoff_draw_id = cutoffDrawId;
-      const res = await fetch(`${API_URL}/api/la-primitiva/betting/bought`, {
+      const res = await fetch(`${API_URL}/api/la-primitiva/betting/enqueue`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setError(data.detail ?? res.statusText ?? 'Error al guardar boletos');
+        setError(data.detail ?? res.statusText ?? 'Error al encolar');
+      } else {
+        setBucket([]);
+        fetchBuyQueue();
+        fetchBettingPool(false);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Error al guardar boletos');
+      setError(e instanceof Error ? e.message : 'Error al encolar');
+    } finally {
+      setEnqueueLoading(false);
     }
+  };
+
+  const openEnqueueReintegroModal = () => {
+    if (bucket.length === 0) return;
+    setReintegroModalOpen(true);
   };
 
   const bucketFull = bucket.length >= BUCKET_MAX;
   const savedMainsKeys = new Set(realPool.map((t) => mainsKey(t)));
   const bucketMainsKeys = new Set(bucket.map(mainsKey));
+  const inQueue = new Set<string>();
+  for (const q of buyQueue) {
+    const tickets = q?.tickets;
+    if (Array.isArray(tickets)) for (const t of tickets) inQueue.add(mainsKey(t));
+  }
   const inBucketOrReal = new Set([...bucketMainsKeys, ...savedMainsKeys]);
-  const availableCandidates = candidatePool.filter((t) => !inBucketOrReal.has(mainsKey(t)));
+  const availableCandidates = candidatePool.filter((t) => !inBucketOrReal.has(mainsKey(t)) && !inQueue.has(mainsKey(t)));
   const addRandomToBucket = () => {
     const need = Math.min(BUCKET_MAX - bucket.length, availableCandidates.length);
     if (need <= 0) return;
@@ -265,7 +350,7 @@ export function LaPrimitivaBettingPanel() {
           <div className="el-gordo-betting-reintegro-modal">
             <h3>Elige reintegro (0-9)</h3>
             <p style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', marginBottom: 12 }}>
-              Los {bucket.length} boletos tendrán el mismo reintegro.
+              Los {bucket.length} boletos de la cesta tendrán el mismo reintegro. Luego se añadirán a la cola de compra.
             </p>
             <div className="el-gordo-betting-reintegro-buttons">
               {REINTEGRO_OPTIONS.map((r) => (
@@ -273,7 +358,8 @@ export function LaPrimitivaBettingPanel() {
                   key={r}
                   type="button"
                   className="resultados-ball reintegro el-gordo-betting-reintegro-btn"
-                  onClick={() => confirmBuyWithReintegro(r)}
+                  onClick={() => enqueueBuy(r)}
+                  disabled={enqueueLoading}
                 >
                   {r}
                 </button>
@@ -284,6 +370,7 @@ export function LaPrimitivaBettingPanel() {
               className="resultados-features-iconbtn"
               onClick={() => setReintegroModalOpen(false)}
               style={{ marginTop: 12 }}
+              disabled={enqueueLoading}
             >
               Cancelar
             </button>
@@ -331,7 +418,7 @@ export function LaPrimitivaBettingPanel() {
                     ? (!drawDate && !cutoffDrawId
                         ? 'Se abre con la fecha del último sorteo (draw_date). Si no hay datos, ejecuta en Predicción el paso de pool de candidatos.'
                         : 'No hay pool. En Predicción ejecuta todos los pasos hasta generar el pool de candidatos para este sorteo.')
-                    : 'No hay más candidatos disponibles (todos están en la cesta o en boletos guardados).'}
+                    : 'No hay más candidatos disponibles (todos están en la cesta, en la cola o en boletos guardados).'}
                 </p>
               ) : (
                 displayedCandidates.map((t, i) => (
@@ -349,6 +436,66 @@ export function LaPrimitivaBettingPanel() {
         </div>
 
         <div className="el-gordo-betting-right">
+          {buyQueue.length > 0 && (
+            <div style={{ marginBottom: 'var(--space-sm)', fontSize: '0.8rem' }}>
+              <strong>Cola de compra</strong>
+              <ul style={{ margin: '4px 0 0', paddingLeft: '1.2rem', listStyle: 'none' }}>
+                {buyQueue.filter((q) => q != null).slice(0, 5).map((q, idx) => (
+                  <li key={q?.id ?? `q-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                    <Tooltip
+                      title={
+                        Array.isArray(q?.tickets) && q.tickets.length > 0 ? (
+                          <div style={{ padding: '4px 0', lineHeight: 1.5 }}>
+                            {q.tickets.map((t, i) => (
+                              <div key={i} style={{ marginBottom: i < (q?.tickets?.length ?? 0) - 1 ? 4 : 0 }}>
+                                Boleto {i + 1}: {(t.mains ?? []).join(', ')}
+                                {typeof (t as { reintegro?: number }).reintegro === 'number' ? ` — Reintegro ${(t as { reintegro?: number }).reintegro}` : ''}
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <span>{q?.tickets_count ?? 0} boleto(s)</span>
+                        )
+                      }
+                      placement="topLeft"
+                    >
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 4, flex: 1, minWidth: 0, cursor: 'default' }}>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }} aria-hidden>
+                          <QueueStatusIcon status={q?.status ?? ''} />
+                        </span>
+                        <span style={{ flex: 1, minWidth: 0 }}>
+                          {q?.tickets_count ?? 0} boleto{(q?.tickets_count ?? 0) !== 1 ? 's' : ''} — {q?.status === 'waiting' ? 'En cola' : q?.status === 'in_progress' ? 'Comprando…' : q?.status === 'bought' ? 'Comprado' : 'Error'}
+                          {q?.error != null && q.error !== '' ? `: ${q.error}` : ''}
+                        </span>
+                      </span>
+                    </Tooltip>
+                    {(q?.status === 'waiting' || q?.status === 'failed') && q?.id ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            const res = await fetch(`${API_URL}/api/la-primitiva/betting/buy-queue/${encodeURIComponent(q.id)}`, { method: 'DELETE' });
+                            if (res.ok) fetchBuyQueue();
+                            else {
+                              const data = await res.json().catch(() => ({}));
+                              setError(data.detail ?? 'Error al eliminar');
+                            }
+                          } catch (e) {
+                            setError(e instanceof Error ? e.message : 'Error al eliminar');
+                          }
+                        }}
+                        aria-label="Quitar de la cola"
+                        title="Quitar de la cola"
+                        style={{ padding: 2, border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                      >
+                        <DeleteIcon />
+                      </button>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <div className="el-gordo-betting-panel-card">
             <div className="el-gordo-betting-bucket-header">
               <h3>Cesta ({bucket.length}/{BUCKET_MAX})</h3>
@@ -356,12 +503,12 @@ export function LaPrimitivaBettingPanel() {
                 <button
                   type="button"
                   className="el-gordo-betting-btn-icon"
-                  disabled={bucket.length === 0}
-                  onClick={openBuyReintegro}
-                  aria-label="Confirmar — elegir reintegro y guardar"
-                  title="Confirmar — elegir reintegro y guardar"
+                  disabled={bucket.length === 0 || enqueueLoading}
+                  onClick={openEnqueueReintegroModal}
+                  aria-label="Comprar en Loterías — elegir reintegro y añadir a la cola"
+                  title="Comprar en Loterías — elegir reintegro y añadir a la cola"
                 >
-                  <BuyIcon />
+                  <RealPlatformIcon />
                 </button>
                 <button
                   type="button"
@@ -378,7 +525,7 @@ export function LaPrimitivaBettingPanel() {
             <div className="el-gordo-betting-gallery el-gordo-betting-gallery--compact">
               {bucket.length === 0 ? (
                 <p style={{ margin: 'auto', fontSize: '0.8rem', color: 'var(--color-text-muted)', gridColumn: '1 / -1' }}>
-                  Vacío. Haz clic en un candidato para añadir. Al confirmar elegirás un reintegro para los 8 boletos.
+                  Vacío. Haz clic en un candidato para añadir. Haz clic en un boleto de la cesta para quitarlo.
                 </p>
               ) : (
                 bucket.map((m, i) => (

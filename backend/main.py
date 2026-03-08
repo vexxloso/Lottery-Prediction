@@ -151,6 +151,8 @@ def _run_el_gordo_real_platform_bot(
         progress["last_tickets"] = None
         progress["last_draw_date"] = None
         progress["last_cutoff_draw_id"] = None
+
+
 from train_la_primitiva_model import (
     prepare_la_primitiva_dataset,
     train_la_primitiva_models,
@@ -159,7 +161,7 @@ from train_la_primitiva_model import (
 from itertools import combinations
 
 
-def build_step4_pool(
+def build_step4_pool( 
     mains_probs: List[Dict],
     stars_probs: List[Dict],
     prev_main_numbers: Optional[List[int]] = None,
@@ -629,6 +631,9 @@ COLLECTIONS = {"LAPR": "la_primitiva", "EMIL": "euromillones", "ELGR": "el_gordo
 METADATA_COLLECTION = "scraper_metadata"
 EUROMILLONES_TRAIN_PROGRESS_COLLECTION = "euromillones_train_progress"
 EL_GORDO_TRAIN_PROGRESS_COLLECTION = "el_gordo_train_progress"
+EL_GORDO_BUY_QUEUE_COLLECTION = "el_gordo_buy_queue"
+LA_PRIMITIVA_BUY_QUEUE_COLLECTION = "la_primitiva_buy_queue"
+EUROMILLONES_BUY_QUEUE_COLLECTION = "euromillones_buy_queue"
 LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION = "la_primitiva_train_progress"
 
 logger = logging.getLogger("lottery")
@@ -650,7 +655,9 @@ async def lifespan(app: FastAPI):
         db[coll_name].create_index("id_sorteo", unique=True)
     db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
     db[EL_GORDO_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
+    db[EL_GORDO_BUY_QUEUE_COLLECTION].create_index([("status", 1), ("created_at", 1)])
     db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
+    # El Gordo buy queue is processed by a standalone bot (scripts/el_gordo_buy_queue_bot.py), not by the backend.
     yield
     if client:
         client.close()
@@ -1722,6 +1729,230 @@ def api_el_gordo_betting_confirm_bot_bought():
     )
 
 
+@app.post("/api/el-gordo/betting/enqueue")
+async def api_el_gordo_betting_enqueue(request: Request):
+    """
+    Save bucket tickets to buy queue (status=waiting). Background worker will pick up and run the bot.
+    Body: { "tickets": [...], "draw_date"?: "YYYY-MM-DD", "cutoff_draw_id"?: "..." } (max 6 tickets).
+    """
+    try:
+        body = await request.json() or {}
+    except Exception:
+        body = {}
+    tickets = body.get("tickets")
+    if not isinstance(tickets, list) or len(tickets) == 0 or len(tickets) > 6:
+        raise HTTPException(400, detail="Body must contain 'tickets' array with 1–6 items")
+    normalized = []
+    for t in tickets:
+        mains = t.get("mains")
+        if not isinstance(mains, list) or len(mains) != 5:
+            raise HTTPException(400, detail="Each ticket must have 'mains' array of 5 numbers")
+        clave = t.get("clave", 0)
+        try:
+            clave = int(clave)
+            if not (0 <= clave <= 9):
+                raise ValueError("clave must be 0–9")
+        except (TypeError, ValueError):
+            raise HTTPException(400, detail="Each ticket must have 'clave' 0–9")
+        normalized.append({"mains": [int(m) for m in mains], "clave": clave})
+    draw_date = (body.get("draw_date") or "").strip()[:10] or None
+    cutoff_draw_id = (body.get("cutoff_draw_id") or "").strip() or None
+    if db is None:
+        raise HTTPException(503, detail="Database not available")
+    coll = db[EL_GORDO_BUY_QUEUE_COLLECTION]
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    doc = {
+        "lottery": "el-gordo",
+        "tickets": normalized,
+        "tickets_count": len(normalized),
+        "draw_date": draw_date,
+        "cutoff_draw_id": cutoff_draw_id,
+        "status": "waiting",
+        "created_at": now,
+    }
+    ins = coll.insert_one(doc)
+    return JSONResponse(
+        content={"status": "ok", "queue_id": str(ins.inserted_id), "tickets_count": len(normalized), "message": "Añadido a la cola. El bot comprará en breve."},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/el-gordo/betting/buy-queue")
+def api_el_gordo_betting_buy_queue(limit: int = Query(50, ge=1, le=100)):
+    """Return recent El Gordo buy-queue items (status, tickets for hover). Tickets included so UI can exclude them from pool and show on hover."""
+    if db is None:
+        return JSONResponse(content={"items": []}, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+    coll = db[EL_GORDO_BUY_QUEUE_COLLECTION]
+    cursor = coll.find({}).sort("created_at", -1).limit(limit)
+    items = []
+    for d in cursor:
+        items.append({
+            "id": str(d["_id"]),
+            "lottery": d.get("lottery", "el-gordo"),
+            "status": d.get("status", "waiting"),
+            "saved_status": d.get("saved_status"),
+            "tickets_count": d.get("tickets_count", 0),
+            "tickets": d.get("tickets") or [],
+            "draw_date": d.get("draw_date"),
+            "cutoff_draw_id": d.get("cutoff_draw_id"),
+            "created_at": d.get("created_at"),
+            "started_at": d.get("started_at"),
+            "finished_at": d.get("finished_at"),
+            "error": d.get("error"),
+        })
+    return JSONResponse(
+        content={"items": items},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.post("/api/el-gordo/betting/save-bought-from-queue")
+def api_el_gordo_betting_save_bought_from_queue():
+    """
+    Find queue items with status=bought and saved_status not True; for each append tickets
+    to el_gordo_train_progress.bought_tickets (using draw_date/cutoff_draw_id to find the doc),
+    then set saved_status=True. Called every 8s from frontend so bought tickets appear in Boletos guardados.
+    """
+    if db is None:
+        return JSONResponse(
+            content={"status": "ok", "saved_count": 0, "message": "Database not connected"},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    coll = db[EL_GORDO_BUY_QUEUE_COLLECTION]
+    cursor = coll.find({
+        "status": "bought",
+        "$or": [{"saved_status": {"$ne": True}}, {"saved_status": {"$exists": False}}],
+    })
+    saved_count = 0
+    for d in cursor:
+        oid = d["_id"]
+        tickets = d.get("tickets") or []
+        if not tickets:
+            coll.update_one({"_id": oid}, {"$set": {"saved_status": True}})
+            saved_count += 1
+            continue
+        draw_date = (d.get("draw_date") or "").strip()[:10] or None
+        cutoff_draw_id = (d.get("cutoff_draw_id") or "").strip() or None
+        _append_el_gordo_bought_tickets(tickets, draw_date=draw_date, cutoff_draw_id=cutoff_draw_id)
+        coll.update_one({"_id": oid}, {"$set": {"saved_status": True}})
+        saved_count += 1
+    return JSONResponse(
+        content={"status": "ok", "saved_count": saved_count},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.post("/api/el-gordo/betting/bot/claim")
+def api_el_gordo_betting_bot_claim():
+    """
+    For the bot running on another device (no DB access). Claims one waiting queue item:
+    sets status to in_progress and returns it. Bot uses this instead of reading DB.
+    """
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not connected")
+    coll = db[EL_GORDO_BUY_QUEUE_COLLECTION]
+    doc = coll.find_one({"status": "waiting"}, sort=[("created_at", 1)])
+    if not doc:
+        return JSONResponse(
+            content={"claimed": False, "queue_id": None, "tickets": [], "draw_date": None, "cutoff_draw_id": None},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    oid = doc["_id"]
+    updated = coll.update_one(
+        {"_id": oid, "status": "waiting"},
+        {"$set": {"status": "in_progress", "started_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+    )
+    if updated.modified_count == 0:
+        return JSONResponse(
+            content={"claimed": False, "queue_id": None, "tickets": [], "draw_date": None, "cutoff_draw_id": None},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    tickets = doc.get("tickets") or []
+    draw_date = (doc.get("draw_date") or "").strip()[:10] or None
+    cutoff_draw_id = (doc.get("cutoff_draw_id") or "").strip() or None
+    return JSONResponse(
+        content={
+            "claimed": True,
+            "queue_id": str(oid),
+            "tickets": tickets,
+            "draw_date": draw_date,
+            "cutoff_draw_id": cutoff_draw_id,
+        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.post("/api/el-gordo/betting/bot/complete")
+async def api_el_gordo_betting_bot_complete(request: Request):
+    """
+    For the bot running on another device. Report result of a claimed job.
+    Body: { "queue_id": "...", "success": true|false, "error"?: "..." }.
+    Sets queue doc to bought (saved_status false) or failed.
+    """
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not connected")
+    try:
+        body = await request.json() or {}
+    except Exception:
+        body = {}
+    queue_id = body.get("queue_id")
+    success = body.get("success") is True
+    error = (body.get("error") or "").strip() or None
+    if not queue_id:
+        raise HTTPException(400, detail="queue_id required")
+    try:
+        oid = ObjectId(queue_id)
+    except Exception:
+        raise HTTPException(400, detail="Invalid queue_id")
+    coll = db[EL_GORDO_BUY_QUEUE_COLLECTION]
+    doc = coll.find_one({"_id": oid}, projection={"status": 1})
+    if not doc:
+        raise HTTPException(404, detail="Queue item not found")
+    if doc.get("status") != "in_progress":
+        return JSONResponse(
+            content={"status": "ok", "message": "Job already completed or not in progress"},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    if success:
+        coll.update_one(
+            {"_id": oid},
+            {"$set": {"status": "bought", "saved_status": False, "finished_at": now, "error": None}},
+        )
+    else:
+        coll.update_one(
+            {"_id": oid},
+            {"$set": {"status": "failed", "error": error or "Bot reported failure", "finished_at": now}},
+        )
+    return JSONResponse(
+        content={"status": "ok", "message": "completed"},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.delete("/api/el-gordo/betting/buy-queue/{queue_id}")
+def api_el_gordo_betting_buy_queue_delete(queue_id: str):
+    """Cancel/remove a queue item. Allowed when status is 'waiting' or 'failed' (not in_progress or bought)."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not connected")
+    try:
+        oid = ObjectId(queue_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid queue_id")
+    coll = db[EL_GORDO_BUY_QUEUE_COLLECTION]
+    doc = coll.find_one({"_id": oid}, projection={"status": 1})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    st = doc.get("status")
+    if st not in ("waiting", "failed"):
+        raise HTTPException(status_code=400, detail="Solo se puede eliminar cuando está en cola (waiting) o ha fallado (failed)")
+    coll.delete_one({"_id": oid, "status": {"$in": ["waiting", "failed"]}})
+    return JSONResponse(
+        content={"status": "ok", "message": "Eliminado de la cola"},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
 @app.get("/api/euromillones/betting/last-id")
 def api_euromillones_betting_last_id():
     """Return cutoff_draw_id of the last euromillones_train_progress doc by probs_fecha_sorteo (desc) then _id (desc)."""
@@ -1869,6 +2100,192 @@ async def api_euromillones_betting_bought(request: Request):
     )
 
 
+@app.post("/api/euromillones/betting/enqueue")
+async def api_euromillones_betting_enqueue(request: Request):
+    """Save bucket tickets to buy queue (status=waiting). Body: { "tickets": [{ "mains": [5], "stars": [2] }, ...], "draw_date"?, "cutoff_draw_id"? } (max 5)."""
+    try:
+        body = await request.json() or {}
+    except Exception:
+        body = {}
+    tickets = body.get("tickets")
+    if not isinstance(tickets, list) or len(tickets) == 0 or len(tickets) > 5:
+        raise HTTPException(400, detail="Body must contain 'tickets' array with 1–5 items")
+    normalized = []
+    for t in tickets:
+        mains = t.get("mains")
+        stars = t.get("stars")
+        if not isinstance(mains, list) or len(mains) != 5 or not isinstance(stars, list) or len(stars) != 2:
+            raise HTTPException(400, detail="Each ticket must have 'mains' (5 numbers) and 'stars' (2 numbers)")
+        normalized.append({"mains": [int(m) for m in mains], "stars": [int(s) for s in stars]})
+    draw_date = (body.get("draw_date") or "").strip()[:10] or None
+    cutoff_draw_id = (body.get("cutoff_draw_id") or "").strip() or None
+    if db is None:
+        raise HTTPException(503, detail="Database not available")
+    coll = db[EUROMILLONES_BUY_QUEUE_COLLECTION]
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    doc = {
+        "lottery": "euromillones",
+        "tickets": normalized,
+        "tickets_count": len(normalized),
+        "draw_date": draw_date,
+        "cutoff_draw_id": cutoff_draw_id,
+        "status": "waiting",
+        "created_at": now,
+    }
+    ins = coll.insert_one(doc)
+    return JSONResponse(
+        content={"status": "ok", "queue_id": str(ins.inserted_id), "tickets_count": len(normalized), "message": "Añadido a la cola. El bot comprará en breve."},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/euromillones/betting/buy-queue")
+def api_euromillones_betting_buy_queue(limit: int = Query(50, ge=1, le=100)):
+    if db is None:
+        return JSONResponse(content={"items": []}, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+    coll = db[EUROMILLONES_BUY_QUEUE_COLLECTION]
+    cursor = coll.find({}).sort("created_at", -1).limit(limit)
+    items = []
+    for d in cursor:
+        items.append({
+            "id": str(d["_id"]),
+            "lottery": d.get("lottery", "euromillones"),
+            "status": d.get("status", "waiting"),
+            "saved_status": d.get("saved_status"),
+            "tickets_count": d.get("tickets_count", 0),
+            "tickets": d.get("tickets") or [],
+            "draw_date": d.get("draw_date"),
+            "cutoff_draw_id": d.get("cutoff_draw_id"),
+            "created_at": d.get("created_at"),
+            "started_at": d.get("started_at"),
+            "finished_at": d.get("finished_at"),
+            "error": d.get("error"),
+        })
+    return JSONResponse(content={"items": items}, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+
+
+@app.post("/api/euromillones/betting/save-bought-from-queue")
+def api_euromillones_betting_save_bought_from_queue():
+    if db is None:
+        return JSONResponse(content={"status": "ok", "saved_count": 0}, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+    coll = db[EUROMILLONES_BUY_QUEUE_COLLECTION]
+    cursor = coll.find({"status": "bought", "$or": [{"saved_status": {"$ne": True}}, {"saved_status": {"$exists": False}}]})
+    saved_count = 0
+    for d in cursor:
+        oid = d["_id"]
+        tickets = d.get("tickets") or []
+        if not tickets:
+            coll.update_one({"_id": oid}, {"$set": {"saved_status": True}})
+            saved_count += 1
+            continue
+        draw_date = (d.get("draw_date") or "").strip()[:10] or None
+        cutoff_draw_id = (d.get("cutoff_draw_id") or "").strip() or None
+        _append_euromillones_bought_tickets(tickets, draw_date=draw_date, cutoff_draw_id=cutoff_draw_id)
+        coll.update_one({"_id": oid}, {"$set": {"saved_status": True}})
+        saved_count += 1
+    return JSONResponse(content={"status": "ok", "saved_count": saved_count}, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+
+
+@app.delete("/api/euromillones/betting/buy-queue/{queue_id}")
+def api_euromillones_betting_buy_queue_delete(queue_id: str):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not connected")
+    try:
+        oid = ObjectId(queue_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid queue_id")
+    coll = db[EUROMILLONES_BUY_QUEUE_COLLECTION]
+    doc = coll.find_one({"_id": oid}, projection={"status": 1})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    st = doc.get("status")
+    if st not in ("waiting", "failed"):
+        raise HTTPException(status_code=400, detail="Solo se puede eliminar cuando está en cola (waiting) o ha fallado (failed)")
+    coll.delete_one({"_id": oid, "status": {"$in": ["waiting", "failed"]}})
+    return JSONResponse(content={"status": "ok", "message": "Eliminado de la cola"}, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+
+
+@app.post("/api/euromillones/betting/bot/claim")
+def api_euromillones_betting_bot_claim():
+    """For the Euromillones bot (another device). Claim one waiting queue item; set in_progress and return it."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not connected")
+    coll = db[EUROMILLONES_BUY_QUEUE_COLLECTION]
+    doc = coll.find_one({"status": "waiting"}, sort=[("created_at", 1)])
+    if not doc:
+        return JSONResponse(
+            content={"claimed": False, "queue_id": None, "tickets": [], "draw_date": None, "cutoff_draw_id": None},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    oid = doc["_id"]
+    updated = coll.update_one(
+        {"_id": oid, "status": "waiting"},
+        {"$set": {"status": "in_progress", "started_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+    )
+    if updated.modified_count == 0:
+        return JSONResponse(
+            content={"claimed": False, "queue_id": None, "tickets": [], "draw_date": None, "cutoff_draw_id": None},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    tickets = doc.get("tickets") or []
+    draw_date = (doc.get("draw_date") or "").strip()[:10] or None
+    cutoff_draw_id = (doc.get("cutoff_draw_id") or "").strip() or None
+    return JSONResponse(
+        content={
+            "claimed": True,
+            "queue_id": str(oid),
+            "tickets": tickets,
+            "draw_date": draw_date,
+            "cutoff_draw_id": cutoff_draw_id,
+        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.post("/api/euromillones/betting/bot/complete")
+async def api_euromillones_betting_bot_complete(request: Request):
+    """For the Euromillones bot. Report result: body { "queue_id", "success", "error"?. }."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not connected")
+    try:
+        body = await request.json() or {}
+    except Exception:
+        body = {}
+    queue_id = body.get("queue_id")
+    success = body.get("success") is True
+    error = (body.get("error") or "").strip() or None
+    if not queue_id:
+        raise HTTPException(400, detail="queue_id required")
+    try:
+        oid = ObjectId(queue_id)
+    except Exception:
+        raise HTTPException(400, detail="Invalid queue_id")
+    coll = db[EUROMILLONES_BUY_QUEUE_COLLECTION]
+    doc = coll.find_one({"_id": oid}, projection={"status": 1})
+    if not doc:
+        raise HTTPException(404, detail="Queue item not found")
+    if doc.get("status") != "in_progress":
+        return JSONResponse(
+            content={"status": "ok", "message": "Job already completed or not in progress"},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    if success:
+        coll.update_one(
+            {"_id": oid},
+            {"$set": {"status": "bought", "saved_status": False, "finished_at": now, "error": None}},
+        )
+    else:
+        coll.update_one(
+            {"_id": oid},
+            {"$set": {"status": "failed", "error": error or "Bot reported failure", "finished_at": now}},
+        )
+    return JSONResponse(
+        content={"status": "ok", "message": "completed"},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
 def _get_la_primitiva_cutoff_from_last_draw_date(last_draw_date: str | None) -> str | None:
     """Resolve cutoff_draw_id (id_sorteo) from last_draw_date by finding the draw in la_primitiva."""
     if not db or not last_draw_date:
@@ -1888,6 +2305,98 @@ def _get_la_primitiva_cutoff_from_last_draw_date(last_draw_date: str | None) -> 
         return None
     cid = doc.get("id_sorteo")
     return str(cid) if cid is not None else None
+
+
+def _append_la_primitiva_bought_tickets(
+    tickets: list,
+    draw_date: str | None = None,
+    cutoff_draw_id: str | None = None,
+) -> None:
+    """Append tickets to bought_tickets in la_primitiva_train_progress (merge, dedupe by mains). Queue tickets are {mains}; we add reintegro=0."""
+    if db is None or not tickets:
+        return
+    draw_date = (draw_date or "").strip()[:10] or None
+    cutoff = (cutoff_draw_id or "").strip() or None
+    coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+    doc = None
+    if draw_date:
+        doc = coll.find_one({"probs_fecha_sorteo": draw_date}, projection={"bought_tickets": 1})
+    elif cutoff:
+        doc = coll.find_one({"cutoff_draw_id": cutoff}, projection={"bought_tickets": 1})
+        if not doc and cutoff.isdigit():
+            doc = coll.find_one({"cutoff_draw_id": int(cutoff)}, projection={"bought_tickets": 1})
+    if not doc and not draw_date and not cutoff:
+        last = _get_last_draw_date("la-primitiva")
+        if last:
+            cutoff = _get_la_primitiva_cutoff_from_last_draw_date(last)
+            if cutoff:
+                doc = coll.find_one({"cutoff_draw_id": cutoff}, projection={"bought_tickets": 1})
+                if not doc and cutoff.isdigit():
+                    doc = coll.find_one({"cutoff_draw_id": int(cutoff)}, projection={"bought_tickets": 1})
+    if not doc:
+        return
+    existing = doc.get("bought_tickets") or []
+    seen = {tuple(sorted(t.get("mains") or [])) for t in existing}
+    merged = list(existing)
+    for t in tickets:
+        mains = t.get("mains") or []
+        if len(mains) != 6:
+            continue
+        key = tuple(sorted(mains))
+        if key not in seen:
+            seen.add(key)
+            merged.append({"mains": list(mains), "reintegro": int(t.get("reintegro", 0))})
+    query = {"_id": doc["_id"]}
+    coll.update_one(
+        query,
+        {"$set": {"bought_tickets": merged, "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+    )
+    logger.info("la_primitiva: appended %s queue tickets to bought_tickets (total %s)", len(tickets), len(merged))
+
+
+def _append_euromillones_bought_tickets(
+    tickets: list,
+    draw_date: str | None = None,
+    cutoff_draw_id: str | None = None,
+) -> None:
+    """Append tickets to bought_tickets in euromillones_train_progress (merge, dedupe by mains+stars)."""
+    if db is None or not tickets:
+        return
+    draw_date = (draw_date or "").strip()[:10] or None
+    cutoff = (cutoff_draw_id or "").strip() or None
+    coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    doc = None
+    if draw_date:
+        doc = coll.find_one({"probs_fecha_sorteo": draw_date}, projection={"bought_tickets": 1})
+    elif cutoff:
+        doc = coll.find_one({"cutoff_draw_id": cutoff}, projection={"bought_tickets": 1})
+        if not doc and cutoff.isdigit():
+            doc = coll.find_one({"cutoff_draw_id": int(cutoff)}, projection={"bought_tickets": 1})
+    if not doc and not draw_date and not cutoff:
+        last = _get_last_draw_date("euromillones")
+        if last:
+            date_str = (last or "").strip()[:10]
+            doc = coll.find_one({"probs_fecha_sorteo": date_str}, projection={"bought_tickets": 1})
+    if not doc:
+        return
+    existing = doc.get("bought_tickets") or []
+    seen = {(tuple(t.get("mains") or []), tuple(t.get("stars") or [])) for t in existing}
+    merged = list(existing)
+    for t in tickets:
+        mains = t.get("mains") or []
+        stars = t.get("stars") or []
+        if len(mains) != 5 or len(stars) != 2:
+            continue
+        key = (tuple(mains), tuple(stars))
+        if key not in seen:
+            seen.add(key)
+            merged.append({"mains": list(mains), "stars": list(stars)})
+    query = {"_id": doc["_id"]}
+    coll.update_one(
+        query,
+        {"$set": {"bought_tickets": merged, "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+    )
+    logger.info("euromillones: appended %s queue tickets to bought_tickets (total %s)", len(tickets), len(merged))
 
 
 def _la_primitiva_betting_pool_response(
@@ -2035,6 +2544,191 @@ async def api_la_primitiva_betting_bought(request: Request):
         raise HTTPException(404, detail="No progress found for draw_date or cutoff_draw_id")
     return JSONResponse(
         content={"status": "ok", "saved_count": len(tickets)},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.post("/api/la-primitiva/betting/enqueue")
+async def api_la_primitiva_betting_enqueue(request: Request):
+    """Save bucket tickets to buy queue (status=waiting). Body: { "tickets": [{ "mains": [6 numbers] }, ...], "draw_date"?, "cutoff_draw_id"? } (max 8)."""
+    try:
+        body = await request.json() or {}
+    except Exception:
+        body = {}
+    tickets = body.get("tickets")
+    if not isinstance(tickets, list) or len(tickets) == 0 or len(tickets) > 8:
+        raise HTTPException(400, detail="Body must contain 'tickets' array with 1–8 items")
+    normalized = []
+    for t in tickets:
+        mains = t.get("mains")
+        if not isinstance(mains, list) or len(mains) != 6:
+            raise HTTPException(400, detail="Each ticket must have 'mains' array of 6 numbers")
+        normalized.append({"mains": [int(m) for m in mains], "reintegro": int(t.get("reintegro", 0))})
+    draw_date = (body.get("draw_date") or "").strip()[:10] or None
+    cutoff_draw_id = (body.get("cutoff_draw_id") or "").strip() or None
+    if db is None:
+        raise HTTPException(503, detail="Database not available")
+    coll = db[LA_PRIMITIVA_BUY_QUEUE_COLLECTION]
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    doc = {
+        "lottery": "la-primitiva",
+        "tickets": normalized,
+        "tickets_count": len(normalized),
+        "draw_date": draw_date,
+        "cutoff_draw_id": cutoff_draw_id,
+        "status": "waiting",
+        "created_at": now,
+    }
+    ins = coll.insert_one(doc)
+    return JSONResponse(
+        content={"status": "ok", "queue_id": str(ins.inserted_id), "tickets_count": len(normalized), "message": "Añadido a la cola. El bot comprará en breve."},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/la-primitiva/betting/buy-queue")
+def api_la_primitiva_betting_buy_queue(limit: int = Query(50, ge=1, le=100)):
+    if db is None:
+        return JSONResponse(content={"items": []}, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+    coll = db[LA_PRIMITIVA_BUY_QUEUE_COLLECTION]
+    cursor = coll.find({}).sort("created_at", -1).limit(limit)
+    items = []
+    for d in cursor:
+        items.append({
+            "id": str(d["_id"]),
+            "lottery": d.get("lottery", "la-primitiva"),
+            "status": d.get("status", "waiting"),
+            "saved_status": d.get("saved_status"),
+            "tickets_count": d.get("tickets_count", 0),
+            "tickets": d.get("tickets") or [],
+            "draw_date": d.get("draw_date"),
+            "cutoff_draw_id": d.get("cutoff_draw_id"),
+            "created_at": d.get("created_at"),
+            "started_at": d.get("started_at"),
+            "finished_at": d.get("finished_at"),
+            "error": d.get("error"),
+        })
+    return JSONResponse(content={"items": items}, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+
+
+@app.post("/api/la-primitiva/betting/save-bought-from-queue")
+def api_la_primitiva_betting_save_bought_from_queue():
+    if db is None:
+        return JSONResponse(content={"status": "ok", "saved_count": 0}, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+    coll = db[LA_PRIMITIVA_BUY_QUEUE_COLLECTION]
+    cursor = coll.find({"status": "bought", "$or": [{"saved_status": {"$ne": True}}, {"saved_status": {"$exists": False}}]})
+    saved_count = 0
+    for d in cursor:
+        oid = d["_id"]
+        tickets = d.get("tickets") or []
+        if not tickets:
+            coll.update_one({"_id": oid}, {"$set": {"saved_status": True}})
+            saved_count += 1
+            continue
+        draw_date = (d.get("draw_date") or "").strip()[:10] or None
+        cutoff_draw_id = (d.get("cutoff_draw_id") or "").strip() or None
+        _append_la_primitiva_bought_tickets(tickets, draw_date=draw_date, cutoff_draw_id=cutoff_draw_id)
+        coll.update_one({"_id": oid}, {"$set": {"saved_status": True}})
+        saved_count += 1
+    return JSONResponse(content={"status": "ok", "saved_count": saved_count}, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+
+
+@app.delete("/api/la-primitiva/betting/buy-queue/{queue_id}")
+def api_la_primitiva_betting_buy_queue_delete(queue_id: str):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not connected")
+    try:
+        oid = ObjectId(queue_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid queue_id")
+    coll = db[LA_PRIMITIVA_BUY_QUEUE_COLLECTION]
+    doc = coll.find_one({"_id": oid}, projection={"status": 1})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    st = doc.get("status")
+    if st not in ("waiting", "failed"):
+        raise HTTPException(status_code=400, detail="Solo se puede eliminar cuando está en cola (waiting) o ha fallado (failed)")
+    coll.delete_one({"_id": oid, "status": {"$in": ["waiting", "failed"]}})
+    return JSONResponse(content={"status": "ok", "message": "Eliminado de la cola"}, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+
+
+@app.post("/api/la-primitiva/betting/bot/claim")
+def api_la_primitiva_betting_bot_claim():
+    """For the La Primitiva bot (another device). Claim one waiting queue item; set in_progress and return it."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not connected")
+    coll = db[LA_PRIMITIVA_BUY_QUEUE_COLLECTION]
+    doc = coll.find_one({"status": "waiting"}, sort=[("created_at", 1)])
+    if not doc:
+        return JSONResponse(
+            content={"claimed": False, "queue_id": None, "tickets": [], "draw_date": None, "cutoff_draw_id": None},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    oid = doc["_id"]
+    updated = coll.update_one(
+        {"_id": oid, "status": "waiting"},
+        {"$set": {"status": "in_progress", "started_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+    )
+    if updated.modified_count == 0:
+        return JSONResponse(
+            content={"claimed": False, "queue_id": None, "tickets": [], "draw_date": None, "cutoff_draw_id": None},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    tickets = doc.get("tickets") or []
+    draw_date = (doc.get("draw_date") or "").strip()[:10] or None
+    cutoff_draw_id = (doc.get("cutoff_draw_id") or "").strip() or None
+    return JSONResponse(
+        content={
+            "claimed": True,
+            "queue_id": str(oid),
+            "tickets": tickets,
+            "draw_date": draw_date,
+            "cutoff_draw_id": cutoff_draw_id,
+        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.post("/api/la-primitiva/betting/bot/complete")
+async def api_la_primitiva_betting_bot_complete(request: Request):
+    """For the La Primitiva bot. Report result: body { "queue_id", "success", "error"?. }."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not connected")
+    try:
+        body = await request.json() or {}
+    except Exception:
+        body = {}
+    queue_id = body.get("queue_id")
+    success = body.get("success") is True
+    error = (body.get("error") or "").strip() or None
+    if not queue_id:
+        raise HTTPException(400, detail="queue_id required")
+    try:
+        oid = ObjectId(queue_id)
+    except Exception:
+        raise HTTPException(400, detail="Invalid queue_id")
+    coll = db[LA_PRIMITIVA_BUY_QUEUE_COLLECTION]
+    doc = coll.find_one({"_id": oid}, projection={"status": 1})
+    if not doc:
+        raise HTTPException(404, detail="Queue item not found")
+    if doc.get("status") != "in_progress":
+        return JSONResponse(
+            content={"status": "ok", "message": "Job already completed or not in progress"},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    if success:
+        coll.update_one(
+            {"_id": oid},
+            {"$set": {"status": "bought", "saved_status": False, "finished_at": now, "error": None}},
+        )
+    else:
+        coll.update_one(
+            {"_id": oid},
+            {"$set": {"status": "failed", "error": error or "Bot reported failure", "finished_at": now}},
+        )
+    return JSONResponse(
+        content={"status": "ok", "message": "completed"},
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
 

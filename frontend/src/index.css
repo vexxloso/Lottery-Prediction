@@ -544,6 +544,33 @@ tr:hover td {
   color: var(--color-text);
 }
 
+/* Dashboard buy queue (El Gordo) */
+.dashboard-buy-queue-section {
+  margin-bottom: var(--space-lg);
+}
+.dashboard-buy-queue-wrap {
+  overflow-x: auto;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-sm);
+}
+.dashboard-buy-queue-table {
+  width: 100%;
+  font-size: 0.85rem;
+  border-collapse: collapse;
+}
+.dashboard-buy-queue-table th,
+.dashboard-buy-queue-table td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--color-border);
+}
+.dashboard-buy-queue-table th {
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
 /* Calendar container */
 .calendar-wrap {
   background: var(--color-surface);

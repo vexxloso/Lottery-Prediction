@@ -417,24 +417,6 @@ export function EuromillonesPredictionPage() {
                 {progress.candidate_pool_count != null && ` · ${progress.candidate_pool_count} boletos`}
               </Descriptions.Item>
             </Descriptions>
-            {(progress.rule_flags?.snapshot_mains?.length || progress.rule_flags?.snapshot_stars?.length) && (
-              <div style={{ marginTop: 16 }}>
-                <div style={{ marginBottom: 8, fontWeight: 600 }}>Snapshot Step 4 (debug)</div>
-                <p style={{ margin: 0, fontSize: '0.9rem' }}>
-                  Mains ({progress.rule_flags?.snapshot_mains?.length ?? 0}):{' '}
-                  {progress.rule_flags?.snapshot_mains?.join(' ') || '—'}
-                  {progress.rule_flags?.snapshot_stars?.length ? (
-                    <>
-                      {' · '}
-                      <span style={{ opacity: 0.8 }}>
-                        Stars ({progress.rule_flags.snapshot_stars.length}):{' '}
-                        {progress.rule_flags.snapshot_stars.join(' ')}
-                      </span>
-                    </>
-                  ) : null}
-                </p>
-              </div>
-            )}
             {(progress.filtered_mains_probs?.length || progress.filtered_stars_probs?.length) ? (
               <div style={{ marginTop: 16 }}>
                 <div style={{ marginBottom: 8, fontWeight: 600 }}>Pool filtrado</div>

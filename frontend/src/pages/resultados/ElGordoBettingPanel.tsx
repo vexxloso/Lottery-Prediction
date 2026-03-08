@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Spin } from 'antd';
+import { Spin, Tooltip } from 'antd';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
@@ -18,8 +18,11 @@ function shuffleArray<T>(arr: T[]): T[] {
 
 type ElGordoTicket = { mains: number[]; clave: number };
 
-function ticketKey(t: ElGordoTicket): string {
-  return `${(t.mains ?? []).join(',')}|${t.clave}`;
+function ticketKey(t: ElGordoTicket | null | undefined): string {
+  if (t == null) return '';
+  const mains = t.mains ?? [];
+  const clave = t.clave ?? 0;
+  return `${Array.isArray(mains) ? mains.join(',') : ''}|${clave}`;
 }
 
 function DeleteIcon() {
@@ -27,14 +30,6 @@ function DeleteIcon() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
       <path d="M10 11v6M14 11v6M8 6v12M16 6v12" />
-    </svg>
-  );
-}
-
-function BuyIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M20 6L9 17l-5-5" />
     </svg>
   );
 }
@@ -57,6 +52,61 @@ function ShuffleIcon() {
   );
 }
 
+function QueueStatusIcon({ status }: { status: string }) {
+  const s = status ?? '';
+  if (s === 'waiting') {
+    return (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden title="En cola">
+        <circle cx="12" cy="12" r="10" />
+        <path d="M12 6v6l4 2" />
+      </svg>
+    );
+  }
+  if (s === 'in_progress') {
+    return (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden title="Comprando">
+        <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+      </svg>
+    );
+  }
+  if (s === 'bought') {
+    return (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden title="Comprado">
+        <path d="M20 6L9 17l-5-5" />
+      </svg>
+    );
+  }
+  if (s === 'failed') {
+    return (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden title="Error">
+        <circle cx="12" cy="12" r="10" />
+        <path d="M15 9l-6 6M9 9l6 6" />
+      </svg>
+    );
+  }
+  return null;
+}
+
+function QueueItemTooltipContent({ q }: { q: { tickets?: ElGordoTicket[]; tickets_count?: number } }) {
+  const tickets = q?.tickets;
+  if (!Array.isArray(tickets) || tickets.length === 0) {
+    return <span>{q?.tickets_count ?? 0} boleto(s)</span>;
+  }
+  return (
+    <div style={{ padding: '4px 0', lineHeight: 1.5 }}>
+      {tickets.map((t, i) => {
+        const mains = Array.isArray(t.mains) ? t.mains : [];
+        const clave = t.clave ?? 0;
+        return (
+          <div key={i} style={{ marginBottom: i < tickets.length - 1 ? 4 : 0 }}>
+            Boleto {i + 1}: {mains.join(', ')} — Clave {clave}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function TicketCard({
   ticket,
   onClick,
@@ -70,7 +120,9 @@ function TicketCard({
   disabled?: boolean;
   styleAnimationDelay?: number;
 }) {
-  const mains = ticket.mains ?? [];
+  if (!ticket || typeof ticket !== 'object') return null;
+  const mains = Array.isArray(ticket.mains) ? ticket.mains : [];
+  const clave = ticket.clave ?? 0;
   return (
     <div className={`el-gordo-betting-ticket-card-wrap ${onRemove ? 'has-remove' : ''}`}>
       {onRemove && (
@@ -109,7 +161,7 @@ function TicketCard({
               {n}
             </span>
           ))}
-          <span className="resultados-ball clave">{ticket.clave}</span>
+          <span className="resultados-ball clave">{clave}</span>
         </div>
       </div>
     </div>
@@ -127,10 +179,14 @@ export function ElGordoBettingPanel() {
   const [searchParams] = useSearchParams();
   const drawDate = searchParams.get('draw_date') ?? '';
   const cutoffDrawId = searchParams.get('cutoff_draw_id') ?? '';
+  const loadingShownOnce = useRef(false);
 
-  const fetchBettingPool = useCallback(async () => {
-    setLoading(true);
-    setError('');
+  const fetchBettingPool = useCallback(async (showLoading = true) => {
+    if (showLoading && !loadingShownOnce.current) {
+      loadingShownOnce.current = true;
+      setLoading(true);
+      setError('');
+    }
     try {
       const params = new URLSearchParams();
       if (drawDate) params.set('draw_date', drawDate);
@@ -141,18 +197,22 @@ export function ElGordoBettingPanel() {
       const res = await fetch(url, { cache: 'no-store' });
       const data = await res.json();
       if (!res.ok) {
-        setError(data.detail ?? res.statusText ?? 'Error al cargar pool');
-        setCandidatePool([]);
-        setLastDrawDate(null);
+        if (showLoading) {
+          setError(data.detail ?? res.statusText ?? 'Error al cargar pool');
+          setCandidatePool([]);
+          setLastDrawDate(null);
+        }
         return;
       }
       setLastDrawDate(data.last_draw_date ?? null);
       setCandidatePool(Array.isArray(data.candidate_pool) ? data.candidate_pool : []);
       setRealPool(Array.isArray(data.bought_tickets) ? data.bought_tickets : []);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Error al cargar pool');
-      setCandidatePool([]);
-      setLastDrawDate(null);
+      if (showLoading) {
+        setError(e instanceof Error ? e.message : 'Error al cargar pool');
+        setCandidatePool([]);
+        setLastDrawDate(null);
+      }
     } finally {
       setLoading(false);
     }
@@ -165,9 +225,12 @@ export function ElGordoBettingPanel() {
   const addToBucket = (ticket: ElGordoTicket) => {
     if (bucket.length >= BUCKET_MAX) return;
     const key = ticketKey(ticket);
+    const mains = Array.isArray(ticket.mains) ? ticket.mains : [];
+    const clave = typeof ticket.clave === 'number' ? ticket.clave : Number(ticket.clave) || 0;
+    if (mains.length !== 5 || clave < 0 || clave > 9) return;
     setBucket((prev) => {
-      if (prev.some((t) => ticketKey(t) === key)) return prev; // already in bucket
-      return [...prev, { mains: [...(ticket.mains ?? [])], clave: ticket.clave }];
+      if (prev.some((t) => ticketKey(t) === key)) return prev;
+      return [...prev, { mains: [...mains], clave }];
     });
   };
 
@@ -175,79 +238,68 @@ export function ElGordoBettingPanel() {
     setBucket((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const [openRealPlatformLoading, setOpenRealPlatformLoading] = useState(false);
-  const [botProgress, setBotProgress] = useState<{ status: string; step: string; error?: string; has_pending_confirm?: boolean }>({ status: 'idle', step: '' });
-  const [confirmBotBoughtLoading, setConfirmBotBoughtLoading] = useState(false);
-  const botPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [enqueueLoading, setEnqueueLoading] = useState(false);
+  const [buyQueue, setBuyQueue] = useState<{ id: string; status: string; tickets_count: number; tickets?: ElGordoTicket[]; created_at?: string; error?: string }[]>([]);
 
-  const openRealPlatform = async () => {
+  const fetchBuyQueue = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/el-gordo/betting/buy-queue?limit=10`, { cache: 'no-store' });
+      const data = await res.json();
+      setBuyQueue(Array.isArray(data.items) ? data.items : []);
+    } catch {
+      setBuyQueue([]);
+    }
+  }, []);
+
+  const saveBoughtFromQueue = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/el-gordo/betting/save-bought-from-queue`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if ((data.saved_count ?? 0) > 0) fetchBettingPool(false);
+      }
+    } catch {
+      // ignore
+    }
+  }, [fetchBettingPool]);
+
+  useEffect(() => {
+    fetchBuyQueue();
+    saveBoughtFromQueue();
+    const intervalMs = 8000;
+    const t = setInterval(() => {
+      fetchBuyQueue();
+      saveBoughtFromQueue();
+      fetchBettingPool(false);
+    }, intervalMs);
+    return () => clearInterval(t);
+  }, [fetchBuyQueue, fetchBettingPool, saveBoughtFromQueue]);
+
+  const enqueueBuy = async () => {
     if (bucket.length === 0) return;
-    setOpenRealPlatformLoading(true);
+    setEnqueueLoading(true);
     setError('');
     try {
       const body: { tickets: ElGordoTicket[]; draw_date?: string; cutoff_draw_id?: string } = { tickets: bucket };
       if (drawDate) body.draw_date = drawDate;
       else if (cutoffDrawId) body.cutoff_draw_id = cutoffDrawId;
-      const res = await fetch(`${API_URL}/api/el-gordo/betting/open-real-platform`, {
+      const res = await fetch(`${API_URL}/api/el-gordo/betting/enqueue`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setError(data.detail ?? res.statusText ?? 'Error al abrir la plataforma');
-      } else {
-        setBotProgress({ status: 'running', step: 'Iniciando...' });
-        if (botPollRef.current) clearInterval(botPollRef.current);
-        botPollRef.current = setInterval(async () => {
-          try {
-            const pr = await fetch(`${API_URL}/api/el-gordo/betting/bot-progress`, { cache: 'no-store' });
-            const data = await pr.json();
-            setBotProgress({
-              status: data.status ?? 'idle',
-              step: data.step ?? '',
-              error: data.error,
-              has_pending_confirm: data.has_pending_confirm,
-            });
-            if (data.status === 'success' || data.status === 'error') {
-              if (botPollRef.current) {
-                clearInterval(botPollRef.current);
-                botPollRef.current = null;
-              }
-              if (data.status === 'error') setError(data.error ?? 'Error en el bot');
-            }
-          } catch {
-            // ignore poll errors
-          }
-        }, 2000);
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Error al abrir la plataforma');
-    } finally {
-      setOpenRealPlatformLoading(false);
-    }
-  };
-
-  useEffect(() => () => {
-    if (botPollRef.current) clearInterval(botPollRef.current);
-  }, []);
-
-  const confirmBotBought = async () => {
-    setConfirmBotBoughtLoading(true);
-    try {
-      const res = await fetch(`${API_URL}/api/el-gordo/betting/confirm-bot-bought`, { method: 'POST' });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data.detail ?? res.statusText ?? 'Error al confirmar');
+        setError(data.detail ?? res.statusText ?? 'Error al encolar');
       } else {
         setBucket([]);
-        setBotProgress({ status: 'idle', step: '' });
-        fetchBettingPool();
+        fetchBuyQueue();
+        fetchBettingPool(false);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Error al confirmar');
+      setError(e instanceof Error ? e.message : 'Error al encolar');
     } finally {
-      setConfirmBotBoughtLoading(false);
+      setEnqueueLoading(false);
     }
   };
 
@@ -285,14 +337,23 @@ export function ElGordoBettingPanel() {
   const addRandomToBucket = () => {
     const need = Math.min(BUCKET_MAX - bucket.length, availableCandidates.length);
     if (need <= 0) return;
-    const picked = shuffleArray(availableCandidates).slice(0, need).map((t) => ({ mains: [...(t.mains ?? [])], clave: t.clave }));
+    const picked = shuffleArray(availableCandidates).slice(0, need).map((t) => {
+      const mains = Array.isArray(t.mains) ? t.mains : [];
+      const clave = typeof t.clave === 'number' ? t.clave : Number(t.clave) || 0;
+      return { mains: [...mains], clave };
+    });
     setBucket((prev) => [...prev, ...picked]);
   };
   const inBucketOrReal = new Set([
     ...bucket.map(ticketKey),
     ...realPool.map(ticketKey),
   ]);
-  const availableCandidates = candidatePool.filter((t) => !inBucketOrReal.has(ticketKey(t)));
+  const inQueue = new Set<string>();
+  for (const q of buyQueue) {
+    const tickets = q?.tickets;
+    if (Array.isArray(tickets)) for (const t of tickets) inQueue.add(ticketKey(t));
+  }
+  const availableCandidates = candidatePool.filter((t) => !inBucketOrReal.has(ticketKey(t)) && !inQueue.has(ticketKey(t)));
   const displayedCandidates = availableCandidates.slice(0, candidateCount);
 
   if (loading) {
@@ -303,8 +364,6 @@ export function ElGordoBettingPanel() {
     );
   }
 
-  const botRunning = botProgress.status === 'running';
-
   return (
     <section className="card resultados-features-card resultados-theme-el-gordo el-gordo-betting" style={{ position: 'relative' }}>
       <h2 style={{ marginTop: 0, marginBottom: 'var(--space-sm)', fontSize: '1rem' }}>
@@ -314,40 +373,7 @@ export function ElGordoBettingPanel() {
         <p style={{ color: 'var(--color-error)', marginBottom: 'var(--space-md)' }}>{error}</p>
       )}
 
-      {/* While bot is running, block all interaction and show only progress */}
-      {botRunning && (
-        <div
-          className="el-gordo-betting-bot-overlay"
-          role="alert"
-          aria-busy="true"
-          style={{
-            position: 'absolute',
-            inset: 0,
-            zIndex: 20,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 'var(--space-md)',
-            background: 'rgba(0,0,0,0.65)',
-            borderRadius: 'var(--radius)',
-            color: 'var(--color-text)',
-            pointerEvents: 'auto',
-            padding: 'var(--space-lg)',
-          }}
-        >
-          <Spin size="large" />
-          <span style={{ fontWeight: 600, fontSize: '1rem' }}>Bot en curso</span>
-          <span style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', textAlign: 'center' }}>
-            {botProgress.step || 'Rellenando boletos en Loterías…'}
-          </span>
-          <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
-            No se puede usar la página hasta que termine.
-          </span>
-        </div>
-      )}
-
-      <div className="el-gordo-betting-split" style={botRunning ? { pointerEvents: 'none', userSelect: 'none', opacity: 0.7 } : undefined}>
+      <div className="el-gordo-betting-split">
         {/* Left 16: candidate pool as gallery — click card → add to bucket */}
         <div className="el-gordo-betting-left">
           <div className="el-gordo-betting-panel-card" style={{ flex: 1, minHeight: 280 }}>
@@ -391,7 +417,7 @@ export function ElGordoBettingPanel() {
               ) : (
                 displayedCandidates.map((t, i) => (
                   <TicketCard
-                    key={`c-${i}-${(t.mains ?? []).join('-')}-${t.clave}`}
+                    key={`c-${i}-${ticketKey(t)}`}
                     ticket={t}
                     onClick={() => addToBucket(t)}
                     disabled={bucketFull}
@@ -405,48 +431,60 @@ export function ElGordoBettingPanel() {
 
         {/* Right 8: top = bucket gallery, bottom = real pool */}
         <div className="el-gordo-betting-right">
-          {botProgress.status !== 'idle' && (
-            <div
-              className="el-gordo-betting-bot-progress"
-              role="status"
-              aria-live="polite"
-              style={{
-                marginBottom: 'var(--space-sm)',
-                padding: 'var(--space-sm) var(--space-md)',
-                borderRadius: 'var(--radius)',
-                background: botProgress.status === 'error' ? 'rgba(200,60,60,0.12)' : botProgress.status === 'success' ? 'rgba(40,160,80,0.12)' : 'rgba(0,0,0,0.04)',
-                border: `1px solid ${botProgress.status === 'error' ? 'rgba(200,60,60,0.4)' : botProgress.status === 'success' ? 'rgba(40,160,80,0.4)' : 'var(--color-border)'}`,
-                fontSize: '0.8rem',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-                {botProgress.status === 'running' && <Spin size="small" />}
-                <span style={{ fontWeight: 600 }}>
-                  {botProgress.status === 'running' && 'Bot en curso: '}
-                  {botProgress.status === 'success' && 'Completado: '}
-                  {botProgress.status === 'error' && 'Error: '}
-                </span>
-                <span>{botProgress.status === 'error' ? (botProgress.error ?? botProgress.step) : botProgress.step}</span>
-                {botProgress.status === 'success' && botProgress.has_pending_confirm && (
-                  <button
-                    type="button"
-                    style={{
-                      marginLeft: 8,
-                      padding: '4px 10px',
-                      fontSize: '0.75rem',
-                      fontWeight: 600,
-                      borderRadius: 'var(--radius)',
-                      border: '1px solid var(--color-border)',
-                      background: 'var(--color-surface)',
-                      cursor: confirmBotBoughtLoading ? 'wait' : 'pointer',
-                    }}
-                    disabled={confirmBotBoughtLoading}
-                    onClick={confirmBotBought}
+          {buyQueue.length > 0 && (
+            <div style={{ marginBottom: 'var(--space-sm)', fontSize: '0.8rem' }}>
+              <strong>Cola de compra</strong>
+              <ul style={{ margin: '4px 0 0', paddingLeft: '1.2rem', listStyle: 'none' }}>
+                {buyQueue.filter((q) => q != null).slice(0, 5).map((q, idx) => (
+                  <li
+                    key={q?.id ?? `q-${idx}`}
+                    style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}
                   >
-                    {confirmBotBoughtLoading ? '...' : 'Añadir a guardados'}
-                  </button>
-                )}
-              </div>
+                    <Tooltip title={<QueueItemTooltipContent q={q} />} placement="topLeft">
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 4, flex: 1, minWidth: 0, cursor: 'default' }}>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }} aria-hidden>
+                          <QueueStatusIcon status={q?.status ?? ''} />
+                        </span>
+                        <span style={{ flex: 1, minWidth: 0 }}>
+                          {q?.tickets_count ?? 0} boleto{(q?.tickets_count ?? 0) !== 1 ? 's' : ''} — {q?.status === 'waiting' ? 'En cola' : q?.status === 'in_progress' ? 'Comprando…' : q?.status === 'bought' ? 'Comprado' : 'Error'}
+                          {q?.error != null && q.error !== '' ? `: ${q.error}` : ''}
+                        </span>
+                      </span>
+                    </Tooltip>
+                    {(q?.status === 'waiting' || q?.status === 'failed') && q?.id ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            const res = await fetch(`${API_URL}/api/el-gordo/betting/buy-queue/${encodeURIComponent(q.id)}`, { method: 'DELETE' });
+                            if (res.ok) fetchBuyQueue();
+                            else {
+                              const data = await res.json().catch(() => ({}));
+                              setError(data.detail ?? 'Error al eliminar');
+                            }
+                          } catch (e) {
+                            setError(e instanceof Error ? e.message : 'Error al eliminar');
+                          }
+                        }}
+                        aria-label="Quitar de la cola"
+                        title="Quitar de la cola"
+                        style={{
+                          padding: 2,
+                          border: 'none',
+                          background: 'transparent',
+                          cursor: 'pointer',
+                          color: 'var(--color-text-muted)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        <DeleteIcon />
+                      </button>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
           <div className="el-gordo-betting-panel-card">
@@ -456,22 +494,12 @@ export function ElGordoBettingPanel() {
                 <button
                   type="button"
                   className="el-gordo-betting-btn-icon"
-                  disabled={bucket.length === 0 || openRealPlatformLoading}
-                  onClick={openRealPlatform}
-                  aria-label="Comprar en Loterías — abre Chrome y rellena los boletos"
-                  title="Comprar en Loterías — abre Chrome y rellena los boletos"
+                  disabled={bucket.length === 0 || enqueueLoading}
+                  onClick={enqueueBuy}
+                  aria-label="Comprar en Loterías — añade a la cola, el bot comprará en breve"
+                  title="Comprar en Loterías — añade a la cola, el bot comprará en breve"
                 >
                   <RealPlatformIcon />
-                </button>
-                <button
-                  type="button"
-                  className="el-gordo-betting-btn-icon"
-                  disabled={bucket.length === 0}
-                  onClick={buyBucket}
-                  aria-label="Confirmar — pasar a boletos guardados"
-                  title="Confirmar — pasar a boletos guardados"
-                >
-                  <BuyIcon />
                 </button>
                 <button
                   type="button"
