@@ -451,9 +451,9 @@ export function Dashboard() {
                   </p>
                 </div>
               </div>
-                {data?.last_draw_date ? (
-                  <div className="dashboard-lottery-card-date-top" aria-label="Fecha del sorteo">
-                    {data.last_draw_date}
+                {m?.next_draw_date ? (
+                  <div className="dashboard-lottery-card-date-top" aria-label="Próximo sorteo">
+                    {m.next_draw_date}
                   </div>
                 ) : null}
               </div>
