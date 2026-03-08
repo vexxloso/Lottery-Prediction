@@ -47,7 +47,7 @@ export function Layout() {
           ))}
         </nav>
         <nav className="app-nav app-nav--right" aria-label="Cuentas y configuración">
-          {navRightItems.map(({ to, label, icon }) => (
+          {navRightItems.map(({ to, label }) => (
             <NavLink
               key={to}
               to={to}
