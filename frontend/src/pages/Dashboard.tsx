@@ -279,19 +279,6 @@ interface SampleTicketsLottery {
   >;
 }
 
-interface ElGordoBuyQueueItem {
-  id: string;
-  lottery: string;
-  status: 'waiting' | 'in_progress' | 'bought' | 'failed';
-  tickets_count: number;
-  draw_date?: string;
-  cutoff_draw_id?: string;
-  created_at?: string;
-  started_at?: string;
-  finished_at?: string;
-  error?: string;
-}
-
 export function Dashboard() {
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [metaItems, setMetaItems] = useState<NextDrawItem[]>([]);
@@ -302,7 +289,6 @@ export function Dashboard() {
   } | null>(null);
   const [sampleTicketsIndex, setSampleTicketsIndex] = useState(0);
   const sampleIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [buyQueue, setBuyQueue] = useState<ElGordoBuyQueueItem[]>([]);
 
   const formatEuro = (value?: number) => {
     if (value == null) return '-';
@@ -368,22 +354,6 @@ export function Dashboard() {
       }
     };
     loadSampleTickets();
-  }, []);
-
-  useEffect(() => {
-    const fetchBuyQueue = async () => {
-      try {
-        const res = await fetch(`${API_URL}/api/el-gordo/betting/buy-queue?limit=20`, { cache: 'no-store' });
-        const data = await res.json();
-        if (!res.ok) return;
-        setBuyQueue(Array.isArray(data.items) ? data.items : []);
-      } catch {
-        setBuyQueue([]);
-      }
-    };
-    fetchBuyQueue();
-    const t = setInterval(fetchBuyQueue, 5000);
-    return () => clearInterval(t);
   }, []);
 
   useEffect(() => {
@@ -495,36 +465,6 @@ export function Dashboard() {
           );
         })}
       </section>
-
-      {buyQueue.length > 0 && (
-        <section className="dashboard-buy-queue-section" aria-label="Cola de compra El Gordo">
-          <h2 className="dashboard-graph-heading">Cola de compra (El Gordo)</h2>
-          <div className="dashboard-buy-queue-wrap">
-            <table className="dashboard-buy-queue-table">
-              <thead>
-                <tr>
-                  <th>Estado</th>
-                  <th>Boletos</th>
-                  <th>Fecha</th>
-                  <th>Error</th>
-                </tr>
-              </thead>
-              <tbody>
-                {buyQueue.map((q) => (
-                  <tr key={q.id}>
-                    <td>
-                      {q.status === 'waiting' ? 'En cola' : q.status === 'in_progress' ? 'Comprando…' : q.status === 'bought' ? 'Comprado' : 'Error'}
-                    </td>
-                    <td>{q.tickets_count}</td>
-                    <td>{q.created_at ?? '-'}</td>
-                    <td>{q.error ?? '-'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
 
       <section className="dashboard-graph-section" aria-label="Premios y Bote últimos 2 meses">
         <h2 className="dashboard-graph-heading">Premios y Bote (últimos 2 meses)</h2>
