@@ -9,8 +9,10 @@ import logging
 import os
 import random
 import re
+import secrets
 import sys
 import threading
+import time
 from contextlib import asynccontextmanager
 from statistics import mean
 from typing import Optional, List, Dict
@@ -168,7 +170,7 @@ def build_step4_pool(
     prev_star_numbers: Optional[List[int]] = None,
     seed: Optional[int] = None,
 ) -> Dict:
-    """
+    """ 
     Step 4 pool: 20 main numbers + 4 star numbers.
 
     - 3 mains + 1 star: from previous draw (prev_main_numbers, prev_star_numbers) if available,
@@ -720,9 +722,80 @@ app.add_middleware(
 )
 
 
+from starlette.middleware.base import BaseHTTPMiddleware
+
+
+class AuthTokenMiddleware(BaseHTTPMiddleware):
+    """Require Authorization Bearer token for /api/* except public paths."""
+
+    async def dispatch(self, request, call_next):
+        path = request.url.path
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        if path in _PUBLIC_API_PATHS:
+            return await call_next(request)
+        if not path.startswith("/api/"):
+            return await call_next(request)
+        auth = request.headers.get("Authorization") or ""
+        if not auth.startswith("Bearer "):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Missing or invalid authorization"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        token = auth[7:].strip()
+        now = time.time()
+        if token not in _valid_tokens:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid or expired token"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        if now > _valid_tokens[token]:
+            del _valid_tokens[token]
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid or expired token"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return await call_next(request)
+
+
+app.add_middleware(AuthTokenMiddleware)
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/api/auth/verify")
+async def api_auth_verify(request: Request):
+    """
+    Verify platform password. Body: { "password": "..." }.
+    Returns { "ok": true, "token": "..." } if ADMIN_PASSWORD is set and matches.
+    If ADMIN_PASSWORD is not set in .env, any password is accepted (gate disabled).
+    """
+    try:
+        body = await request.json() or {}
+    except Exception:
+        body = {}
+    submitted = (body.get("password") or "").strip()
+    if not ADMIN_PASSWORD:
+        token = secrets.token_urlsafe(32)
+        _valid_tokens[token] = time.time() + TOKEN_TTL_SEC
+        return JSONResponse(
+            content={"ok": True, "token": token},
+            headers={"Cache-Control": "no-store"},
+        )
+    if submitted != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid password")
+    token = secrets.token_urlsafe(32)
+    _valid_tokens[token] = time.time() + TOKEN_TTL_SEC
+    return JSONResponse(
+        content={"ok": True, "token": token},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def create_driver() -> webdriver.Chrome:
@@ -943,6 +1016,24 @@ def get_next_draws_metadata():
 
 # --- Bot credentials (DB-stored username/password for lottery site; bot fetches active one) ---
 BOT_CREDENTIALS_SECRET = (os.getenv("BOT_CREDENTIALS_SECRET") or "").strip() or None
+
+# --- Platform auth: token issued on login; required for all API except health, auth, and bot endpoints ---
+ADMIN_PASSWORD = (os.getenv("ADMIN_PASSWORD") or "").strip() or None
+_valid_tokens: dict[str, float] = {}  # token -> expiry timestamp
+TOKEN_TTL_SEC = 24 * 3600  # 24 hours
+
+# Paths that do not require Authorization Bearer token (health, login, bot claim/complete, bot active-credentials)
+_PUBLIC_API_PATHS = {
+    "/api/health",
+    "/api/auth/verify",
+    "/api/bot/active-credentials",
+    "/api/el-gordo/betting/bot/claim",
+    "/api/el-gordo/betting/bot/complete",
+    "/api/euromillones/betting/bot/claim",
+    "/api/euromillones/betting/bot/complete",
+    "/api/la-primitiva/betting/bot/claim",
+    "/api/la-primitiva/betting/bot/complete",
+}
 
 
 @app.get("/api/bot/credentials")

@@ -1,5 +1,8 @@
 import { Routes, Route } from 'react-router-dom';
+import { ThemeProvider } from './context/ThemeContext';
 import { Layout } from './layout/Layout';
+import { RequireAuth } from './components/RequireAuth';
+import { GatePage } from './pages/GatePage';
 import { Dashboard } from './pages/Dashboard';
 import { ResultadosLaPrimitiva, ResultadosEuromillones, ResultadosElGordo } from './pages/resultados';
 import { SimulationPage } from './pages/SimulationPage';
@@ -7,8 +10,10 @@ import { BotCredentialsPage } from './pages/BotCredentialsPage';
 
 function App() {
   return (
+    <ThemeProvider>
     <Routes>
-      <Route path="/" element={<Layout />}>
+      <Route path="/login" element={<GatePage />} />
+      <Route path="/" element={<RequireAuth><Layout /></RequireAuth>}>
         <Route index element={<Dashboard />} />
         <Route path="resultados/la-primitiva" element={<ResultadosLaPrimitiva />} />
         <Route path="resultados/euromillones" element={<ResultadosEuromillones />} />
@@ -17,6 +22,7 @@ function App() {
         <Route path="bot-cuentas" element={<BotCredentialsPage />} />
       </Route>
     </Routes>
+    </ThemeProvider>
   );
 }
 
