@@ -1,6 +1,6 @@
 import { useEffect, useState, type ChangeEvent } from 'react';
 import { useSearchParams, useParams, Link } from 'react-router-dom';
-import { Drawer } from 'antd';
+import { Drawer, Pagination } from 'antd';
 import type { LotterySlug } from './resultados/types';
 import { LOTTERY_CONFIG } from './resultados/types';
 import './resultados/resultados.css';
@@ -174,6 +174,13 @@ export function SimulationPage() {
     earning: number;
     ticket_cost: number;
   } | null>(null);
+  const [euromillonesFullWheelTickets, setEuromillonesFullWheelTickets] = useState<
+    { position: number; mains: number[]; stars: number[]; first_main: number; category: string }[]
+  >([]);
+  const [euromillonesFullWheelTicketsTotal, setEuromillonesFullWheelTicketsTotal] = useState(0);
+  const [euromillonesFullWheelTicketsPage, setEuromillonesFullWheelTicketsPage] = useState(1);
+  const [euromillonesFullWheelTicketsLoading, setEuromillonesFullWheelTicketsLoading] = useState(false);
+  const [showEuromillonesFullWheelTickets, setShowEuromillonesFullWheelTickets] = useState(false);
   const [featureRowsLoading, setFeatureRowsLoading] = useState(false);
   const [featureRowsError, setFeatureRowsError] = useState('');
   const [featureRows, setFeatureRows] = useState<EuromillonesFeatureRow[]>([]);
@@ -277,18 +284,33 @@ export function SimulationPage() {
     setEuromillonesFullWheelLoading(true);
     setEuromillonesFullWheelError('');
     const params = new URLSearchParams({ current_id: drawId, pre_id: prevId });
-    fetch(`${API_URL}/api/euromillones/compare/full-wheel?${params.toString()}`)
-      .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
-      .then(({ ok, data }) => {
-        if (cancelled) return;
-        if (!ok || data.detail) {
-          setEuromillonesFullWheelResult(null);
-          setEuromillonesFullWheelError(
-            typeof data.detail === 'string'
-              ? data.detail
-              : 'Error al cargar comparación full wheel',
-          );
-          return;
+    const url = `${API_URL}/api/euromillones/compare/full-wheel/reorder?${params.toString()}`;
+    const maxRetries = 3;
+    const retryDelayMs = 2000;
+
+    const tryFetch = (attempt: number): Promise<void> =>
+      fetch(url, { method: 'POST' })
+        .then((res) => res.json().then((data) => ({ ok: res.ok, status: res.status, data })))
+        .then(({ ok, status, data }) => {
+          if (cancelled) return;
+          if (status === 503 && attempt < maxRetries) {
+            setEuromillonesFullWheelError(
+              `Reordenación en curso. Reintentando (${attempt + 1}/${maxRetries})…`,
+            );
+            return new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs)).then(() =>
+              tryFetch(attempt + 1),
+            );
+          }
+          if (!ok || data.detail) {
+            setEuromillonesFullWheelResult(null);
+            setEuromillonesFullWheelError(
+              status === 503
+                ? 'Reordenación en curso. Reintente en unos segundos.'
+                : typeof data.detail === 'string'
+                  ? data.detail
+                  : 'Error al cargar comparación full wheel',
+            );
+            return;
         }
         setEuromillonesFullWheelResult({
           current_id: String(data.current_id ?? drawId),
@@ -310,18 +332,19 @@ export function SimulationPage() {
           earning: Number(data.earning ?? 0),
           ticket_cost: Number(data.ticket_cost ?? 0),
         });
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        setEuromillonesFullWheelResult(null);
-        setEuromillonesFullWheelError(
-          e instanceof Error ? e.message : 'Error al cargar comparación full wheel',
-        );
-      })
-      .finally(() => {
-        if (!cancelled) return;
-        setEuromillonesFullWheelLoading(false);
-      });
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          setEuromillonesFullWheelResult(null);
+          setEuromillonesFullWheelError(
+            e instanceof Error ? e.message : 'Error al cargar comparación full wheel',
+          );
+        })
+        .finally(() => {
+          if (!cancelled) setEuromillonesFullWheelLoading(false);
+        });
+
+    tryFetch(0);
     return () => {
       cancelled = true;
     };
@@ -577,6 +600,51 @@ export function SimulationPage() {
     });
     setCompareGraphPoints(points);
     setShowCompareGraph(true);
+  };
+
+  const loadEuromillonesFullWheelTickets = async (page: number) => {
+    if (!drawId || !searchParams.get('prev_id')) return;
+    const prevId = searchParams.get('prev_id')!.trim();
+    const limit = 100;
+    const skip = (page - 1) * limit;
+    try {
+      setEuromillonesFullWheelTicketsLoading(true);
+      const params = new URLSearchParams({
+        current_id: drawId,
+        pre_id: prevId,
+        skip: String(skip),
+        limit: String(limit),
+      });
+      const res = await fetch(`${API_URL}/api/euromillones/compare/full-wheel/tickets?${params.toString()}`);
+      const data = await res.json();
+      if (!res.ok || data.detail) {
+        throw new Error(
+          typeof data.detail === 'string'
+            ? data.detail
+            : 'Error al cargar boletos full wheel',
+        );
+      }
+      const tickets = Array.isArray(data.tickets) ? (data.tickets as any[]) : [];
+      setEuromillonesFullWheelTickets(
+        tickets.map((t) => ({
+          position: Number(t.position),
+          mains: (t.mains ?? []).map(Number),
+          stars: (t.stars ?? []).map(Number),
+          first_main: Number(t.first_main),
+          category: String(t.category ?? ''),
+        })),
+      );
+      setEuromillonesFullWheelTicketsTotal(Number(data.total_tickets ?? 0));
+      setEuromillonesFullWheelTicketsPage(page);
+      setShowEuromillonesFullWheelTickets(true);
+    } catch (e) {
+      console.error(e);
+      setEuromillonesFullWheelError(
+        e instanceof Error ? e.message : 'Error al cargar boletos full wheel',
+      );
+    } finally {
+      setEuromillonesFullWheelTicketsLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -1082,8 +1150,24 @@ export function SimulationPage() {
                           <button
                             type="button"
                             className="form-input"
-                            onClick={() => setShowComparePoolTable((v) => !v)}
-                            title={showComparePoolTable ? 'Ocultar tabla' : 'Ver tabla'}
+                            onClick={() => {
+                              if (slug === 'euromillones' && compareEuromillonesSource === 'fullwheel') {
+                                if (showEuromillonesFullWheelTickets) {
+                                  setShowEuromillonesFullWheelTickets(false);
+                                } else {
+                                  void loadEuromillonesFullWheelTickets(1);
+                                }
+                              } else {
+                                setShowComparePoolTable((v) => !v);
+                              }
+                            }}
+                            title={
+                              slug === 'euromillones' && compareEuromillonesSource === 'fullwheel'
+                                ? 'Ver boletos full wheel'
+                                : showComparePoolTable
+                                  ? 'Ocultar tabla'
+                                  : 'Ver tabla'
+                            }
                             style={{
                               display: 'inline-flex',
                               alignItems: 'center',
@@ -1111,35 +1195,37 @@ export function SimulationPage() {
                               <line x1="15" y1="4" x2="15" y2="20" />
                             </svg>
                           </button>
-                          <button
-                            type="button"
-                            className="form-input"
-                            onClick={openComparePoolGraph}
-                            title="Ver gráfico"
-                            style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              padding: '0.35rem 0.5rem',
-                              minWidth: '2.5rem',
-                            }}
-                          >
-                            <svg
-                              xmlns="http://www.w3.org/2000/svg"
-                              width="18"
-                              height="18"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              aria-hidden
+                          {!(slug === 'euromillones' && compareEuromillonesSource === 'fullwheel') && (
+                            <button
+                              type="button"
+                              className="form-input"
+                              onClick={openComparePoolGraph}
+                              title="Ver gráfico"
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                padding: '0.35rem 0.5rem',
+                                minWidth: '2.5rem',
+                              }}
                             >
-                              <polyline points="3 17 9 11 13 15 21 7" />
-                              <polyline points="14 7 21 7 21 14" />
-                            </svg>
-                          </button>
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                width="18"
+                                height="18"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                aria-hidden
+                              >
+                                <polyline points="3 17 9 11 13 15 21 7" />
+                                <polyline points="14 7 21 7 21 14" />
+                              </svg>
+                            </button>
+                          )}
                         </div>
                       </div>
 
@@ -1172,78 +1258,129 @@ export function SimulationPage() {
                                     <tr>
                                       <th>Categoría</th>
                                       <th>Count</th>
+                                      <th>First position</th>
                                       <th>Earning</th>
                                     </tr>
                                   </thead>
                                   <tbody>
-                                    {r.categories.map((row) => {
-                                      let tooltip: string | undefined;
-                                      if (row.category.startsWith('1th') && r.jackpot_position != null) {
-                                        tooltip = `Jackpot en posición ${r.jackpot_position.toLocaleString()}`;
-                                      } else if (row.category.startsWith('2th') && r.second_positions?.length) {
-                                        tooltip = `Primera 2ª categoría en posición ${r.second_positions[0].toLocaleString()}`;
-                                      } else if (row.category.startsWith('3th') && r.third_positions?.length) {
-                                        tooltip = `Primera 3ª categoría en posición ${r.third_positions[0].toLocaleString()}`;
-                                      } else if (row.category.startsWith('4th') && r.fourth_positions?.length) {
-                                        tooltip = `Primera 4ª categoría en posición ${r.fourth_positions[0].toLocaleString()}`;
-                                      }
-                                      return (
-                                        <tr key={row.category} title={tooltip}>
-                                          <td>{row.category}</td>
-                                          <td>{row.count}</td>
-                                          <td>
-                                            {row.earning.toLocaleString('es-ES', {
-                                              minimumFractionDigits: 2,
-                                              maximumFractionDigits: 2,
-                                            })}{' '}
-                                            €
-                                          </td>
-                                        </tr>
-                                      );
-                                    })}
+                                    {r.categories
+                                      .filter((row) =>
+                                        row.category.startsWith('1th') ||
+                                        row.category.startsWith('2th') ||
+                                        row.category.startsWith('3th') ||
+                                        row.category.startsWith('4th'),
+                                      )
+                                      .map((row) => {
+                                        let firstPos: number | null = null;
+                                        if (row.category.startsWith('1th') && r.jackpot_position != null) {
+                                          firstPos = r.jackpot_position;
+                                        } else if (row.category.startsWith('2th') && r.second_positions?.length) {
+                                          firstPos = r.second_positions[0];
+                                        } else if (row.category.startsWith('3th') && r.third_positions?.length) {
+                                          firstPos = r.third_positions[0];
+                                        } else if (row.category.startsWith('4th') && r.fourth_positions?.length) {
+                                          firstPos = r.fourth_positions[0];
+                                        }
+                                        return (
+                                          <tr key={row.category}>
+                                            <td>{row.category}</td>
+                                            <td>{row.count}</td>
+                                            <td>{firstPos != null ? firstPos.toLocaleString() : '—'}</td>
+                                            <td>
+                                              {row.earning.toLocaleString('es-ES', {
+                                                minimumFractionDigits: 2,
+                                                maximumFractionDigits: 2,
+                                              })}{' '}
+                                              €
+                                            </td>
+                                          </tr>
+                                        );
+                                      })}
                                   </tbody>
                                 </table>
                               </div>
-                              <div
-                                style={{
-                                  display: 'flex',
-                                  flexWrap: 'wrap',
-                                  gap: '1rem',
-                                  fontSize: '0.95rem',
-                                }}
-                              >
-                                <span>
-                                  <strong>Total boletos:</strong> {r.total_tickets.toLocaleString()}
-                                </span>
-                                <span>
-                                  <strong>Coste:</strong>{' '}
-                                  {r.ticket_cost.toLocaleString('es-ES', {
-                                    minimumFractionDigits: 2,
-                                  })}{' '}
-                                  €
-                                </span>
-                                <span>
-                                  <strong>Premio total:</strong>{' '}
-                                  {r.earning.toLocaleString('es-ES', {
-                                    minimumFractionDigits: 2,
-                                  })}{' '}
-                                  €
-                                </span>
-                                <span
+
+                              {showEuromillonesFullWheelTickets && (
+                                <div
+                                  className="resultados-features-table-wrap"
                                   style={{
-                                    color:
-                                      r.earning - r.ticket_cost >= 0
-                                        ? 'var(--color-success)'
-                                        : 'var(--color-error)',
+                                    marginTop: 'var(--space-md)',
+                                    marginBottom: 'var(--space-md)',
+                                    maxHeight: 420,
+                                    overflowY: 'auto',
                                   }}
                                 >
-                                  <strong>Ganancia:</strong>{' '}
-                                  {(r.earning - r.ticket_cost).toLocaleString('es-ES', {
-                                    minimumFractionDigits: 2,
-                                  })}{' '}
-                                  €
-                                </span>
-                              </div>
+                                  {euromillonesFullWheelTicketsLoading ? (
+                                    <p style={{ margin: 0 }}>Cargando boletos…</p>
+                                  ) : euromillonesFullWheelTickets.length === 0 ? (
+                                    <p style={{ margin: 0 }}>No hay boletos para mostrar.</p>
+                                  ) : (
+                                    <>
+                                      <table className="resultados-features-table">
+                                        <thead>
+                                          <tr>
+                                            <th>No</th>
+                                            <th>Números principales</th>
+                                            <th>Estrellas</th>
+                                            <th>Categoría</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {euromillonesFullWheelTickets.map((t) => {
+                                            const isWinning =
+                                              t.category.startsWith('1th') ||
+                                              t.category.startsWith('2th') ||
+                                              t.category.startsWith('3th') ||
+                                              t.category.startsWith('4th') ||
+                                              t.category.startsWith('5th') ||
+                                              t.category.startsWith('6th') ||
+                                              t.category.startsWith('7th') ||
+                                              t.category.startsWith('8th') ||
+                                              t.category.startsWith('9th') ||
+                                              t.category.startsWith('10th') ||
+                                              t.category.startsWith('11th') ||
+                                              t.category.startsWith('12th') ||
+                                              t.category.startsWith('13th');
+                                            return (
+                                              <tr
+                                                key={t.position}
+                                                style={
+                                                  isWinning
+                                                    ? {
+                                                        background: 'rgba(34, 197, 94, 0.08)',
+                                                      }
+                                                    : undefined
+                                                }
+                                              >
+                                                <td>{t.position.toLocaleString()}</td>
+                                                <td>{t.mains.join(' ')}</td>
+                                                <td>{t.stars.join(' ')}</td>
+                                                <td>{t.category}</td>
+                                              </tr>
+                                            );
+                                          })}
+                                        </tbody>
+                                        <tfoot>
+                                          <tr>
+                                            <td colSpan={4} style={{ textAlign: 'right' }}>
+                                              <Pagination
+                                                current={euromillonesFullWheelTicketsPage}
+                                                pageSize={100}
+                                                total={euromillonesFullWheelTicketsTotal}
+                                                onChange={(page) => {
+                                                  void loadEuromillonesFullWheelTickets(page);
+                                                }}
+                                                showSizeChanger={false}
+                                                showQuickJumper
+                                              />
+                                            </td>
+                                          </tr>
+                                        </tfoot>
+                                      </table>
+                                    </>
+                                  )}
+                                </div>
+                              )}
                             </div>
                           );
                         }
@@ -2441,13 +2578,24 @@ export function SimulationPage() {
         )}
       </div>
 
-      {slug === 'euromillones' && view !== 'compare' && (
+      {slug === 'euromillones' && (
         <aside
           className="resultados-page-sidebar resultados-theme-euromillones"
-          style={{
-            position: 'sticky',
-            top: 'var(--space-md)',
-          }}
+          style={
+            view === 'compare'
+              ? {
+                  position: 'fixed',
+                  top: 'var(--space-md)',
+                  right: 'var(--space-md)',
+                  width: 320,
+                  maxWidth: '32%',
+                  zIndex: 5,
+                }
+              : {
+                  position: 'sticky',
+                  top: 'var(--space-md)',
+                }
+          }
         >
           {compareResult && (
             <>

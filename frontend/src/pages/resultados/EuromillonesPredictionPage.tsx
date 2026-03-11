@@ -70,7 +70,6 @@ export function EuromillonesPredictionPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerWidth, setDrawerWidth] = useState(420);
   const [currentDraw, setCurrentDraw] = useState<{ date: string; mains: number[]; stars: number[] } | null>(null);
-  const [fullWheelElapsed, setFullWheelElapsed] = useState('00:00:00');
   const [fullWheelPreview, setFullWheelPreview] = useState<FullWheelPreviewTicket[] | null>(null);
 
   useEffect(() => {
@@ -132,15 +131,6 @@ export function EuromillonesPredictionPage() {
     fetchProgress();
   }, [fetchProgress]);
 
-  // Local display string for training time, based on backend elapsed seconds.
-  useEffect(() => {
-    const secs = progress?.full_wheel_elapsed_seconds ?? 0;
-    const h = String(Math.floor(secs / 3600)).padStart(2, '0');
-    const m = String(Math.floor((secs % 3600) / 60)).padStart(2, '0');
-    const s = String(secs % 60).padStart(2, '0');
-    setFullWheelElapsed(`${h}:${m}:${s}`);
-  }, [progress?.full_wheel_elapsed_seconds]);
-
   // Poll backend every 5 minutes while full wheel is running.
   useEffect(() => {
     if (!cutoffDrawId) return undefined;
@@ -177,7 +167,7 @@ export function EuromillonesPredictionPage() {
     loadPreview();
   }, [cutoffDrawId, progress?.full_wheel_total_tickets]);
 
-  // Current step from progress (so user sees "now I am in step 3")
+  // Current step from progress (so user sees "now I am in step 3") — only 4 steps for "Generar todo"
   const currentStep = progress == null
     ? 0
     : !progress.dataset_prepared
@@ -186,9 +176,7 @@ export function EuromillonesPredictionPage() {
         ? 1
         : !progress.probs_computed
           ? 2
-          : !progress.rules_applied
-            ? 3
-            : 4;
+          : 3;
 
   const handleBackToTable = () => {
     const params = new URLSearchParams(searchParams);
@@ -315,18 +303,6 @@ export function EuromillonesPredictionPage() {
             ? ('process' as const)
             : ('wait' as const),
     },
-    {
-      title: 'Pool de candidatos',
-      status: runAllLoading
-        ? (runningStep >= 4 ? ('process' as const) : ('wait' as const))
-        : progress?.full_wheel_status === 'waiting'
-          ? ('process' as const)
-          : (progress?.full_wheel_total_tickets ?? 0) > 0
-            ? ('finish' as const)
-            : currentStep === 4
-              ? ('process' as const)
-              : ('wait' as const),
-    },
   ];
 
   return (
@@ -450,16 +426,6 @@ export function EuromillonesPredictionPage() {
                     ? 'Generando tickets…'
                     : 'Generar tickets (full wheel)'}
                 </button>
-                {progress?.full_wheel_status === 'waiting' && (
-                  <span
-                    style={{
-                      fontSize: '0.8rem',
-                      color: 'var(--color-text-muted)',
-                    }}
-                  >
-                    training time: {fullWheelElapsed}
-                  </span>
-                )}
                 <button
                   type="button"
                   className="resultados-features-iconbtn"

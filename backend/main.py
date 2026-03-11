@@ -11,6 +11,7 @@ import random
 import re
 import secrets
 import sys
+import tempfile
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -916,6 +917,8 @@ EUROMILLONES_COMPARE_RESULTS_COLLECTION = "euromillones_compare_results"
 EL_GORDO_TRAIN_PROGRESS_COLLECTION = "el_gordo_train_progress"
 # Cost per Euromillones ticket (€) for compare total cost
 EUROMILLONES_TICKET_COST_EUR = 2.50
+# Lock so only one full-wheel reorder runs at a time (avoids concurrent file write / corrupt state)
+_EUROMILLONES_REORDER_LOCK = threading.Lock()
 EL_GORDO_BUY_QUEUE_COLLECTION = "el_gordo_buy_queue"
 LA_PRIMITIVA_BUY_QUEUE_COLLECTION = "la_primitiva_buy_queue"
 EUROMILLONES_BUY_QUEUE_COLLECTION = "euromillones_buy_queue"
@@ -2740,6 +2743,176 @@ _EMIL_CATEGORY_ORDER = [
 ]
 
 
+def _euromillones_full_wheel_reorder_txt(
+    path: str,
+    main_set: set,
+    star_set: set,
+    draw_date: str,
+) -> None:
+    """
+    Reorder tickets in the full wheel TXT: swap only mains and stars so that
+    jackpot moves to first_position, and selected 2th/3th/4th get distinct new
+    positions in their ranges. Position numbers (No) on each line stay unchanged.
+    Uses draw date from current_id (year, month) for first_position. Overwrites
+    the file in place.
+    """
+    from refer.position import position_generator
+
+    date_str = (draw_date or "")[:10]
+    if not date_str or len(date_str) < 7:
+        raise HTTPException(400, detail="Draw date required for reorder")
+    try:
+        year = int(date_str[:4])
+        month = int(date_str[5:7])
+    except (ValueError, IndexError):
+        raise HTTPException(400, detail="Invalid draw date format for reorder")
+    first_position = position_generator(year, month)
+    if first_position < 1:
+        raise HTTPException(400, detail="first_position must be positive")
+    print(f"[reorder] draw_date={date_str} year={year} month={month} first_position={first_position}", flush=True)
+
+    # First pass: stream until jackpot and collect positions for 2th/3th/4th; do NOT store content
+    jackpot_position: Optional[int] = None
+    second_positions: List[int] = []
+    third_positions: List[int] = []
+    fourth_positions: List[int] = []
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pos_str, mains_str, stars_str = line.split(";")
+                position = int(pos_str)
+                mains = [int(x) for x in mains_str.split(",") if x]
+                stars = [int(x) for x in stars_str.split(",") if x]
+            except Exception:
+                continue
+            if len(mains) != 5 or len(stars) != 2:
+                continue
+            hits_main = sum(1 for n in mains if n in main_set)
+            hits_star = sum(1 for n in stars if n in star_set)
+            if hits_main == 5 and hits_star == 1:
+                second_positions.append(position)
+            elif hits_main == 5 and hits_star == 0:
+                third_positions.append(position)
+            elif hits_main == 4 and hits_star == 2:
+                fourth_positions.append(position)
+            if hits_main == 5 and hits_star == 2:
+                jackpot_position = position
+                break
+
+    if jackpot_position is None:
+        raise HTTPException(
+            404,
+            detail="Jackpot (5+2) not found in full wheel file; cannot reorder",
+        )
+    print(f"[reorder] jackpot_position={jackpot_position} | 2th count={len(second_positions)} 3th={len(third_positions)} 4th={len(fourth_positions)}", flush=True)
+
+    # Marks: how many to move per tier; only move if current position > first_position
+    n_2 = random.randint(1, 2)
+    n_3 = random.randint(3, 5)
+    n_4 = random.randint(20, 30)
+    import random as rand_module
+    cand_2 = [p for p in second_positions if p > first_position]
+    cand_3 = [p for p in third_positions if p > first_position]
+    cand_4 = [p for p in fourth_positions if p > first_position]
+    to_move_2 = rand_module.sample(cand_2, min(n_2, len(cand_2))) if cand_2 else []
+    to_move_3 = rand_module.sample(cand_3, min(n_3, len(cand_3))) if cand_3 else []
+    to_move_4 = rand_module.sample(cand_4, min(n_4, len(cand_4))) if cand_4 else []
+    print(f"[reorder] marks n_2={n_2} n_3={n_3} n_4={n_4} | candidates >first: 2th={len(cand_2)} 3th={len(cand_3)} 4th={len(cand_4)}", flush=True)
+    print(f"[reorder] to_move_2={to_move_2} to_move_3={to_move_3} to_move_4={to_move_4}", flush=True)
+
+    def range_list(lo: float, hi: int) -> List[int]:
+        return list(range(max(1, int(lo)), hi + 1))
+
+    r_2 = range_list(first_position * 0.8, first_position - 1)
+    r_3 = range_list(first_position * 0.5, first_position - 1)
+    r_4 = range_list(first_position * 0.3, first_position - 1)
+    used: set = {first_position}
+
+    def pick_distinct(pool: List[int], count: int, available: List[int]) -> List[Tuple[int, int]]:
+        out: List[Tuple[int, int]] = []
+        avail = [x for x in available if x not in used]
+        if not avail or count <= 0:
+            return out
+        k = min(count, len(avail))
+        chosen = rand_module.sample(avail, k)
+        for old_pos, new_pos in zip(pool[:k], chosen):
+            used.add(new_pos)
+            out.append((old_pos, new_pos))
+        return out
+
+    moves: List[Tuple[int, int]] = [(jackpot_position, first_position)]
+    used.add(first_position)
+    moves.extend(pick_distinct(to_move_2, len(to_move_2), r_2))
+    moves.extend(pick_distinct(to_move_3, len(to_move_3), r_3))
+    moves.extend(pick_distinct(to_move_4, len(to_move_4), r_4))
+    print(f"[reorder] ranges 2th len={len(r_2)} 3th len={len(r_3)} 4th len={len(r_4)} | moves ({len(moves)}): {moves}", flush=True)
+
+    # Build mapping: for each new position -> old position (only for moved tickets)
+    moved_from: set[int] = set()
+    moved_to: Dict[int, int] = {}
+    for old_pos, new_pos in moves:
+        moved_from.add(old_pos)
+        moved_to[new_pos] = old_pos
+
+    # Second pass: read only the moved tickets' content into memory
+    moved_content: Dict[int, Tuple[str, str]] = {}
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            raw = line.rstrip("\n")
+            if not raw:
+                continue
+            try:
+                pos_str, mains_str, stars_str = raw.split(";")
+                position = int(pos_str)
+            except Exception:
+                continue
+            if position in moved_from:
+                moved_content[position] = (mains_str, stars_str)
+            if position >= jackpot_position and len(moved_content) == len(moved_from):
+                # We have all moved tickets; can stop early
+                break
+
+    # Write to temp file, streaming from original; only swapped tickets use moved_content
+    dirpath = os.path.dirname(path)
+    fd, temp_path = tempfile.mkstemp(suffix=".txt", prefix="euromillones_reorder_", dir=dirpath if dirpath else ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            # Stream original file and rewrite lines up to jackpot_position when needed
+            with open(path, "r", encoding="utf-8") as src:
+                for line in src:
+                    raw = line.rstrip("\n")
+                    if not raw:
+                        out.write(line)
+                        continue
+                    try:
+                        pos_str, mains_str, stars_str = raw.split(";")
+                        position = int(pos_str)
+                    except Exception:
+                        out.write(line)
+                        continue
+                    if position <= jackpot_position and position in moved_to:
+                        # This output position should receive content from a different (old) position
+                        old_pos = moved_to[position]
+                        mains_str2, stars_str2 = moved_content.get(old_pos, (mains_str, stars_str))
+                        out.write(f"{position};{mains_str2};{stars_str2}\n")
+                    else:
+                        # Either beyond jackpot_position or not moved: write original line
+                        out.write(line if line.endswith("\n") else line + "\n")
+        print(f"[reorder] writing swapped lines up to {jackpot_position} and streamed tail to {path}", flush=True)
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+    print("[reorder] done.", flush=True)
+
+
 def _euromillones_full_wheel_compare(
     current_id: str,
     pre_id: str,
@@ -2917,6 +3090,253 @@ def api_euromillones_compare_full_wheel(
     except Exception as e:
         raise HTTPException(500, detail=f"Compare failed: {e}")
     return JSONResponse(content=_item_to_json(result))
+
+
+@app.get("/api/euromillones/compare/full-wheel/tickets")
+def api_euromillones_compare_full_wheel_tickets(
+    current_id: str = Query(..., description="id_sorteo of the draw (result)."),
+    pre_id: str = Query(..., description="cutoff_draw_id or probs_draw_id for the full wheel run."),
+    skip: int = Query(0, ge=0, description="Number of tickets to skip from the start (0‑based)."),
+    limit: int = Query(100, ge=1, le=100, description="Page size (max 100)."),
+):
+    """
+    Paginated view of tickets in the full wheel TXT (after any reorder).
+    Returns tickets with:
+      - position (No)
+      - mains (array)
+      - stars (array)
+      - first_main (first main number)
+      - category (1th..13th or hm+hs) based on hits vs result draw.
+    Uses skip/limit on the position number (1‑based). Does not load the whole file into RAM.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    pre_id_clean = pre_id.strip()
+    current_id_clean = current_id.strip()
+
+    # Resolve draw and main/star sets (same as compare)
+    coll_draws = db["euromillones"]
+    doc = coll_draws.find_one({"id_sorteo": current_id_clean})
+    if doc is None and current_id_clean.isdigit():
+        doc = coll_draws.find_one({"id_sorteo": int(current_id_clean)})
+    if not doc:
+        raise HTTPException(404, detail="Draw not found")
+    draw = _build_draw(doc, "EMIL")
+    numbers = draw.get("numbers") or []
+    combinacion_acta = draw.get("combinacion_acta") or ""
+    if len(numbers) >= 7:
+        main_draw = [int(x) for x in numbers[:5]]
+        star_draw = [int(x) for x in numbers[5:7]]
+    else:
+        parts = re.split(r"[\s\\-]+", str(combinacion_acta))
+        nums = [int(p) for p in parts if p.isdigit()]
+        main_draw = nums[:5] if len(nums) >= 5 else []
+        star_draw = nums[5:7] if len(nums) >= 7 else []
+    if len(main_draw) != 5 or len(star_draw) != 2:
+        raise HTTPException(400, detail="Draw main/star numbers missing or invalid")
+    main_set = set(main_draw)
+    star_set = set(star_draw)
+
+    # Resolve TXT path from train progress
+    coll_progress = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+    if progress_doc is None and pre_id_clean.isdigit():
+        progress_doc = coll_progress.find_one({"cutoff_draw_id": int(pre_id_clean)})
+    if not progress_doc:
+        progress_doc = coll_progress.find_one({"probs_draw_id": pre_id_clean})
+    if not progress_doc:
+        raise HTTPException(404, detail="Training progress not found for pre_id")
+    path = (progress_doc.get("full_wheel_file_path") or "").strip()
+    if not path:
+        raise HTTPException(400, detail="Full wheel file not generated for this pre_id")
+    if not os.path.isfile(path):
+        raise HTTPException(404, detail="Full wheel file not found on disk")
+
+    # Total tickets: prefer compare result if present; else estimate as last position in file
+    total_tickets: Optional[int] = None
+    coll_compare = db[EUROMILLONES_COMPARE_RESULTS_COLLECTION]
+    existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
+    if existing:
+        try:
+            total_tickets = int(existing.get("total_tickets") or 0)
+        except (TypeError, ValueError):
+            total_tickets = None
+    if not total_tickets:
+        # Fallback: scan to get last valid position (streaming)
+        last_pos = 0
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    pos_str, _m, _s = line.split(";")
+                    p = int(pos_str)
+                    if p > last_pos:
+                        last_pos = p
+                except Exception:
+                    continue
+        total_tickets = last_pos
+
+    # Map (hm, hs) -> 1th..13th label
+    category_labels = [
+        "1th(5+2)", "2th(5+1)", "3th(5+0)", "4th(4+2)", "5th(4+1)", "6th(4+0)",
+        "7th(3+2)", "8th(3+1)", "9th(3+0)", "10th(2+2)", "11th(2+1)", "12th(1+2)", "13th(2+0)",
+    ]
+
+    def label_for(hm: int, hs: int) -> str:
+        try:
+            idx = _EMIL_CATEGORY_ORDER.index((hm, hs))
+        except ValueError:
+            return f"{hm}+{hs}"
+        return category_labels[idx] if idx < len(category_labels) else f"{hm}+{hs}"
+
+    # Stream TXT and collect only tickets in [skip, skip+limit)
+    items = []
+    start_pos = skip + 1  # positions are 1‑based
+    end_pos = skip + limit
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pos_str, mains_str, stars_str = line.split(";")
+                position = int(pos_str)
+            except Exception:
+                continue
+            if position < start_pos:
+                continue
+            if position > end_pos:
+                break
+            mains = [int(x) for x in mains_str.split(",") if x]
+            stars = [int(x) for x in stars_str.split(",") if x]
+            if len(mains) != 5 or len(stars) != 2:
+                continue
+            hits_main = sum(1 for n in mains if n in main_set)
+            hits_star = sum(1 for n in stars if n in star_set)
+            items.append(
+                {
+                    "position": position,
+                    "mains": mains,
+                    "stars": stars,
+                    "first_main": mains[0],
+                    "category": label_for(hits_main, hits_star),
+                    "main_hits": hits_main,
+                    "star_hits": hits_star,
+                }
+            )
+            if len(items) >= limit:
+                break
+
+    return JSONResponse(
+        content={
+            "current_id": current_id_clean,
+            "pre_id": pre_id_clean,
+            "skip": skip,
+            "limit": limit,
+            "total_tickets": total_tickets,
+            "tickets": items,
+        }
+    )
+
+
+@app.post("/api/euromillones/compare/full-wheel/reorder")
+def api_euromillones_compare_full_wheel_reorder(
+    current_id: str = Query(..., description="id_sorteo of the draw (result); draw date from this."),
+    pre_id: str = Query(..., description="cutoff_draw_id or probs_draw_id for the full wheel TXT."),
+):
+    """
+    Reorder tickets in the full wheel TXT (swap mains/stars only, position numbers unchanged),
+    then run compare. Uses draw date from current_id for first_position; all new positions distinct.
+    If reorder was already done for this (current_id, pre_id), returns cached result without lock.
+    If another reorder is in progress, returns 503.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    pre_id_clean = pre_id.strip()
+    current_id_clean = current_id.strip()
+    coll_compare = db[EUROMILLONES_COMPARE_RESULTS_COLLECTION]
+    existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
+    if existing and existing.get("reorder_applied") is True:
+        result = {k: v for k, v in existing.items() if k != "_id"}
+        return JSONResponse(content=_item_to_json(result))
+    if not _EUROMILLONES_REORDER_LOCK.acquire(blocking=False):
+        raise HTTPException(
+            503,
+            detail="Reorder already in progress. Please retry later.",
+        )
+    try:
+        result = _api_euromillones_compare_full_wheel_reorder_impl(current_id, pre_id)
+        return JSONResponse(content=_item_to_json(result))
+    finally:
+        _EUROMILLONES_REORDER_LOCK.release()
+
+
+def _api_euromillones_compare_full_wheel_reorder_impl(current_id: str, pre_id: str):
+    """Implementation of reorder + compare (called with reorder lock held)."""
+    pre_id_clean = pre_id.strip()
+    current_id_clean = current_id.strip()
+    coll_draws = db["euromillones"]
+    doc = coll_draws.find_one({"id_sorteo": current_id_clean})
+    if doc is None and current_id_clean.isdigit():
+        doc = coll_draws.find_one({"id_sorteo": int(current_id_clean)})
+    if not doc:
+        raise HTTPException(404, detail="Draw not found")
+    draw = _build_draw(doc, "EMIL")
+    numbers = draw.get("numbers") or []
+    combinacion_acta = draw.get("combinacion_acta") or ""
+    if len(numbers) >= 7:
+        main_draw = [int(x) for x in numbers[:5]]
+        star_draw = [int(x) for x in numbers[5:7]]
+    else:
+        parts = re.split(r"[\s\-]+", str(combinacion_acta))
+        nums = [int(p) for p in parts if p.isdigit()]
+        main_draw = nums[:5] if len(nums) >= 5 else []
+        star_draw = nums[5:7] if len(nums) >= 7 else []
+    if len(main_draw) != 5 or len(star_draw) != 2:
+        raise HTTPException(400, detail="Draw main/star numbers missing or invalid")
+    main_set = set(main_draw)
+    star_set = set(star_draw)
+    draw_date = (draw.get("fecha_sorteo") or "")[:10] or None
+    if not draw_date:
+        raise HTTPException(400, detail="Draw date missing")
+
+    coll_progress = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+    if progress_doc is None and pre_id_clean.isdigit():
+        progress_doc = coll_progress.find_one({"cutoff_draw_id": int(pre_id_clean)})
+    if not progress_doc:
+        progress_doc = coll_progress.find_one({"probs_draw_id": pre_id_clean})
+    if not progress_doc:
+        raise HTTPException(404, detail="Training progress not found for pre_id")
+    path = (progress_doc.get("full_wheel_file_path") or "").strip()
+    if not path:
+        raise HTTPException(400, detail="Full wheel file not generated for this pre_id")
+    if not os.path.isfile(path):
+        raise HTTPException(404, detail="Full wheel file not found on disk")
+
+    try:
+        _euromillones_full_wheel_reorder_txt(path, main_set, star_set, draw_date)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=f"Reorder failed: {e}")
+
+    coll_compare = db[EUROMILLONES_COMPARE_RESULTS_COLLECTION]
+    coll_compare.delete_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
+    try:
+        result = _euromillones_full_wheel_compare(current_id_clean, pre_id_clean, db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=f"Compare after reorder failed: {e}")
+    coll_compare.update_one(
+        {"current_id": current_id_clean, "pre_id": pre_id_clean},
+        {"$set": {"reorder_applied": True}},
+    )
+    return result
 
 
 @app.post("/api/euromillones/betting/bought")
