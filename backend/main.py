@@ -2813,7 +2813,7 @@ def _euromillones_full_wheel_reorder_txt(
     # Marks: how many to move per tier; only move if current position > first_position
     n_2 = random.randint(1, 2)
     n_3 = random.randint(3, 5)
-    n_4 = random.randint(20, 30)
+    n_4 = random.randint(10, 20)
     import random as rand_module
     cand_2 = [p for p in second_positions if p > first_position]
     cand_3 = [p for p in third_positions if p > first_position]

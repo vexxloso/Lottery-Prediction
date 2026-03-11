@@ -295,7 +295,7 @@ export function SimulationPage() {
           if (cancelled) return;
           if (status === 503 && attempt < maxRetries) {
             setEuromillonesFullWheelError(
-              `Reordenación en curso. Reintentando (${attempt + 1}/${maxRetries})…`,
+              `Calculando comparación full wheel… (${attempt + 1}/${maxRetries})`,
             );
             return new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs)).then(() =>
               tryFetch(attempt + 1),
@@ -305,7 +305,7 @@ export function SimulationPage() {
             setEuromillonesFullWheelResult(null);
             setEuromillonesFullWheelError(
               status === 503
-                ? 'Reordenación en curso. Reintente en unos segundos.'
+                ? 'Calculando comparación full wheel…'
                 : typeof data.detail === 'string'
                   ? data.detail
                   : 'Error al cargar comparación full wheel',
