@@ -2,6 +2,7 @@ node_modules/
 backend/.env
 __pycache__/
 update
+update1
 data
 .env
 a.htm
@@ -11,3 +12,8 @@ bot/dist
 Lottery-Prediction-System.pptx
 video.mp4
 bot.rar
+backend/data
+euromillones_pools
+refer
+update2
+backend/models/

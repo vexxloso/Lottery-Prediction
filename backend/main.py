@@ -15,7 +15,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from statistics import mean
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Iterable, Sequence, Tuple
 
 from dotenv import load_dotenv
 
@@ -35,11 +35,14 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 
-# Ensure we can import helper scripts from the project-level `scripts` folder.
+# Ensure we can import helper scripts from the project-level `scripts` and `refer` folders.
 _ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SCRIPTS_DIR = os.path.join(_ROOT_DIR, "scripts")
 if _SCRIPTS_DIR not in sys.path:
     sys.path.append(_SCRIPTS_DIR)
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+
 
 from train_euromillones_model import (
     prepare_euromillones_dataset,
@@ -161,26 +164,36 @@ from train_la_primitiva_model import (
     compute_la_primitiva_probabilities,
 )
 from itertools import combinations
+from pathlib import Path
 
 
-def build_step4_pool( 
+def build_step4_pool(
     mains_probs: List[Dict],
     stars_probs: List[Dict],
     prev_main_numbers: Optional[List[int]] = None,
     prev_star_numbers: Optional[List[int]] = None,
     seed: Optional[int] = None,
 ) -> Dict:
-    """ 
-    Step 4 pool: 20 main numbers + 4 star numbers.
+    """
+    Step 4 pool: build prioritized subset (≈20 mains + 4 stars), then extend to full 50 mains + 12 stars.
 
-    - 3 mains + 1 star: from previous draw (prev_main_numbers, prev_star_numbers) if available,
+    - 3–5 mains + 1 star: from previous draw (prev_main_numbers, prev_star_numbers) if available,
       else random. No duplicate with the rest.
-    - 17 mains: from Step 3 ranking (mains_probs sorted by p), no duplicate with the 3 above:
-      from 1st–20th select 8, 21st–30th select 3, 31st–40th select 3, 41st–50th select 3.
-    - 3 stars: from Step 3 star ranking, no duplicate with the 1 above:
+    - Additional mains: from Step 3 ranking (mains_probs sorted by p), no duplicate with the previous mains:
+      from 1st–20th select 6–7, 21st–30th select 3, 31st–40th select 3, 41st–50th select 3.
+      The prioritized subset is truncated to 20 mains if longer.
+    - Additional stars: from Step 3 star ranking, no duplicate with the 1 above:
       from 1st–6th select 2, 7th–12th select 1.
+      The prioritized subset is truncated to 4 stars if longer.
 
-    Returns filtered_mains (20 items), filtered_stars (4 items), rules_used, stats.
+    After building this prioritized subset, we EXTEND it to a full pool:
+    - Append all remaining mains (from mains_probs, sorted by probability) that are not yet included,
+      so the final mains list covers all numbers in [1, 50] that appear in mains_probs.
+    - Append all remaining stars (from stars_probs, sorted by probability) that are not yet included,
+      so the final stars list covers all numbers in [1, 12] that appear in stars_probs.
+
+    Returns filtered_mains (up to 50 items) and filtered_stars (up to 12 items), where:
+    - The first 20 mains and first 4 stars correspond to the rule-based prioritized subset.
     """
     if seed is not None:
         random.seed(seed)
@@ -262,9 +275,276 @@ def build_step4_pool(
     filtered_stars_items.extend(from_star_7_12)
     filtered_stars = filtered_stars_items[:4]
 
-    # Randomly reorder mains and stars so Step 5 receives a shuffled pool.
+    # Randomly reorder prioritized subset so the top of the pool is shuffled.
     random.shuffle(filtered_mains)
     random.shuffle(filtered_stars)
+
+    # --- Extend to full 50 mains and 12 stars using probability ranking ---
+    selected_main_nums = {int(r.get("number") or 0) for r in filtered_mains}
+    for item in mains_ranking:
+        n = int(item.get("number") or 0)
+        if n < MAIN_MIN or n > MAIN_MAX:
+            continue
+        if n in selected_main_nums:
+            continue
+        filtered_mains.append({"number": n, "p": item.get("p") or 0.0})
+        selected_main_nums.add(n)
+
+    selected_star_nums = {int(r.get("number") or 0) for r in filtered_stars}
+    for item in stars_ranking:
+        n = int(item.get("number") or 0)
+        if n < STAR_MIN or n > STAR_MAX:
+            continue
+        if n in selected_star_nums:
+            continue
+        filtered_stars.append({"number": n, "p": item.get("p") or 0.0})
+        selected_star_nums.add(n)
+
+    def _stats(rows: List[Dict]) -> Dict:
+        nums = [int(r.get("number") or 0) for r in rows]
+        return {
+            "count": len(nums),
+            "sum": sum(nums),
+            "even": sum(1 for n in nums if n % 2 == 0),
+            "odd": sum(1 for n in nums if n % 2 != 0),
+        }
+
+    stats = {"mains": _stats(filtered_mains), "stars": _stats(filtered_stars)}
+    return {
+        "filtered_mains": filtered_mains,
+        "filtered_stars": filtered_stars,
+        "rules_used": rules_used,
+        "excluded": excluded,
+        "stats": stats,
+        "snapshot_mains": base_mains,
+        "snapshot_stars": [one_star],
+    }
+
+
+def _iter_euromillones_tickets_from_pool(
+    mains_pool: Iterable[int],
+    stars_pool: Iterable[int],
+) -> Iterable[tuple[List[int], List[int]]]:
+    """
+    Iterate all Euromillones tickets for the given ordered pools, with
+    mixed traversal over mains and stars to avoid long runs of identical
+    mains or identical stars.
+
+    - mains_pool: ordered mains numbers (length 50 expected)
+    - stars_pool: ordered star numbers (length 12 expected)
+
+    We precompute:
+    - all mains combinations indices
+    - all star pairs indices
+
+    Then we traverse the (mains_combo_index, star_pair_index) grid in a
+    "diagonal" pattern:
+
+        i = k % nm
+        t = k // nm
+        j = (t + i) % ns
+
+    where:
+        nm = number of mains combinations
+        ns = number of star pairs
+
+    This visits every (i, j) exactly once but interleaves mains and stars
+    more richly than the naive nested loops.
+    """
+    mains_list = list(dict.fromkeys(int(x) for x in mains_pool))
+    stars_list = list(dict.fromkeys(int(x) for x in stars_pool))
+    if len(mains_list) < 5:
+        raise ValueError(f"Need at least 5 mains, got {len(mains_list)}")
+    if len(stars_list) < 2:
+        raise ValueError(f"Need at least 2 stars, got {len(stars_list)}")
+
+    main_idx_combos = list(combinations(range(len(mains_list)), 5))
+    star_idx_pairs = list(combinations(range(len(stars_list)), 2))
+
+    # Deterministically shuffle mains and star pairs based on the pool,
+    # so that the overall structure is reproducible but not grouped in
+    # lexicographic order (which tends to cluster similar tickets).
+    seed = (hash((tuple(mains_list), tuple(stars_list))) & 0xFFFFFFFF)
+    rng = random.Random(seed)
+    rng.shuffle(main_idx_combos)
+    rng.shuffle(star_idx_pairs)
+    nm = len(main_idx_combos)
+    ns = len(star_idx_pairs)
+
+    total = nm * ns
+    for k in range(total):
+        i = k % nm
+        t = k // nm
+        j = (t + i) % ns
+        mains = [mains_list[idx] for idx in main_idx_combos[i]]
+        stars = [stars_list[idx] for idx in star_idx_pairs[j]]
+        yield mains, stars
+
+
+def _is_bad_euromillones_ticket(mains: Sequence[int]) -> bool:
+    """Return True if the ticket violates any structural rule (bad ticket)."""
+    if len(mains) != 5:
+        return False
+
+    # Rule A: long consecutive run (>= 4 consecutive numbers)
+    sorted_mains = sorted(mains)
+    longest_run = 1
+    current_run = 1
+    for i in range(1, len(sorted_mains)):
+        if sorted_mains[i] == sorted_mains[i - 1] + 1:
+            current_run += 1
+            longest_run = max(longest_run, current_run)
+        else:
+            current_run = 1
+    if longest_run >= 4:
+        return True
+
+    # Rule B: all same last digit or same decade
+    last_digits = {n % 10 for n in mains}
+    decades = {n // 10 for n in mains}
+    if len(last_digits) == 1 or len(decades) == 1:
+        return True
+
+    # Rule C: all odd or all even
+    all_even = all(n % 2 == 0 for n in mains)
+    all_odd = all(n % 2 == 1 for n in mains)
+    if all_even or all_odd:
+        return True
+
+    return False
+
+
+def _euromillones_ticket_tier(mains: Sequence[int]) -> int:
+    """
+    Classify a Euromillones ticket into quality tiers:
+    - 0: very good (best patterns)
+    - 1: normal
+    - 2: weak
+    - 3: bad (structural anti-patterns; delegated to _is_bad_euromillones_ticket)
+    """
+    if _is_bad_euromillones_ticket(mains):
+        return 3
+
+    if len(mains) != 5:
+        return 2
+
+    nums = list(mains)
+    total = sum(nums)
+    evens = sum(1 for n in nums if n % 2 == 0)
+    odds = 5 - evens
+    decades = {n // 10 for n in nums}
+
+    score = 0
+
+    # Even/odd balance: 2–3 or 3–2 is ideal, 1–4 or 4–1 is weaker.
+    if evens in (2, 3):
+        score += 2
+    elif evens in (1, 4):
+        score += 1
+
+    # Spread across decades: more distinct decades is better.
+    if len(decades) >= 4:
+        score += 2
+    elif len(decades) == 3:
+        score += 1
+
+    # Sum band: favour mid-range totals.
+    if 100 <= total <= 180:
+        score += 2
+    elif 80 <= total <= 200:
+        score += 1
+
+    # Short consecutive runs (2–3) are acceptable; long runs already excluded.
+    sorted_mains = sorted(nums)
+    longest_run = 1
+    current_run = 1
+    for i in range(1, len(sorted_mains)):
+        if sorted_mains[i] == sorted_mains[i - 1] + 1:
+            current_run += 1
+            longest_run = max(longest_run, current_run)
+        else:
+            current_run = 1
+    if longest_run == 3:
+        score += 1
+
+    if score >= 5:
+        return 0
+    if score >= 3:
+        return 1
+    return 2
+
+
+def _generate_full_wheel_file_from_pool(
+    mains_pool: Iterable[int],
+    stars_pool: Iterable[int],
+    draw_date: str,
+) -> dict:
+    """
+    Generate full Euromillones wheel from the given pools and save to TXT.
+
+    - Uses structural rules to classify tickets into quality tiers:
+        * Tier 0: very good patterns
+        * Tier 1: normal
+        * Tier 2: weak
+        * Tier 3: bad (consecutive, same modulo/decade, all odd/even)
+      Tickets are written in tier order (0 → 1 → 2 → 3) so the worst
+      patterns move to the end of the list.
+    - Within each tier, tickets are buffered in small batches and shuffled
+      with a deterministic seed to avoid long runs of identical mains.
+    - Positions are 1-based and contiguous across all tiers.
+    """
+    root = Path(_ROOT_DIR)
+    out_dir = root / "euromillones_pools"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"euromillones_{draw_date}.txt"
+
+    # Positions are global across tiers.
+    position = 0
+    total_by_tier = [0, 0, 0, 0]
+
+    # Write tiers 0..3 in order.
+    with out_path.open("w", encoding="utf-8", buffering=1024 * 1024) as f:
+        for tier in range(4):
+            # Deterministic shuffling per tier (no cancel support).
+            seed = (hash((draw_date, tier)) & 0xFFFFFFFF)
+            rng = random.Random(seed)
+            buffer: List[tuple[List[int], List[int]]] = []
+            buffer_size = 1000
+
+            for mains, stars in _iter_euromillones_tickets_from_pool(mains_pool, stars_pool):
+                t = _euromillones_ticket_tier(mains)
+                if t != tier:
+                    continue
+                buffer.append((list(mains), list(stars)))
+                if len(buffer) >= buffer_size:
+                    rng.shuffle(buffer)
+                    for m, s in buffer:
+                        position += 1
+                        mains_str = ",".join(str(n) for n in m)
+                        stars_str = ",".join(str(n) for n in s)
+                        f.write(f"{position};{mains_str};{stars_str}\n")
+                        total_by_tier[tier] += 1
+                    buffer.clear()
+
+            if buffer:
+                rng.shuffle(buffer)
+                for m, s in buffer:
+                    position += 1
+                    mains_str = ",".join(str(n) for n in m)
+                    stars_str = ",".join(str(n) for n in s)
+                    f.write(f"{position};{mains_str};{stars_str}\n")
+                    total_by_tier[tier] += 1
+
+    good_count = total_by_tier[0] + total_by_tier[1] + total_by_tier[2]
+    bad_count = total_by_tier[3]
+    total = position
+    return {
+        "file_path": str(out_path),
+        "draw_date": draw_date,
+        "good_tickets": good_count,
+        "bad_tickets": bad_count,
+        "total_tickets": total,
+    }
 
     def _stats(rows: List[Dict]) -> Dict:
         nums = [int(r.get("number") or 0) for r in rows]
@@ -632,7 +912,10 @@ SITE_ORIGIN = "https://www.loteriasyapuestas.es"
 COLLECTIONS = {"LAPR": "la_primitiva", "EMIL": "euromillones", "ELGR": "el_gordo"}
 METADATA_COLLECTION = "scraper_metadata"
 EUROMILLONES_TRAIN_PROGRESS_COLLECTION = "euromillones_train_progress"
+EUROMILLONES_COMPARE_RESULTS_COLLECTION = "euromillones_compare_results"
 EL_GORDO_TRAIN_PROGRESS_COLLECTION = "el_gordo_train_progress"
+# Cost per Euromillones ticket (€) for compare total cost
+EUROMILLONES_TICKET_COST_EUR = 2.50
 EL_GORDO_BUY_QUEUE_COLLECTION = "el_gordo_buy_queue"
 LA_PRIMITIVA_BUY_QUEUE_COLLECTION = "la_primitiva_buy_queue"
 EUROMILLONES_BUY_QUEUE_COLLECTION = "euromillones_buy_queue"
@@ -657,6 +940,9 @@ async def lifespan(app: FastAPI):
     for coll_name in COLLECTIONS.values():
         db[coll_name].create_index("id_sorteo", unique=True)
     db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
+    db[EUROMILLONES_COMPARE_RESULTS_COLLECTION].create_index(
+        [("current_id", 1), ("pre_id", 1)], unique=True
+    )
     db[EL_GORDO_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
     db[EL_GORDO_BUY_QUEUE_COLLECTION].create_index([("status", 1), ("created_at", 1)])
     db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
@@ -1591,6 +1877,23 @@ def api_euromillones_train_progress(
             content={"progress": None},
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
+    # Compute full wheel elapsed seconds (server-side)
+    full_status = doc.get("full_wheel_status")
+    started_at = doc.get("full_wheel_started_at")
+    generated_at = doc.get("full_wheel_generated_at")
+    full_elapsed: Optional[int] = None
+    if started_at:
+        try:
+            start_dt = dt.fromisoformat(str(started_at).replace("Z", "+00:00"))
+            if full_status == "done" and generated_at:
+                end_dt = dt.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+            else:
+                end_dt = dt.utcnow()
+            diff = end_dt - start_dt
+            full_elapsed = max(0, int(diff.total_seconds()))
+        except Exception:
+            full_elapsed = None
+
     progress = {
         "cutoff_draw_id": doc.get("cutoff_draw_id"),
         "dataset_prepared": bool(doc.get("dataset_prepared")),
@@ -1618,6 +1921,16 @@ def api_euromillones_train_progress(
         "candidate_pool_at": doc.get("candidate_pool_at"),
         "candidate_pool_count": doc.get("candidate_pool_count"),
         "bought_tickets": doc.get("bought_tickets"),
+        "full_wheel_draw_date": doc.get("full_wheel_draw_date"),
+        "full_wheel_file_path": doc.get("full_wheel_file_path"),
+        "full_wheel_total_tickets": doc.get("full_wheel_total_tickets"),
+        "full_wheel_good_tickets": doc.get("full_wheel_good_tickets"),
+        "full_wheel_bad_tickets": doc.get("full_wheel_bad_tickets"),
+        "full_wheel_generated_at": doc.get("full_wheel_generated_at"),
+        "full_wheel_started_at": doc.get("full_wheel_started_at"),
+        "full_wheel_status": full_status,
+        "full_wheel_error": doc.get("full_wheel_error"),
+        "full_wheel_elapsed_seconds": full_elapsed,
     }
     return JSONResponse(
         content={"progress": progress},
@@ -2260,6 +2573,350 @@ def api_euromillones_betting_pool(
         },
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
+
+
+@app.get("/api/euromillones/betting/pool-from-file")
+def api_euromillones_betting_pool_from_file(
+    draw_date: str | None = Query(
+        None,
+        description="Draw date YYYY-MM-DD; use full_wheel_file_path for that date.",
+    ),
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="Optional id_sorteo; used when draw_date not provided.",
+    ),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """
+    Return a paginated slice of the Euromillones full-wheeling candidate pool from TXT.
+
+    This is used on the Apuestas screen. It does NOT return bought tickets; those
+    continue to come from api_euromillones_betting_pool.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    date_str = (draw_date or "").strip()[:10] or None
+    cutoff = (cutoff_draw_id or "").strip() or None
+
+    # Fallback to last_draw_date if neither provided.
+    if not date_str and not cutoff:
+        last = (_get_last_draw_date("euromillones") or "").strip()
+        if last:
+            date_str = last[:10]
+
+    doc = None
+    if cutoff:
+        doc = coll.find_one({"cutoff_draw_id": cutoff})
+        if doc is None and cutoff.isdigit():
+            doc = coll.find_one({"cutoff_draw_id": int(cutoff)})
+    if doc is None and date_str:
+        # Prefer full_wheel_draw_date if present, else fall back to probs_fecha_sorteo.
+        doc = coll.find_one({"full_wheel_draw_date": date_str}) or coll.find_one({"probs_fecha_sorteo": date_str})
+    if doc is None:
+        return JSONResponse(
+            content={
+                "draw_date": date_str,
+                "cutoff_draw_id": cutoff,
+                "total": 0,
+                "skip": skip,
+                "limit": limit,
+                "tickets": [],
+            },
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+
+    path = (doc.get("full_wheel_file_path") or "").strip()
+    total = int(doc.get("full_wheel_total_tickets") or 0)
+
+    # If full wheel has not been generated yet, return empty list.
+    if not path or total <= 0:
+        return JSONResponse(
+            content={
+                "draw_date": date_str,
+                "cutoff_draw_id": cutoff,
+                "total": total,
+                "skip": skip,
+                "limit": limit,
+                "tickets": [],
+            },
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+
+    tickets: List[Dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            # Skip first `skip` lines
+            for _ in range(skip):
+                if not f.readline():
+                    break
+            # Read up to `limit` lines
+            for _ in range(limit):
+                line = f.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    pos_str, mains_str, stars_str = line.split(";")
+                    position = int(pos_str)
+                    mains = [int(x) for x in mains_str.split(",") if x]
+                    stars = [int(x) for x in stars_str.split(",") if x]
+                except Exception:
+                    continue
+                tickets.append({"position": position, "mains": mains, "stars": stars})
+    except FileNotFoundError:
+        raise HTTPException(404, detail="Full wheel file not found on disk")
+
+    return JSONResponse(
+        content={
+            "draw_date": (doc.get("full_wheel_draw_date") or date_str),
+            "cutoff_draw_id": doc.get("cutoff_draw_id") or cutoff,
+            "total": total,
+            "skip": skip,
+            "limit": limit,
+            "tickets": tickets,
+        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+def _parse_euro_premio(value) -> float:
+    """Parse Euromillones escrutinio premio (e.g. '20.900.000.000' or '5,14') to euros."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.replace(".", "").replace(",", ".").strip()
+        cleaned = re.sub(r"[^\d.]", "", cleaned)
+        try:
+            return float(cleaned) if cleaned else 0.0
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _build_escrutinio_prize_map(escrutinio: list) -> Dict[Tuple[int, int], float]:
+    """
+    Build (main_hits, star_hits) -> prize (euros) from Euromillones escrutinio rows.
+    Rows have categoria (1-13), tipo (e.g. '1a' or '5 + 2'), premio (prize per ticket).
+    Uses premio from each row to get cost per category for earning calculation.
+    """
+    prize_map: Dict[Tuple[int, int], float] = {}
+    if not isinstance(escrutinio, list):
+        return prize_map
+    for row in escrutinio:
+        if not isinstance(row, dict):
+            continue
+        premio = _parse_euro_premio(row.get("premio"))
+        if premio < 0:
+            continue
+        # Try "5 + 2" format in tipo or aciertos
+        aciertos = str(row.get("tipo") or row.get("aciertos") or "").strip()
+        m = re.match(r"(\d+)\s*\+\s*(\d+)", aciertos)
+        if m:
+            hm, hs = int(m.group(1)), int(m.group(2))
+            prize_map[(hm, hs)] = premio
+            continue
+        # Else use categoria (1-13) -> canonical (main, star) order: 1=5+2, 2=5+1, ... 13=2+0
+        cat = row.get("categoria")
+        if cat is not None:
+            try:
+                idx = int(cat) - 1
+            except (TypeError, ValueError):
+                idx = -1
+            if 0 <= idx < len(_EMIL_CATEGORY_ORDER):
+                key = _EMIL_CATEGORY_ORDER[idx]
+                prize_map[key] = premio
+    return prize_map
+
+
+# Canonical Euromillones category order for display (1st .. 13th): categoria 1 -> (5,2), 2 -> (5,1), ... 13 -> (2,0)
+_EMIL_CATEGORY_ORDER = [
+    (5, 2), (5, 1), (5, 0), (4, 2), (4, 1), (4, 0),
+    (3, 2), (3, 1), (3, 0), (2, 2), (2, 1), (1, 2), (2, 0),
+]
+
+
+def _euromillones_full_wheel_compare(
+    current_id: str,
+    pre_id: str,
+    db_instance,
+) -> Dict:
+    """
+    Compare full wheel TXT against draw result: stream TXT until jackpot (5+2), then
+    aggregate prize counts and earnings per category using escrutinio premio per category.
+    Save to euromillones_compare_results. If result already exists in DB, return it (calculate only once).
+    """
+    pre_id_clean = pre_id.strip()
+    coll_compare = db_instance[EUROMILLONES_COMPARE_RESULTS_COLLECTION]
+    existing = coll_compare.find_one({"current_id": current_id, "pre_id": pre_id_clean})
+    if existing:
+        out = {k: v for k, v in existing.items() if k != "_id"}
+        return _item_to_json(out)
+
+    coll_draws = db_instance["euromillones"]
+    doc = coll_draws.find_one({"id_sorteo": current_id})
+    if doc is None and current_id.isdigit():
+        doc = coll_draws.find_one({"id_sorteo": int(current_id)})
+    if not doc:
+        raise HTTPException(404, detail="Draw not found")
+    draw = _build_draw(doc, "EMIL")
+    numbers = draw.get("numbers") or []
+    combinacion_acta = draw.get("combinacion_acta") or ""
+    if len(numbers) >= 7:
+        main_draw = [int(x) for x in numbers[:5]]
+        star_draw = [int(x) for x in numbers[5:7]]
+    else:
+        parts = re.split(r"[\s\-]+", str(combinacion_acta))
+        nums = [int(p) for p in parts if p.isdigit()]
+        main_draw = nums[:5] if len(nums) >= 5 else []
+        star_draw = nums[5:7] if len(nums) >= 7 else []
+    if len(main_draw) != 5 or len(star_draw) != 2:
+        raise HTTPException(400, detail="Draw main/star numbers missing or invalid")
+    main_set = set(main_draw)
+    star_set = set(star_draw)
+    escrutinio = draw.get("escrutinio") or []
+    prize_map = _build_escrutinio_prize_map(escrutinio)
+    # 1st prize (jackpot 5+2) comes from euromillones premio_bote, not escrutinio
+    premio_bote = _parse_euro_premio(draw.get("premio_bote"))
+    if premio_bote >= 0:
+        prize_map[(5, 2)] = premio_bote
+    draw_date = (draw.get("fecha_sorteo") or "")[:10] or None
+
+    coll_progress = db_instance[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id.strip()})
+    if progress_doc is None and pre_id.strip().isdigit():
+        progress_doc = coll_progress.find_one({"cutoff_draw_id": int(pre_id.strip())})
+    if not progress_doc:
+        progress_doc = coll_progress.find_one({"probs_draw_id": pre_id.strip()})
+    if not progress_doc:
+        raise HTTPException(404, detail="Training progress not found for pre_id")
+    path = (progress_doc.get("full_wheel_file_path") or "").strip()
+    if not path:
+        raise HTTPException(400, detail="Full wheel file not generated for this pre_id")
+    if not os.path.isfile(path):
+        raise HTTPException(404, detail="Full wheel file not found on disk")
+
+    # category (main_hits, star_hits) -> (count, earning)
+    category_stats: Dict[Tuple[int, int], Tuple[int, float]] = {}
+    total_earning = 0.0
+    jackpot_position: Optional[int] = None
+    # Track all positions for 2nd, 3rd, 4th prize categories (5+1, 5+0, 4+2) until jackpot
+    second_positions: List[int] = []
+    third_positions: List[int] = []
+    fourth_positions: List[int] = []
+    chunk_size = 100_000
+
+    with open(path, "r", encoding="utf-8") as f:
+        while True:
+            lines_read = 0
+            for _ in range(chunk_size):
+                line = f.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                lines_read += 1
+                try:
+                    pos_str, mains_str, stars_str = line.split(";")
+                    position = int(pos_str)
+                    mains = [int(x) for x in mains_str.split(",") if x]
+                    stars = [int(x) for x in stars_str.split(",") if x]
+                except Exception:
+                    continue
+                if len(mains) != 5 or len(stars) != 2:
+                    continue
+                hits_main = sum(1 for n in mains if n in main_set)
+                hits_star = sum(1 for n in stars if n in star_set)
+                prize = prize_map.get((hits_main, hits_star), 0.0)
+                total_earning += prize
+                key = (hits_main, hits_star)
+                prev = category_stats.get(key, (0, 0.0))
+                category_stats[key] = (prev[0] + 1, prev[1] + prize)
+                # Track positions for top categories while scanning towards jackpot
+                if hits_main == 5 and hits_star == 1:
+                    second_positions.append(position)
+                elif hits_main == 5 and hits_star == 0:
+                    third_positions.append(position)
+                elif hits_main == 4 and hits_star == 2:
+                    fourth_positions.append(position)
+                if hits_main == 5 and hits_star == 2:
+                    jackpot_position = position
+                    break
+            if jackpot_position is not None:
+                break
+            if lines_read < chunk_size:
+                break
+
+    if jackpot_position is None:
+        raise HTTPException(
+            404,
+            detail="Jackpot (5+2) not found in full wheel file; cannot compute compare result",
+        )
+
+    total_tickets = jackpot_position
+    ticket_cost = total_tickets * EUROMILLONES_TICKET_COST_EUR
+    # Build categories array in canonical order; label 1th..13th for known tiers
+    category_labels = [
+        "1th(5+2)", "2th(5+1)", "3th(5+0)", "4th(4+2)", "5th(4+1)", "6th(4+0)",
+        "7th(3+2)", "8th(3+1)", "9th(3+0)", "10th(2+2)", "11th(2+1)", "12th(1+2)", "13th(2+0)",
+    ]
+    categories_out: List[Dict] = []
+    for i, (hm, hs) in enumerate(_EMIL_CATEGORY_ORDER):
+        label = category_labels[i] if i < len(category_labels) else f"{hm}+{hs}"
+        count, earning = category_stats.get((hm, hs), (0, 0.0))
+        categories_out.append({"category": label, "count": count, "earning": round(earning, 2)})
+    # Append any other (main, star) pairs from category_stats not in canonical order
+    for (hm, hs), (count, earning) in category_stats.items():
+        if (hm, hs) in _EMIL_CATEGORY_ORDER:
+            continue
+        categories_out.append({"category": f"{hm}+{hs}", "count": count, "earning": round(earning, 2)})
+
+    result = {
+        "current_id": current_id,
+        "date": draw_date,
+        "pre_id": pre_id.strip(),
+        "jackpot_position": jackpot_position,
+        "second_positions": second_positions,
+        "third_positions": third_positions,
+        "fourth_positions": fourth_positions,
+        "categories": categories_out,
+        "total_tickets": total_tickets,
+        "earning": round(total_earning, 2),
+        "ticket_cost": round(ticket_cost, 2),
+    }
+    # Persist
+    coll_compare = db_instance[EUROMILLONES_COMPARE_RESULTS_COLLECTION]
+    coll_compare.replace_one(
+        {"current_id": current_id, "pre_id": pre_id.strip()},
+        {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
+        upsert=True,
+    )
+    return result
+
+
+@app.get("/api/euromillones/compare/full-wheel")
+def api_euromillones_compare_full_wheel(
+    current_id: str = Query(..., description="id_sorteo of the draw to evaluate (result)."),
+    pre_id: str = Query(..., description="cutoff_draw_id or probs_draw_id for the full wheel run."),
+):
+    """
+    Compare full wheel TXT (from pre_id) against draw result (current_id): find jackpot position,
+    aggregate prizes for tickets 1..jackpot, return and save table (current_id, date, categories, total_tickets, earning, ticket_cost).
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    try:
+        result = _euromillones_full_wheel_compare(current_id.strip(), pre_id.strip(), db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=f"Compare failed: {e}")
+    return JSONResponse(content=_item_to_json(result))
 
 
 @app.post("/api/euromillones/betting/bought")
@@ -3730,6 +4387,199 @@ def api_euromillones_rule_filters(
             "excluded": result["excluded"],
         }
     )
+
+
+@app.post("/api/euromillones/train/full-wheel")
+def api_euromillones_full_wheel(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="id_sorteo for this training run (uses filtered_mains_probs / filtered_stars_probs).",
+    ),
+    draw_date: str | None = Query(
+        None,
+        description="Optional draw date YYYY-MM-DD for the TXT filename; falls back to probs_fecha_sorteo.",
+    ),
+):
+    """
+    Generate full Euromillones wheeling file from the Step 4 pool (50 mains, 12 stars).
+
+    - Reads filtered_mains_probs and filtered_stars_probs from euromillones_train_progress.
+    - Builds the ordered mains/stars pools.
+    - Generates ALL tickets (full wheel) using the current pool order.
+    - Applies structural rules to classify tickets as "good" or "bad":
+        * Long consecutive runs (>= 4)
+        * All same last digit or same decade
+        * All odd or all even
+      Good tickets are written first in the file, bad tickets at the end.
+    - Saves to euromillones_<draw_date>.txt under the project-level euromillones_pools directory.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        raise HTTPException(400, detail="cutoff_draw_id is required")
+
+    cid = cutoff_draw_id.strip()
+    coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one({"cutoff_draw_id": cid})
+    if not doc:
+        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+
+    filtered_mains = doc.get("filtered_mains_probs") or []
+    filtered_stars = doc.get("filtered_stars_probs") or []
+    if not filtered_mains or len(filtered_mains) < 5:
+        raise HTTPException(
+            400,
+            detail="Run step 4 (Generar pool) first so filtered_mains_probs has at least 5 numbers.",
+        )
+    if not filtered_stars or len(filtered_stars) < 2:
+        raise HTTPException(
+            400,
+            detail="Run step 4 (Generar pool) first so filtered_stars_probs has at least 2 numbers.",
+        )
+
+    mains_pool = [int(x.get("number") or 0) for x in filtered_mains if x.get("number") is not None]
+    stars_pool = [int(x.get("number") or 0) for x in filtered_stars if x.get("number") is not None]
+
+    if len(mains_pool) < 5 or len(stars_pool) < 2:
+        raise HTTPException(
+            400,
+            detail="Pool too small to build Euromillones tickets (need at least 5 mains and 2 stars).",
+        )
+
+    date_str = (draw_date or "").strip()
+    if not date_str:
+        fecha = (doc.get("probs_fecha_sorteo") or "").strip()
+        date_str = fecha.split(" ")[0] or fecha
+    if not date_str:
+        last_draw_date = _get_last_draw_date("euromillones") or ""
+        date_str = last_draw_date.strip()[:10]
+    if not date_str:
+        raise HTTPException(400, detail="Cannot determine draw date for filename.")
+
+    # Mark status as waiting/running and launch background job so it survives UI refresh.
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    coll.update_one(
+        {"cutoff_draw_id": cid},
+        {
+            "$set": {
+                "full_wheel_status": "waiting",
+                "full_wheel_error": None,
+                "full_wheel_draw_date": date_str,
+                "full_wheel_file_path": None,
+                "full_wheel_total_tickets": 0,
+                "full_wheel_good_tickets": 0,
+                "full_wheel_bad_tickets": 0,
+                "full_wheel_generated_at": None,
+                "full_wheel_started_at": now,
+            }
+        },
+    )
+
+    def _run_full_wheel() -> None:
+        try:
+            stats = _generate_full_wheel_file_from_pool(
+                mains_pool=mains_pool,
+                stars_pool=stars_pool,
+                draw_date=date_str,
+            )
+            finished_at = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {
+                    "$set": {
+                        "full_wheel_status": "done",
+                        "full_wheel_draw_date": stats["draw_date"],
+                        "full_wheel_file_path": stats["file_path"],
+                        "full_wheel_total_tickets": stats["total_tickets"],
+                        "full_wheel_good_tickets": stats["good_tickets"],
+                        "full_wheel_bad_tickets": stats["bad_tickets"],
+                        "full_wheel_generated_at": finished_at,
+                    }
+                },
+            )
+        except Exception as e:
+            logging.exception("Error generating Euromillones full wheel: %s", e)
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {
+                    "$set": {
+                        "full_wheel_status": "error",
+                        "full_wheel_error": str(e),
+                    }
+                },
+            )
+
+    t = threading.Thread(target=_run_full_wheel, daemon=True)
+    t.start()
+
+    return JSONResponse(
+        content={
+            "status": "started",
+            "cutoff_draw_id": cid,
+            "draw_date": date_str,
+        }
+    )
+
+
+@app.get("/api/euromillones/train/full-wheel-preview")
+def api_euromillones_full_wheel_preview(
+    cutoff_draw_id: str = Query(..., description="id_sorteo for this training run."),
+    limit: int = Query(20, ge=1, le=200),
+):
+    """
+    Return a small preview of the full-wheeling ticket file for Euromillones.
+
+    - Reads full_wheel_file_path from euromillones_train_progress.
+    - Streams the first `limit` lines from the TXT file.
+    - Each line is parsed into { position, mains, stars }.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one({"cutoff_draw_id": cutoff_draw_id.strip()})
+    if not doc:
+        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+
+    path = (doc.get("full_wheel_file_path") or "").strip()
+    if not path:
+        return JSONResponse(
+            content={"tickets": [], "file_path": None, "total_tickets": doc.get("full_wheel_total_tickets") or 0},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    try:
+        tickets = []
+        with open(path, "r", encoding="utf-8") as f:
+            for _ in range(limit):
+                line = f.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    pos_str, mains_str, stars_str = line.split(";")
+                    position = int(pos_str)
+                    mains = [int(x) for x in mains_str.split(",") if x]
+                    stars = [int(x) for x in stars_str.split(",") if x]
+                except Exception:
+                    continue
+                tickets.append(
+                    {
+                        "position": position,
+                        "mains": mains,
+                        "stars": stars,
+                    }
+                )
+        return JSONResponse(
+            content={
+                "tickets": tickets,
+                "file_path": path,
+                "total_tickets": doc.get("full_wheel_total_tickets") or 0,
+            },
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    except FileNotFoundError:
+        raise HTTPException(404, detail="Full wheel file not found on disk")
 
 
 @app.post("/api/euromillones/train/candidate-pool")

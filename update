@@ -387,3 +387,46 @@ Activa
 El bot (bot.exe) debe tener en .env BOT_CREDENTIALS_SECRET igual que en el backend para obtener la cuenta activa. Si no, usará LOTTERY_LOGIN_USERNAME y LOTTERY_LOGIN_PASSWORD del .env.
 and instead of this display this on right with new card 
 and move user icon to right on header
+
+
+i will generate all case so pool size is 50,12 on euromillions and save result on DB
+now you generate only 3000 instead of this i will generate all C(20,5)*C(12,2) tickets
+and after i will find real result ticket position on DB
+and calculate all prize only prize and count like this
+Draw	Winner Position	1st Prize	2nd Prizes	3rd Prizes	4th Prizes ....
+Draw 1	80,000th	1	15	43	127 ...
+Draw 2	65,000th	1	18	51	142 ...
+Draw 3	58,000th	1	21	58	156 ...
+...	...	...	...	...	...
+Draw 500	18,000th	1	47	132	389 ...
+Draw 1,000	7,500th	1	68	201	574 ...
+and save result on DB and delete all genetate ticket on DB only save report like above
+
+bad tickets include continuse number  more than 3 example 22,23,24,25... or 24,25,23,22....
+all main number have same mod like 11,21,31,41,51.... and same quotient 23,24,28,26,21
+all main number odd or even like 22,34,18,46,44 : 11,43,27,39,41 ....
+
+2,118,760×66=139,838,160
+139,838,160
+
+Tier 0 (very good) – appears first
+
+Balanced even/odd (2–3 or 3–2).
+Spread over ≥3 decades (e.g. 3x: 10–19, 20–29, 40–49).
+Sum in a “normal” range (you can pick a band, e.g. 95–185).
+Tier 1 (normal)
+
+Not “bad”, but misses one of the Tier 0 conditions (sum a bit low/high, only 2 decades, etc.).
+Tier 2 (weak)
+
+Not “bad”, but has clearly weaker patterns (e.g. 4–1 even/odd split, very low or very high sum).
+Tier 3 (bad) (what you already mark as bad now):
+
+≥4 consecutive numbers, OR
+All same last digit or same decade, OR
+All odd or all even.
+
+while generating ticket on frontend have to show running time like this
+now "training time: 00:00:00"
+and disable Generar todo and Generar tickets (full wheel) buttons
+

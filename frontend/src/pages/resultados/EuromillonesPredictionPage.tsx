@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Card, Descriptions, Drawer, notification, Select, Spin, Steps, Table, Tag } from 'antd';
+import { Card, Descriptions, Drawer, notification, Spin, Steps, Table, Tag } from 'antd';
 import { useSearchParams } from 'react-router-dom';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
@@ -42,6 +42,22 @@ interface TrainProgress {
   candidate_pool?: { mains: number[]; stars: number[] }[];
   candidate_pool_at?: string;
   candidate_pool_count?: number;
+  full_wheel_draw_date?: string;
+  full_wheel_file_path?: string;
+  full_wheel_total_tickets?: number;
+  full_wheel_good_tickets?: number;
+  full_wheel_bad_tickets?: number;
+  full_wheel_generated_at?: string;
+   full_wheel_started_at?: string;
+  full_wheel_status?: 'waiting' | 'done' | 'error';
+  full_wheel_error?: string;
+  full_wheel_elapsed_seconds?: number;
+}
+
+interface FullWheelPreviewTicket {
+  position: number;
+  mains: number[];
+  stars: number[];
 }
 
 export function EuromillonesPredictionPage() {
@@ -54,8 +70,8 @@ export function EuromillonesPredictionPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerWidth, setDrawerWidth] = useState(420);
   const [currentDraw, setCurrentDraw] = useState<{ date: string; mains: number[]; stars: number[] } | null>(null);
-  const [candidateDisplayCount, setCandidateDisplayCount] = useState(20);
-  const CANDIDATE_COUNT_OPTIONS = [10, 20, 30, 50, 100, 300, 500, 1000, 2000, 3000];
+  const [fullWheelElapsed, setFullWheelElapsed] = useState('00:00:00');
+  const [fullWheelPreview, setFullWheelPreview] = useState<FullWheelPreviewTicket[] | null>(null);
 
   useEffect(() => {
     if (!cutoffDrawId) {
@@ -116,6 +132,51 @@ export function EuromillonesPredictionPage() {
     fetchProgress();
   }, [fetchProgress]);
 
+  // Local display string for training time, based on backend elapsed seconds.
+  useEffect(() => {
+    const secs = progress?.full_wheel_elapsed_seconds ?? 0;
+    const h = String(Math.floor(secs / 3600)).padStart(2, '0');
+    const m = String(Math.floor((secs % 3600) / 60)).padStart(2, '0');
+    const s = String(secs % 60).padStart(2, '0');
+    setFullWheelElapsed(`${h}:${m}:${s}`);
+  }, [progress?.full_wheel_elapsed_seconds]);
+
+  // Poll backend every 5 minutes while full wheel is running.
+  useEffect(() => {
+    if (!cutoffDrawId) return undefined;
+    if (progress?.full_wheel_status !== 'waiting') return undefined;
+    const id = window.setInterval(() => {
+      fetchProgress(true);
+    }, 5 * 60 * 1000);
+    return () => window.clearInterval(id);
+  }, [cutoffDrawId, progress?.full_wheel_status, fetchProgress]);
+
+  // Load a small preview of the full-wheel tickets when available
+  useEffect(() => {
+    const loadPreview = async () => {
+      if (!cutoffDrawId) {
+        setFullWheelPreview(null);
+        return;
+      }
+      if ((progress?.full_wheel_total_tickets ?? 0) <= 0) {
+        setFullWheelPreview(null);
+        return;
+      }
+      try {
+        const params = new URLSearchParams({ cutoff_draw_id: cutoffDrawId, limit: '20' });
+        const res = await fetch(`${API_URL}/api/euromillones/train/full-wheel-preview?${params.toString()}`, {
+          cache: 'no-store',
+        });
+        const data = await res.json();
+        if (!res.ok) return;
+        setFullWheelPreview((data.tickets as FullWheelPreviewTicket[]) ?? null);
+      } catch {
+        setFullWheelPreview(null);
+      }
+    };
+    loadPreview();
+  }, [cutoffDrawId, progress?.full_wheel_total_tickets]);
+
   // Current step from progress (so user sees "now I am in step 3")
   const currentStep = progress == null
     ? 0
@@ -171,17 +232,44 @@ export function EuromillonesPredictionPage() {
       await fetchProgress(true);
       await delay(3000);
       setRunningStep(4);
-      // Step 5: candidate pool
-      res = await fetch(`${API_URL}/api/euromillones/train/candidate-pool?cutoff_draw_id=${encodeURIComponent(cutoffDrawId)}&num_tickets=3000`, { method: 'POST' });
-      data = await res.json();
-      if (!res.ok) throw new Error((data as { detail?: string }).detail ?? 'Error generando pool');
-      await fetchProgress(true);
-      notification.success({ message: 'Pipeline completado', description: 'Pasos 1 a 5 ejecutados. Progreso guardado en la base de datos.', placement: 'topRight', duration: 4 });
+      notification.success({
+        message: 'Pipeline completado',
+        description: 'Pasos 1 a 4 ejecutados. Pool de números generado y guardado en la base de datos.',
+        placement: 'topRight',
+        duration: 4,
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Error en el pipeline';
       notification.error({ message: 'Error', description: msg, placement: 'topRight', duration: 5 });
     } finally {
       setRunAllLoading(false);
+    }
+  };
+
+  const handleGenerateFullWheel = async () => {
+    if (!cutoffDrawId) return;
+    try {
+      const params = new URLSearchParams({ cutoff_draw_id: cutoffDrawId });
+      if (currentDraw?.date) {
+        params.set('draw_date', currentDraw.date);
+      }
+      const res = await fetch(`${API_URL}/api/euromillones/train/full-wheel?${params.toString()}`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (!res.ok || data.status !== 'started') {
+        throw new Error((data as { detail?: string }).detail ?? 'Error iniciando generación de tickets (full wheeling)');
+      }
+      notification.success({
+        message: 'Generación iniciada (full wheeling)',
+        description: 'La generación del archivo de tickets se está ejecutando en segundo plano. Este proceso puede tardar varios minutos.',
+        placement: 'topRight',
+        duration: 6,
+      });
+      await fetchProgress(true);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Error iniciando generación de tickets (full wheeling)';
+      notification.error({ message: 'Error', description: msg, placement: 'topRight', duration: 6 });
     }
   };
 
@@ -231,11 +319,13 @@ export function EuromillonesPredictionPage() {
       title: 'Pool de candidatos',
       status: runAllLoading
         ? (runningStep >= 4 ? ('process' as const) : ('wait' as const))
-        : (progress?.candidate_pool_count ?? 0) > 0
-          ? ('finish' as const)
-          : currentStep === 4
-            ? ('process' as const)
-            : ('wait' as const),
+        : progress?.full_wheel_status === 'waiting'
+          ? ('process' as const)
+          : (progress?.full_wheel_total_tickets ?? 0) > 0
+            ? ('finish' as const)
+            : currentStep === 4
+              ? ('process' as const)
+              : ('wait' as const),
     },
   ];
 
@@ -250,10 +340,10 @@ export function EuromillonesPredictionPage() {
           alignItems: 'flex-start',
         }}
       >
-        {/* Left: table — 17 parts (no card, no fixed height) */}
-        <div style={{ flex: '17 1 0%', minWidth: 0, display: 'flex', flexDirection: 'column' }} className="euromillones-train-table-col">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        {/* Left: filtered pool + preview table */}
+        <div style={{ flex: '17 1 0%', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }} className="euromillones-train-table-col">
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
               <button
                 type="button"
                 className="resultados-features-iconbtn"
@@ -264,41 +354,39 @@ export function EuromillonesPredictionPage() {
                 ← Volver
               </button>
               <h4 className="resultados-features-chart-title" style={{ margin: 0 }}>
-                Pool de candidatos{progress?.candidate_pool_count != null ? `: ${progress.candidate_pool_count} boletos` : ''}
+                Pool filtrado de números
               </h4>
             </div>
-            <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
-              Mostrar:
-              <Select
-                value={candidateDisplayCount}
-                onChange={setCandidateDisplayCount}
-                options={CANDIDATE_COUNT_OPTIONS.map((n) => ({ label: String(n), value: n }))}
-                style={{ width: 90 }}
-                size="small"
-              />
-            </span>
+            {/* Intentionally no detailed text here; pool info is used internally. */}
           </div>
-          <Table
-            size="small"
-            dataSource={
-              (progress?.candidate_pool ?? [])
-                .slice(0, candidateDisplayCount)
-                .map((t, i) => ({
-                  key: i,
-                  index: i + 1,
-                  mainsStr: (t.mains ?? []).join(' '),
-                  starsStr: (t.stars ?? []).join(' '),
-                }))
-            }
-            columns={[
-              { title: '#', dataIndex: 'index', key: 'index', width: 56 },
-              { title: 'Mains', dataIndex: 'mainsStr', key: 'mains' },
-              { title: 'Stars', dataIndex: 'starsStr', key: 'stars', width: 80 },
-            ]}
-            pagination={false}
-            scroll={{ x: 320 }}
-            locale={{ emptyText: 'Sin datos. Pulsa "Generar todo" para ejecutar el pipeline.' }}
-          />
+
+          <div>
+            <h4 className="resultados-features-chart-title" style={{ margin: '8px 0' }}>
+              Pool de candidatos (preview)
+            </h4>
+            <Table
+              size="small"
+              dataSource={(fullWheelPreview ?? []).map((t) => ({
+                key: t.position,
+                index: t.position,
+                mainsStr: (t.mains ?? []).join(' '),
+                starsStr: (t.stars ?? []).join(' '),
+              }))}
+              columns={[
+                { title: '#', dataIndex: 'index', key: 'index', width: 56 },
+                { title: 'Mains', dataIndex: 'mainsStr', key: 'mains' },
+                { title: 'Stars', dataIndex: 'starsStr', key: 'stars', width: 80 },
+              ]}
+              pagination={false}
+              scroll={{ x: 320 }}
+              locale={{
+                emptyText:
+                  progress?.full_wheel_status === 'waiting'
+                    ? 'Generando full wheel...'
+                    : 'Sin datos. Pulsa "Generar tickets (full wheel)" para generar el pool completo.',
+              }}
+            />
+          </div>
         </div>
 
         {/* Right: step card — 7 parts (own card) */}
@@ -317,7 +405,7 @@ export function EuromillonesPredictionPage() {
                 <button
                   type="button"
                   className="resultados-features-iconbtn"
-                  disabled={runAllLoading || !cutoffDrawId}
+                  disabled={runAllLoading || !cutoffDrawId || progress?.full_wheel_status === 'waiting'}
                   onClick={runAllPipeline}
                   style={{
                     padding: '10px 18px',
@@ -333,12 +421,45 @@ export function EuromillonesPredictionPage() {
                   {runAllLoading ? (
                     <>
                       <Spin size="small" style={{ marginRight: 8 }} />
-                      Ejecutando… (paso {displayStep + 1}/5)
+                      Ejecutando… (paso {displayStep + 1}/4)
                     </>
                   ) : (
                     'Generar todo'
                   )}
                 </button>
+                <button
+                  type="button"
+                  className="resultados-features-iconbtn"
+                  disabled={
+                    !cutoffDrawId ||
+                    !progress?.rules_applied ||
+                    progress.full_wheel_status === 'waiting' ||
+                    progress.full_wheel_status === 'done'
+                  }
+                  onClick={handleGenerateFullWheel}
+                  style={{
+                    padding: '8px 16px',
+                    borderRadius: 999,
+                    border: '1px solid var(--color-border)',
+                    background: 'transparent',
+                    color: 'var(--color-text)',
+                    fontSize: '0.9rem',
+                  }}
+                >
+                  {progress?.full_wheel_status === 'waiting'
+                    ? 'Generando tickets…'
+                    : 'Generar tickets (full wheel)'}
+                </button>
+                {progress?.full_wheel_status === 'waiting' && (
+                  <span
+                    style={{
+                      fontSize: '0.8rem',
+                      color: 'var(--color-text-muted)',
+                    }}
+                  >
+                    training time: {fullWheelElapsed}
+                  </span>
+                )}
                 <button
                   type="button"
                   className="resultados-features-iconbtn"
@@ -412,9 +533,18 @@ export function EuromillonesPredictionPage() {
                 {progress.rules_applied ? <Tag color="success">Hecho</Tag> : <Tag>Pendiente</Tag>}
                 {progress.rule_flags?.rules_used?.length ? ` · ${progress.rule_flags.rules_used.join(', ')}` : ''}
               </Descriptions.Item>
-              <Descriptions.Item label="5. Pool de candidatos">
-                {(progress.candidate_pool_count ?? 0) > 0 ? <Tag color="success">Hecho</Tag> : <Tag>Pendiente</Tag>}
-                {progress.candidate_pool_count != null && ` · ${progress.candidate_pool_count} boletos`}
+              <Descriptions.Item label="5. Pool de candidatos (full wheel)">
+                {progress.full_wheel_status === 'waiting' ? (
+                  <Tag color="processing">En curso</Tag>
+                ) : (progress.full_wheel_total_tickets ?? 0) > 0 ? (
+                  <Tag color="success">Hecho</Tag>
+                ) : progress.full_wheel_status === 'error' ? (
+                  <Tag color="error">Error</Tag>
+                ) : (
+                  <Tag>Pendiente</Tag>
+                )}
+                {progress.full_wheel_total_tickets != null &&
+                  ` · ${progress.full_wheel_total_tickets} tickets (buenos: ${progress.full_wheel_good_tickets ?? 0}, penalizados: ${progress.full_wheel_bad_tickets ?? 0})`}
               </Descriptions.Item>
             </Descriptions>
             {(progress.filtered_mains_probs?.length || progress.filtered_stars_probs?.length) ? (

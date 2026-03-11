@@ -8,3 +8,7 @@ node_modules
 __pycache__
 .venv
 frontend/public
+backend/data
+video.mp4
+Lottery-Prediction-System.pptx
+bot.rar

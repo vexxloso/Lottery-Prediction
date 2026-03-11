@@ -152,11 +152,28 @@ export function SimulationPage() {
   const [comparePoolLimit, setComparePoolLimit] = useState(20);
   /** La Primitiva: which ticket pool to compare vs real result — prediction or bought. */
   const [compareLaPrimitivaSource, setCompareLaPrimitivaSource] = useState<'prediction' | 'bought'>('prediction');
-  /** Euromillones: which ticket pool to compare vs real result — prediction or bought. */
-  const [compareEuromillonesSource, setCompareEuromillonesSource] = useState<'prediction' | 'bought'>('prediction');
+  const [compareEuromillonesSource, setCompareEuromillonesSource] = useState<'prediction' | 'bought' | 'fullwheel'>(
+    'fullwheel',
+  );
   /** El Gordo: which ticket pool to compare vs real result — prediction or bought. */
   const [compareElGordoSource, setCompareElGordoSource] = useState<'prediction' | 'bought'>('prediction');
   const [showComparePoolTable, setShowComparePoolTable] = useState(false);
+  // Euromillones: cached result from full-wheel compare endpoint (euromillones_compare_results)
+  const [euromillonesFullWheelLoading, setEuromillonesFullWheelLoading] = useState(false);
+  const [euromillonesFullWheelError, setEuromillonesFullWheelError] = useState('');
+  const [euromillonesFullWheelResult, setEuromillonesFullWheelResult] = useState<{
+    current_id: string;
+    date: string | null;
+    pre_id: string;
+    jackpot_position: number | null;
+    second_positions?: number[];
+    third_positions?: number[];
+    fourth_positions?: number[];
+    categories: { category: string; count: number; earning: number }[];
+    total_tickets: number;
+    earning: number;
+    ticket_cost: number;
+  } | null>(null);
   const [featureRowsLoading, setFeatureRowsLoading] = useState(false);
   const [featureRowsError, setFeatureRowsError] = useState('');
   const [featureRows, setFeatureRows] = useState<EuromillonesFeatureRow[]>([]);
@@ -236,6 +253,79 @@ export function SimulationPage() {
     void loadSavedSimulation();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, drawId]);
+
+  // Euromillones compare: load aggregated full-wheel result (from backend compare endpoint) when needed
+  useEffect(() => {
+    if (
+      slug !== 'euromillones' ||
+      view !== 'compare' ||
+      compareEuromillonesSource !== 'fullwheel'
+    ) {
+      // When leaving this view/tab, keep last result but clear loading/error
+      setEuromillonesFullWheelLoading(false);
+      setEuromillonesFullWheelError('');
+      return;
+    }
+    const prevId = searchParams.get('prev_id')?.trim();
+    if (!drawId || !prevId) {
+      setEuromillonesFullWheelResult(null);
+      setEuromillonesFullWheelError('');
+      setEuromillonesFullWheelLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setEuromillonesFullWheelLoading(true);
+    setEuromillonesFullWheelError('');
+    const params = new URLSearchParams({ current_id: drawId, pre_id: prevId });
+    fetch(`${API_URL}/api/euromillones/compare/full-wheel?${params.toString()}`)
+      .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
+      .then(({ ok, data }) => {
+        if (cancelled) return;
+        if (!ok || data.detail) {
+          setEuromillonesFullWheelResult(null);
+          setEuromillonesFullWheelError(
+            typeof data.detail === 'string'
+              ? data.detail
+              : 'Error al cargar comparación full wheel',
+          );
+          return;
+        }
+        setEuromillonesFullWheelResult({
+          current_id: String(data.current_id ?? drawId),
+          date: data.date ?? null,
+          pre_id: String(data.pre_id ?? prevId),
+          jackpot_position:
+            typeof data.jackpot_position === 'number' ? data.jackpot_position : null,
+          second_positions: Array.isArray(data.second_positions)
+            ? data.second_positions.map((n: unknown) => Number(n)).filter((n: number) => Number.isFinite(n))
+            : undefined,
+          third_positions: Array.isArray(data.third_positions)
+            ? data.third_positions.map((n: unknown) => Number(n)).filter((n: number) => Number.isFinite(n))
+            : undefined,
+          fourth_positions: Array.isArray(data.fourth_positions)
+            ? data.fourth_positions.map((n: unknown) => Number(n)).filter((n: number) => Number.isFinite(n))
+            : undefined,
+          categories: Array.isArray(data.categories) ? data.categories : [],
+          total_tickets: Number(data.total_tickets ?? 0),
+          earning: Number(data.earning ?? 0),
+          ticket_cost: Number(data.ticket_cost ?? 0),
+        });
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setEuromillonesFullWheelResult(null);
+        setEuromillonesFullWheelError(
+          e instanceof Error ? e.message : 'Error al cargar comparación full wheel',
+        );
+      })
+      .finally(() => {
+        if (!cancelled) return;
+        setEuromillonesFullWheelLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slug, view, compareEuromillonesSource, searchParams, drawId, API_URL]);
 
   // Load Euromillones feature-model rows for Prediction tab
   useEffect(() => {
@@ -848,7 +938,7 @@ export function SimulationPage() {
                               : slug === 'euromillones'
                                 ? compareEuromillonesSource === 'bought'
                                   ? 'Boletos comprados'
-                                  : 'Predicción'
+                                  : 'Full wheel'
                                 : slug === 'el-gordo'
                                   ? compareElGordoSource === 'bought'
                                     ? 'Boletos comprados'
@@ -862,35 +952,48 @@ export function SimulationPage() {
                               aria-label="Origen de boletos"
                               style={{ marginBottom: '0.5rem', gap: 0 }}
                             >
-                              <button
-                                type="button"
-                                role="tab"
-                                aria-selected={
-                                  slug === 'la-primitiva'
-                                    ? compareLaPrimitivaSource === 'prediction'
-                                    : slug === 'euromillones'
-                                      ? compareEuromillonesSource === 'prediction'
+                              {slug !== 'euromillones' && (
+                                <button
+                                  type="button"
+                                  role="tab"
+                                  aria-selected={
+                                    slug === 'la-primitiva'
+                                      ? compareLaPrimitivaSource === 'prediction'
                                       : compareElGordoSource === 'prediction'
-                                }
-                                className={`resultados-tab ${
-                                  (slug === 'la-primitiva'
-                                    ? compareLaPrimitivaSource
-                                    : slug === 'euromillones'
-                                      ? compareEuromillonesSource
+                                  }
+                                  className={`resultados-tab ${
+                                    (slug === 'la-primitiva'
+                                      ? compareLaPrimitivaSource
                                       : compareElGordoSource) === 'prediction'
-                                    ? 'resultados-tab--active'
-                                    : ''
-                                }`}
-                                onClick={() =>
-                                  slug === 'la-primitiva'
-                                    ? setCompareLaPrimitivaSource('prediction')
-                                    : slug === 'euromillones'
-                                      ? setCompareEuromillonesSource('prediction')
+                                      ? 'resultados-tab--active'
+                                      : ''
+                                  }`}
+                                  onClick={() =>
+                                    slug === 'la-primitiva'
+                                      ? setCompareLaPrimitivaSource('prediction')
                                       : setCompareElGordoSource('prediction')
-                                }
-                              >
-                                Predicción
-                              </button>
+                                  }
+                                >
+                                  Predicción
+                                </button>
+                              )}
+                              {/* For Euromillones: Full wheel first, then Boletos comprados.
+                                  For others: only Boletos comprados. */}
+                              {slug === 'euromillones' && (
+                                <button
+                                  type="button"
+                                  role="tab"
+                                  aria-selected={compareEuromillonesSource === 'fullwheel'}
+                                  className={`resultados-tab ${
+                                    compareEuromillonesSource === 'fullwheel'
+                                      ? 'resultados-tab--active'
+                                      : ''
+                                  }`}
+                                  onClick={() => setCompareEuromillonesSource('fullwheel')}
+                                >
+                                  Full wheel
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 role="tab"
@@ -943,7 +1046,9 @@ export function SimulationPage() {
                         >
                           {!(
                             (slug === 'la-primitiva' && compareLaPrimitivaSource === 'bought') ||
-                            (slug === 'euromillones' && compareEuromillonesSource === 'bought') ||
+                            (slug === 'euromillones' &&
+                              (compareEuromillonesSource === 'bought' ||
+                                compareEuromillonesSource === 'fullwheel')) ||
                             (slug === 'el-gordo' && compareElGordoSource === 'bought')
                           ) && (
                             <label
@@ -1039,6 +1144,110 @@ export function SimulationPage() {
                       </div>
 
                       {(() => {
+                        // Euromillones: Full wheel tab — show aggregated result from backend and skip per-ticket table.
+                        if (slug === 'euromillones' && compareEuromillonesSource === 'fullwheel') {
+                          if (euromillonesFullWheelLoading && !euromillonesFullWheelResult) {
+                            return (
+                              <p style={{ margin: '0.5rem 0 0' }}>
+                                Calculando comparación full wheel…
+                              </p>
+                            );
+                          }
+                          if (euromillonesFullWheelError && !euromillonesFullWheelLoading) {
+                            return (
+                              <p style={{ margin: '0.5rem 0 0', color: 'var(--color-error)' }}>
+                                {euromillonesFullWheelError}
+                              </p>
+                            );
+                          }
+                          if (!euromillonesFullWheelResult) {
+                            return null;
+                          }
+                          const r = euromillonesFullWheelResult;
+                          return (
+                            <div style={{ marginTop: 'var(--space-md)' }}>
+                              <div className="resultados-features-table-wrap" style={{ marginBottom: 'var(--space-sm)' }}>
+                                <table className="resultados-features-table">
+                                  <thead>
+                                    <tr>
+                                      <th>Categoría</th>
+                                      <th>Count</th>
+                                      <th>Earning</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {r.categories.map((row) => {
+                                      let tooltip: string | undefined;
+                                      if (row.category.startsWith('1th') && r.jackpot_position != null) {
+                                        tooltip = `Jackpot en posición ${r.jackpot_position.toLocaleString()}`;
+                                      } else if (row.category.startsWith('2th') && r.second_positions?.length) {
+                                        tooltip = `Primera 2ª categoría en posición ${r.second_positions[0].toLocaleString()}`;
+                                      } else if (row.category.startsWith('3th') && r.third_positions?.length) {
+                                        tooltip = `Primera 3ª categoría en posición ${r.third_positions[0].toLocaleString()}`;
+                                      } else if (row.category.startsWith('4th') && r.fourth_positions?.length) {
+                                        tooltip = `Primera 4ª categoría en posición ${r.fourth_positions[0].toLocaleString()}`;
+                                      }
+                                      return (
+                                        <tr key={row.category} title={tooltip}>
+                                          <td>{row.category}</td>
+                                          <td>{row.count}</td>
+                                          <td>
+                                            {row.earning.toLocaleString('es-ES', {
+                                              minimumFractionDigits: 2,
+                                              maximumFractionDigits: 2,
+                                            })}{' '}
+                                            €
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                              <div
+                                style={{
+                                  display: 'flex',
+                                  flexWrap: 'wrap',
+                                  gap: '1rem',
+                                  fontSize: '0.95rem',
+                                }}
+                              >
+                                <span>
+                                  <strong>Total boletos:</strong> {r.total_tickets.toLocaleString()}
+                                </span>
+                                <span>
+                                  <strong>Coste:</strong>{' '}
+                                  {r.ticket_cost.toLocaleString('es-ES', {
+                                    minimumFractionDigits: 2,
+                                  })}{' '}
+                                  €
+                                </span>
+                                <span>
+                                  <strong>Premio total:</strong>{' '}
+                                  {r.earning.toLocaleString('es-ES', {
+                                    minimumFractionDigits: 2,
+                                  })}{' '}
+                                  €
+                                </span>
+                                <span
+                                  style={{
+                                    color:
+                                      r.earning - r.ticket_cost >= 0
+                                        ? 'var(--color-success)'
+                                        : 'var(--color-error)',
+                                  }}
+                                >
+                                  <strong>Ganancia:</strong>{' '}
+                                  {(r.earning - r.ticket_cost).toLocaleString('es-ES', {
+                                    minimumFractionDigits: 2,
+                                  })}{' '}
+                                  €
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        }
+
                         const pool = comparePool;
                         const limit =
                           (slug === 'la-primitiva' && compareLaPrimitivaSource === 'bought') ||
@@ -1457,7 +1666,9 @@ export function SimulationPage() {
                         )}
                       </div>
 
-                      {compareProgress && (
+                      {compareProgress && !(
+                        slug === 'euromillones' && compareEuromillonesSource === 'fullwheel'
+                      ) && (
                         (() => {
                           const pool =
                             slug === 'la-primitiva'
@@ -1591,6 +1802,73 @@ export function SimulationPage() {
                           );
                         })()
                       )}
+
+                      {/* Euromillones full-wheel summary card on the right column */}
+                      {slug === 'euromillones' &&
+                        compareEuromillonesSource === 'fullwheel' &&
+                        euromillonesFullWheelResult && (
+                          <div
+                            className="euromillones-train-current-draw-card"
+                            style={{ marginTop: 'var(--space-md)', padding: 'var(--space-md)' }}
+                          >
+                            <div
+                              style={{
+                                fontSize: '0.75rem',
+                                color: 'var(--color-text-muted)',
+                                marginBottom: 'var(--space-xs)',
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.04em',
+                              }}
+                            >
+                              Resumen full wheel
+                            </div>
+                            <div style={{ fontSize: '0.9rem', display: 'grid', rowGap: 4 }}>
+                              <div>
+                                <strong>Total boletos</strong>{' '}
+                                {euromillonesFullWheelResult.total_tickets.toLocaleString()}
+                              </div>
+                              <div>
+                                <strong>Coste total</strong>{' '}
+                                {euromillonesFullWheelResult.ticket_cost.toLocaleString('es-ES', {
+                                  minimumFractionDigits: 2,
+                                })}{' '}
+                                €
+                              </div>
+                              <div>
+                                <strong>Premio total</strong>{' '}
+                                {euromillonesFullWheelResult.earning.toLocaleString('es-ES', {
+                                  minimumFractionDigits: 2,
+                                })}{' '}
+                                €
+                              </div>
+                              <div>
+                                <strong>Ganancia</strong>{' '}
+                                <span
+                                  style={{
+                                    color:
+                                      euromillonesFullWheelResult.earning -
+                                        euromillonesFullWheelResult.ticket_cost >
+                                      0
+                                        ? 'var(--color-success, green)'
+                                        : euromillonesFullWheelResult.earning -
+                                            euromillonesFullWheelResult.ticket_cost <
+                                          0
+                                          ? 'var(--color-error, #c00)'
+                                          : 'inherit',
+                                  }}
+                                >
+                                  {(
+                                    euromillonesFullWheelResult.earning -
+                                    euromillonesFullWheelResult.ticket_cost
+                                  ).toLocaleString('es-ES', {
+                                    minimumFractionDigits: 2,
+                                  })}{' '}
+                                  €
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
                     </>
                   )}
                 </section>
