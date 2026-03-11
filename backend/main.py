@@ -1311,7 +1311,7 @@ ADMIN_PASSWORD = (os.getenv("ADMIN_PASSWORD") or "").strip() or None
 _valid_tokens: dict[str, float] = {}  # token -> expiry timestamp
 TOKEN_TTL_SEC = 24 * 3600  # 24 hours
 
-# Paths that do not require Authorization Bearer token (health, login, bot claim/complete, bot active-credentials)
+# Paths that do not require Authorization Bearer token (health, login, bot claim/complete, bot active-credentials, dev test helpers)
 _PUBLIC_API_PATHS = {
     "/api/health",
     "/api/auth/verify",
@@ -1322,6 +1322,8 @@ _PUBLIC_API_PATHS = {
     "/api/euromillones/betting/bot/complete",
     "/api/la-primitiva/betting/bot/claim",
     "/api/la-primitiva/betting/bot/complete",
+    # Dev-only helper to seed test bought tickets for Euromillones. Do NOT expose in production.
+    "/api/dev/euromillones/betting/seed-test-bought",
 }
 
 
@@ -3092,6 +3094,55 @@ def api_euromillones_compare_full_wheel(
     return JSONResponse(content=_item_to_json(result))
 
 
+@app.get("/api/euromillones/compare/analysis")
+def api_euromillones_compare_analysis(
+    limit: int = Query(200, ge=1, le=1000, description="Max rows to return, sorted by date desc"),
+):
+    """
+    Analysis of Euromillones full-wheel compares.
+    Reads euromillones_compare_results and returns rows sorted by date desc:
+      - date
+      - jackpot_position (1th)
+      - first 2th position
+      - first 3th position
+      - first 4th position
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    coll = db[EUROMILLONES_COMPARE_RESULTS_COLLECTION]
+    cursor = coll.find(
+        {},
+        projection={
+            "_id": 0,
+            "date": 1,
+            "jackpot_position": 1,
+            "second_positions": 1,
+            "third_positions": 1,
+            "fourth_positions": 1,
+            "current_id": 1,
+            "pre_id": 1,
+        },
+    ).sort("date", -1).limit(limit)
+    rows = []
+    for doc in cursor:
+        date_str = (doc.get("date") or "")[:10]
+        second_positions = doc.get("second_positions") or []
+        third_positions = doc.get("third_positions") or []
+        fourth_positions = doc.get("fourth_positions") or []
+        rows.append(
+            {
+                "date": date_str,
+                "current_id": str(doc.get("current_id") or ""),
+                "pre_id": str(doc.get("pre_id") or ""),
+                "pos_1th": int(doc.get("jackpot_position") or 0),
+                "pos_2th": int(second_positions[0]) if second_positions else None,
+                "pos_3th": int(third_positions[0]) if third_positions else None,
+                "pos_4th": int(fourth_positions[0]) if fourth_positions else None,
+            }
+        )
+    return JSONResponse(content={"rows": rows})
+
+
 @app.get("/api/euromillones/compare/full-wheel/tickets")
 def api_euromillones_compare_full_wheel_tickets(
     current_id: str = Query(..., description="id_sorteo of the draw (result)."),
@@ -3387,6 +3438,66 @@ async def api_euromillones_betting_bought(request: Request):
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
 
+
+@app.post("/api/dev/euromillones/betting/seed-test-bought")
+def api_dev_euromillones_seed_test_bought(
+    cutoff_draw_id: str = Query("", description="cutoff_draw_id of euromillones_train_progress doc to seed"),
+):
+    """
+    DEV-ONLY: seed some test bought tickets into euromillones_train_progress.bought_tickets.
+    This endpoint is public (no Authorization). Do NOT enable in production.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    cutoff = cutoff_draw_id.strip()
+    if not cutoff:
+        # Fallback to last cutoff_draw_id from train progress
+        coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+        doc = coll.find_one(
+            projection={"cutoff_draw_id": 1},
+            sort=[("probs_fecha_sorteo", -1), ("_id", -1)],
+        )
+        if not doc:
+            raise HTTPException(404, detail="No euromillones_train_progress doc found to seed")
+        cutoff = str(doc.get("cutoff_draw_id") or "").strip()
+        if not cutoff and isinstance(doc.get("cutoff_draw_id"), int):
+            cutoff = str(doc.get("cutoff_draw_id"))
+        if not cutoff:
+            raise HTTPException(400, detail="cutoff_draw_id missing and cannot infer last one")
+
+    tickets = [
+        {"mains": [3, 12, 25, 36, 44], "stars": [2, 9]},
+        {"mains": [5, 19, 28, 37, 45], "stars": [1, 6]},
+        {"mains": [7, 14, 21, 35, 42], "stars": [3, 11]},
+        {"mains": [1, 2, 3, 4, 5], "stars": [1, 2]},
+        {"mains": [10, 20, 30, 40, 50], "stars": [7, 8]},
+    ]
+
+    coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    # Try string cutoff_draw_id then int
+    doc = coll.find_one({"cutoff_draw_id": cutoff})
+    if not doc and cutoff.isdigit():
+        doc = coll.find_one({"cutoff_draw_id": int(cutoff)})
+    if not doc:
+        raise HTTPException(404, detail=f"euromillones_train_progress not found for cutoff_draw_id={cutoff}")
+
+    coll.update_one(
+        {"_id": doc["_id"]},
+        {
+            "$set": {
+                "bought_tickets": tickets,
+                "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        },
+    )
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "cutoff_draw_id": cutoff,
+            "saved_count": len(tickets),
+        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
 
 @app.post("/api/euromillones/betting/enqueue")
 async def api_euromillones_betting_enqueue(request: Request):

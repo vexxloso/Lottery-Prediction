@@ -5,16 +5,19 @@ import { EuromillonesFeaturesPanel } from './EuromillonesFeaturesPanel';
 import { EuromillonesApuestasPanel } from './EuromillonesApuestasPanel';
 import { EuromillonesPredictionPage } from './EuromillonesPredictionPage';
 import { EuromillonesBettingPanel } from './EuromillonesBettingPanel';
+import { EuromillonesAnalysisPage } from './EuromillonesAnalysisPage';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
-type EuromillonesTab = 'results' | 'prediction' | 'grafico' | 'apuestas';
+ type EuromillonesTab = 'results' | 'prediction' | 'grafico' | 'apuestas' | 'analisis';
 
 export function ResultadosEuromillones() {
   const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = (searchParams.get('tab') as EuromillonesTab | null) ?? 'results';
   const activeTab: EuromillonesTab =
-    tabParam === 'prediction' || tabParam === 'grafico' || tabParam === 'apuestas' ? tabParam : 'results';
+    tabParam === 'prediction' || tabParam === 'grafico' || tabParam === 'apuestas' || tabParam === 'analisis'
+      ? tabParam
+      : 'results';
   const hasCutoffDraw = !!searchParams.get('cutoff_draw_id');
 
   const setActiveTab = useCallback(
@@ -82,6 +85,15 @@ export function ResultadosEuromillones() {
         >
           Apuestas
         </button>
+        <button
+          type="button"
+          className={`resultados-tab ${activeTab === 'analisis' ? 'resultados-tab--active' : ''}`}
+          role="tab"
+          aria-selected={activeTab === 'analisis'}
+          onClick={() => setActiveTab('analisis')}
+        >
+          Análisis
+        </button>
       </div>
 
       <div className="resultados-tab-content">
@@ -99,6 +111,11 @@ export function ResultadosEuromillones() {
         {activeTab === 'apuestas' && (
           <div className="resultados-euromillones-features">
             <EuromillonesBettingPanel />
+          </div>
+        )}
+        {activeTab === 'analisis' && (
+          <div className="resultados-euromillones-features">
+            <EuromillonesAnalysisPage />
           </div>
         )}
       </div>
