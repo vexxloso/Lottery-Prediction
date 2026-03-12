@@ -155,8 +155,8 @@ export function SimulationPage() {
   const [compareEuromillonesSource, setCompareEuromillonesSource] = useState<'prediction' | 'bought' | 'fullwheel'>(
     'fullwheel',
   );
-  /** El Gordo: which ticket pool to compare vs real result — prediction or bought. */
-  const [compareElGordoSource, setCompareElGordoSource] = useState<'prediction' | 'bought'>('prediction');
+  /** El Gordo: which ticket pool to compare vs real result — prediction, bought, or full wheel. */
+  const [compareElGordoSource, setCompareElGordoSource] = useState<'prediction' | 'bought' | 'fullwheel'>('prediction');
   const [showComparePoolTable, setShowComparePoolTable] = useState(false);
   // Euromillones: cached result from full-wheel compare endpoint (euromillones_compare_results)
   const [euromillonesFullWheelLoading, setEuromillonesFullWheelLoading] = useState(false);
@@ -181,6 +181,25 @@ export function SimulationPage() {
   const [euromillonesFullWheelTicketsPage, setEuromillonesFullWheelTicketsPage] = useState(1);
   const [euromillonesFullWheelTicketsLoading, setEuromillonesFullWheelTicketsLoading] = useState(false);
   const [showEuromillonesFullWheelTickets, setShowEuromillonesFullWheelTickets] = useState(false);
+  // El Gordo: cached result from full-wheel compare endpoint (el_gordo_compare_results)
+  const [elGordoFullWheelLoading, setElGordoFullWheelLoading] = useState(false);
+  const [elGordoFullWheelError, setElGordoFullWheelError] = useState('');
+  const [elGordoFullWheelResult, setElGordoFullWheelResult] = useState<{
+    current_id: string;
+    date: string | null;
+    pre_id: string;
+    jackpot_position: number | null;
+    pos_2th: number | null;
+    pos_3th: number | null;
+    pos_4th: number | null;
+    categories: {
+      category: string;
+      main_hits: number;
+      clave_hit: number;
+      first_position: number;
+      count: number;
+    }[];
+  } | null>(null);
   const [featureRowsLoading, setFeatureRowsLoading] = useState(false);
   const [featureRowsError, setFeatureRowsError] = useState('');
   const [featureRows, setFeatureRows] = useState<EuromillonesFeatureRow[]>([]);
@@ -349,6 +368,85 @@ export function SimulationPage() {
       cancelled = true;
     };
   }, [slug, view, compareEuromillonesSource, searchParams, drawId, API_URL]);
+
+  // El Gordo compare: load aggregated full-wheel result (from backend compare endpoint) when needed
+  useEffect(() => {
+    if (
+      slug !== 'el-gordo' ||
+      view !== 'compare' ||
+      compareElGordoSource !== 'fullwheel'
+    ) {
+      setElGordoFullWheelLoading(false);
+      setElGordoFullWheelError('');
+      return;
+    }
+    const prevId = searchParams.get('prev_id')?.trim();
+    if (!drawId || !prevId) {
+      setElGordoFullWheelResult(null);
+      setElGordoFullWheelError('');
+      setElGordoFullWheelLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setElGordoFullWheelLoading(true);
+    setElGordoFullWheelError('');
+    const params = new URLSearchParams({ current_id: drawId, pre_id: prevId });
+    const url = `${API_URL}/api/el-gordo/compare/full-wheel/reorder?${params.toString()}`;
+    const maxRetries = 3;
+    const retryDelayMs = 2000;
+
+    const tryFetch = (attempt: number): Promise<void> =>
+      fetch(url, { method: 'POST' })
+        .then((res) => res.json().then((data) => ({ ok: res.ok, status: res.status, data })))
+        .then(({ ok, status, data }) => {
+          if (cancelled) return;
+          if (status === 503 && attempt < maxRetries) {
+            setElGordoFullWheelError(
+              `Calculando comparación full wheel El Gordo… (${attempt + 1}/${maxRetries})`,
+            );
+            return new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs)).then(() =>
+              tryFetch(attempt + 1),
+            );
+          }
+          if (!ok || data.detail) {
+            setElGordoFullWheelResult(null);
+            setElGordoFullWheelError(
+              status === 503
+                ? 'Calculando comparación full wheel El Gordo…'
+                : typeof data.detail === 'string'
+                  ? data.detail
+                  : 'Error al cargar comparación full wheel El Gordo',
+            );
+            return;
+          }
+          setElGordoFullWheelResult({
+            current_id: String(data.current_id ?? drawId),
+            date: data.date ?? null,
+            pre_id: String(data.pre_id ?? prevId),
+            jackpot_position:
+              typeof data.jackpot_position === 'number' ? data.jackpot_position : null,
+            pos_2th: typeof data.pos_2th === 'number' ? data.pos_2th : null,
+            pos_3th: typeof data.pos_3th === 'number' ? data.pos_3th : null,
+            pos_4th: typeof data.pos_4th === 'number' ? data.pos_4th : null,
+            categories: Array.isArray(data.categories) ? data.categories : [],
+          });
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          setElGordoFullWheelResult(null);
+          setElGordoFullWheelError(
+            e instanceof Error ? e.message : 'Error al cargar comparación full wheel El Gordo',
+          );
+        })
+        .finally(() => {
+          if (!cancelled) setElGordoFullWheelLoading(false);
+        });
+
+    void tryFetch(0);
+    return () => {
+      cancelled = true;
+    };
+  }, [slug, view, compareElGordoSource, searchParams, drawId, API_URL]);
 
   // Load Euromillones feature-model rows for Prediction tab
   useEffect(() => {
@@ -1010,7 +1108,9 @@ export function SimulationPage() {
                                 : slug === 'el-gordo'
                                   ? compareElGordoSource === 'bought'
                                     ? 'Boletos comprados'
-                                    : 'Predicción'
+                                    : compareElGordoSource === 'fullwheel'
+                                      ? 'Full wheel'
+                                      : 'Predicción'
                                   : `Predicción (pool con cutoff ${compareProgress.cutoff_draw_id})`}
                           </h4>
                           {(slug === 'la-primitiva' || slug === 'euromillones' || slug === 'el-gordo') && (
@@ -1045,8 +1145,7 @@ export function SimulationPage() {
                                   Predicción
                                 </button>
                               )}
-                              {/* For Euromillones: Full wheel first, then Boletos comprados.
-                                  For others: only Boletos comprados. */}
+                              {/* For Euromillones/El Gordo: include Full wheel + Boletos comprados; La Primitiva: prediction + bought. */}
                               {slug === 'euromillones' && (
                                 <button
                                   type="button"
@@ -1058,6 +1157,21 @@ export function SimulationPage() {
                                       : ''
                                   }`}
                                   onClick={() => setCompareEuromillonesSource('fullwheel')}
+                                >
+                                  Full wheel
+                                </button>
+                              )}
+                              {slug === 'el-gordo' && (
+                                <button
+                                  type="button"
+                                  role="tab"
+                                  aria-selected={compareElGordoSource === 'fullwheel'}
+                                  className={`resultados-tab ${
+                                    compareElGordoSource === 'fullwheel'
+                                      ? 'resultados-tab--active'
+                                      : ''
+                                  }`}
+                                  onClick={() => setCompareElGordoSource('fullwheel')}
                                 >
                                   Full wheel
                                 </button>
@@ -1099,7 +1213,9 @@ export function SimulationPage() {
                               : slug === 'euromillones'
                                 ? `${comparePoolCount} boletos${compareEuromillonesSource === 'bought' ? ' comprados' : ' en el pool'}.`
                                 : slug === 'el-gordo'
-                                  ? `${comparePoolCount} boletos${compareElGordoSource === 'bought' ? ' comprados' : ' en el pool'}.`
+                                  ? compareElGordoSource === 'fullwheel'
+                                    ? `${comparePoolCount} boletos (full wheel)`
+                                    : `${comparePoolCount} boletos${compareElGordoSource === 'bought' ? ' comprados' : ' en el pool'}.`
                                   : `${compareProgress.candidate_pool_count ?? (compareProgress.candidate_pool?.length ?? 0)} boletos en el pool.`}
                           </p>
                         </div>
@@ -1117,7 +1233,8 @@ export function SimulationPage() {
                             (slug === 'euromillones' &&
                               (compareEuromillonesSource === 'bought' ||
                                 compareEuromillonesSource === 'fullwheel')) ||
-                            (slug === 'el-gordo' && compareElGordoSource === 'bought')
+                            (slug === 'el-gordo' &&
+                              (compareElGordoSource === 'bought' || compareElGordoSource === 'fullwheel'))
                           ) && (
                             <label
                               className="form-label"
@@ -1230,7 +1347,7 @@ export function SimulationPage() {
                       </div>
 
                       {(() => {
-                        // Euromillones: Full wheel tab — show aggregated result from backend and skip per-ticket table.
+                        // Full wheel tab — show aggregated result from backend and skip per-ticket table (per lottery).
                         if (slug === 'euromillones' && compareEuromillonesSource === 'fullwheel') {
                           if (euromillonesFullWheelLoading && !euromillonesFullWheelResult) {
                             return (
@@ -1381,6 +1498,54 @@ export function SimulationPage() {
                                   )}
                                 </div>
                               )}
+                            </div>
+                          );
+                        }
+                        if (slug === 'el-gordo' && compareElGordoSource === 'fullwheel') {
+                          if (elGordoFullWheelLoading && !elGordoFullWheelResult) {
+                            return (
+                              <p style={{ margin: '0.5rem 0 0' }}>
+                                Calculando comparación full wheel El Gordo…
+                              </p>
+                            );
+                          }
+                          if (elGordoFullWheelError && !elGordoFullWheelLoading) {
+                            return (
+                              <p style={{ margin: '0.5rem 0 0', color: 'var(--color-error)' }}>
+                                {elGordoFullWheelError}
+                              </p>
+                            );
+                          }
+                          if (!elGordoFullWheelResult) {
+                            return null;
+                          }
+                          const r = elGordoFullWheelResult;
+                          return (
+                            <div style={{ marginTop: 'var(--space-md)' }}>
+                              <div className="resultados-features-table-wrap" style={{ marginBottom: 'var(--space-sm)' }}>
+                                <table className="resultados-features-table">
+                                  <thead>
+                                    <tr>
+                                      <th>Categoría</th>
+                                      <th>Hits (main+clave)</th>
+                                      <th>First position</th>
+                                      <th>Count</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {r.categories.map((row) => (
+                                      <tr key={row.category}>
+                                        <td>{row.category}</td>
+                                        <td>
+                                          {row.main_hits}+{row.clave_hit}
+                                        </td>
+                                        <td>{row.first_position.toLocaleString()}</td>
+                                        <td>{row.count}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
                             </div>
                           );
                         }
@@ -1940,7 +2105,7 @@ export function SimulationPage() {
                         })()
                       )}
 
-                      {/* Euromillones full-wheel summary card on the right column */}
+                      {/* Full-wheel summary card on the right column */}
                       {slug === 'euromillones' &&
                         compareEuromillonesSource === 'fullwheel' &&
                         euromillonesFullWheelResult && (
@@ -2002,6 +2167,56 @@ export function SimulationPage() {
                                   })}{' '}
                                   €
                                 </span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      {slug === 'el-gordo' &&
+                        compareElGordoSource === 'fullwheel' &&
+                        elGordoFullWheelResult && (
+                          <div
+                            className="euromillones-train-current-draw-card"
+                            style={{ marginTop: 'var(--space-md)', padding: 'var(--space-md)' }}
+                          >
+                            <div
+                              style={{
+                                fontSize: '0.75rem',
+                                color: 'var(--color-text-muted)',
+                                marginBottom: 'var(--space-xs)',
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.04em',
+                              }}
+                            >
+                              Resumen full wheel El Gordo
+                            </div>
+                            <div style={{ fontSize: '0.9rem', display: 'grid', rowGap: 4 }}>
+                              <div>
+                                <strong>Jackpot (5+clave) posición</strong>{' '}
+                                {elGordoFullWheelResult.jackpot_position != null
+                                  ? elGordoFullWheelResult.jackpot_position.toLocaleString()
+                                  : '—'}
+                              </div>
+                              <div>
+                                <strong>2ª (5+0) primera</strong>{' '}
+                                {elGordoFullWheelResult.pos_2th != null
+                                  ? elGordoFullWheelResult.pos_2th.toLocaleString()
+                                  : '—'}
+                              </div>
+                              <div>
+                                <strong>3ª (4+1) primera</strong>{' '}
+                                {elGordoFullWheelResult.pos_3th != null
+                                  ? elGordoFullWheelResult.pos_3th.toLocaleString()
+                                  : '—'}
+                              </div>
+                              <div>
+                                <strong>4ª (4+0) primera</strong>{' '}
+                                {elGordoFullWheelResult.pos_4th != null
+                                  ? elGordoFullWheelResult.pos_4th.toLocaleString()
+                                  : '—'}
+                              </div>
+                              <div>
+                                <strong>Total categorías</strong>{' '}
+                                {elGordoFullWheelResult.categories.length}
                               </div>
                             </div>
                           </div>

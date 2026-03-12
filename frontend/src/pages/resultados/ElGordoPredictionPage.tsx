@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Card, Descriptions, Drawer, notification, Select, Spin, Steps, Table, Tag } from 'antd';
+import { Card, Descriptions, Drawer, notification, Spin, Steps, Table, Tag } from 'antd';
 import { useSearchParams } from 'react-router-dom';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
@@ -7,6 +7,12 @@ const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 interface ProbRow {
   number: number;
   p: number;
+}
+
+interface FullWheelPreviewTicketElGordo {
+  position: number;
+  mains: number[];
+  clave: number;
 }
 
 interface TrainProgressElGordo {
@@ -37,6 +43,10 @@ interface TrainProgressElGordo {
   candidate_pool?: { mains: number[]; clave: number }[];
   candidate_pool_at?: string;
   candidate_pool_count?: number;
+  full_wheel_status?: 'waiting' | 'done' | 'error' | string | null;
+  full_wheel_file_path?: string | null;
+  full_wheel_total_tickets?: number;
+  full_wheel_generated_at?: string | null;
 }
 
 export function ElGordoPredictionPage() {
@@ -49,8 +59,7 @@ export function ElGordoPredictionPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerWidth, setDrawerWidth] = useState(420);
   const [currentDraw, setCurrentDraw] = useState<{ date: string; mains: number[]; clave: number | null } | null>(null);
-  const [candidateDisplayCount, setCandidateDisplayCount] = useState(20);
-  const CANDIDATE_COUNT_OPTIONS = [10, 20, 30, 50, 100, 300, 500, 1000, 2000, 3000];
+  const [fullWheelPreview, setFullWheelPreview] = useState<FullWheelPreviewTicketElGordo[] | null>(null);
 
   useEffect(() => {
     if (!cutoffDrawId) {
@@ -111,6 +120,32 @@ export function ElGordoPredictionPage() {
     fetchProgress();
   }, [fetchProgress]);
 
+  // Load a small preview of the full-wheel tickets when available (first 20 from TXT)
+  useEffect(() => {
+    const loadPreview = async () => {
+      if (!cutoffDrawId) {
+        setFullWheelPreview(null);
+        return;
+      }
+      if ((progress?.full_wheel_total_tickets ?? 0) <= 0) {
+        setFullWheelPreview(null);
+        return;
+      }
+      try {
+        const params = new URLSearchParams({ cutoff_draw_id: cutoffDrawId, limit: '20' });
+        const res = await fetch(`${API_URL}/api/el-gordo/train/full-wheel-preview?${params.toString()}`, {
+          cache: 'no-store',
+        });
+        const data = await res.json();
+        if (!res.ok) return;
+        setFullWheelPreview((data.tickets as FullWheelPreviewTicketElGordo[]) ?? null);
+      } catch {
+        setFullWheelPreview(null);
+      }
+    };
+    loadPreview();
+  }, [cutoffDrawId, progress?.full_wheel_total_tickets]);
+
   const currentStep = progress == null
     ? 0
     : !progress.dataset_prepared
@@ -119,9 +154,7 @@ export function ElGordoPredictionPage() {
         ? 1
         : !progress.probs_computed
           ? 2
-          : !progress.rules_applied
-            ? 3
-            : 4;
+          : 3;
 
   const handleBackToTable = () => {
     const params = new URLSearchParams(searchParams);
@@ -164,18 +197,44 @@ export function ElGordoPredictionPage() {
       if (!res.ok) throw new Error((data as { detail?: string }).detail ?? 'Error generando pool de números');
       await fetchProgress(true);
       await delay(3000);
-      setRunningStep(4);
+      setRunningStep(3);
 
-      res = await fetch(`${API_URL}/api/el-gordo/train/candidate-pool?cutoff_draw_id=${encodeURIComponent(cutoffDrawId)}&num_tickets=3000`, { method: 'POST' });
-      data = await res.json();
-      if (!res.ok) throw new Error((data as { detail?: string }).detail ?? 'Error generando pool de boletos');
-      await fetchProgress(true);
-      notification.success({ message: 'Pipeline El Gordo completado', description: 'Pasos 1 a 5 ejecutados para El Gordo. Progreso guardado en la base de datos.', placement: 'topRight', duration: 4 });
+      notification.success({
+        message: 'Pipeline El Gordo completado',
+        description: 'Pasos 1 a 4 ejecutados para El Gordo. Pool de números generado y guardado en la base de datos.',
+        placement: 'topRight',
+        duration: 4,
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Error en el pipeline de El Gordo';
       notification.error({ message: 'Error', description: msg, placement: 'topRight', duration: 5 });
     } finally {
       setRunAllLoading(false);
+    }
+  };
+
+  const handleGenerateFullWheel = async () => {
+    if (!cutoffDrawId) return;
+    try {
+      const params = new URLSearchParams({ cutoff_draw_id: cutoffDrawId });
+      const res = await fetch(`${API_URL}/api/el-gordo/train/full-wheel?${params.toString()}`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (!res.ok || data.status !== 'started') {
+        throw new Error((data as { detail?: string }).detail ?? 'Error iniciando generación de boletos (full wheeling El Gordo)');
+      }
+      notification.success({
+        message: 'Generación iniciada (full wheeling El Gordo)',
+        description: 'La generación del archivo de boletos se está ejecutando en segundo plano. Este proceso puede tardar varios minutos.',
+        placement: 'topRight',
+        duration: 6,
+      });
+      await fetchProgress(true);
+    } catch (e) {
+      const msg =
+        e instanceof Error ? e.message : 'Error iniciando generación de boletos (full wheeling El Gordo)';
+      notification.error({ message: 'Error', description: msg, placement: 'topRight', duration: 6 });
     }
   };
 
@@ -221,16 +280,6 @@ export function ElGordoPredictionPage() {
             ? ('process' as const)
             : ('wait' as const),
     },
-    {
-      title: 'Pool de candidatos',
-      status: runAllLoading
-        ? (runningStep >= 4 ? ('process' as const) : ('wait' as const))
-        : (progress?.candidate_pool_count ?? 0) > 0
-          ? ('finish' as const)
-          : currentStep === 4
-            ? ('process' as const)
-            : ('wait' as const),
-    },
   ];
 
   return (
@@ -244,10 +293,10 @@ export function ElGordoPredictionPage() {
           alignItems: 'flex-start',
         }}
       >
-        {/* Left: ticket pool preview */}
-        <div style={{ flex: '17 1 0%', minWidth: 0, display: 'flex', flexDirection: 'column' }} className="euromillones-train-table-col">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        {/* Left: full-wheel preview (first 20 tickets from TXT) */}
+        <div style={{ flex: '17 1 0%', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }} className="euromillones-train-table-col">
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
               <button
                 type="button"
                 className="resultados-features-iconbtn"
@@ -258,41 +307,32 @@ export function ElGordoPredictionPage() {
                 ← Volver
               </button>
               <h4 className="resultados-features-chart-title" style={{ margin: 0 }}>
-                Pool de candidatos El Gordo{progress?.candidate_pool_count != null ? `: ${progress.candidate_pool_count} boletos` : ''}
+                Boletos (full wheel) — primeras 20 líneas
               </h4>
             </div>
-            <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
-              Mostrar:
-              <Select
-                value={candidateDisplayCount}
-                onChange={setCandidateDisplayCount}
-                options={CANDIDATE_COUNT_OPTIONS.map((n) => ({ label: String(n), value: n }))}
-                style={{ width: 90 }}
-                size="small"
-              />
-            </span>
+            <Table
+              size="small"
+              dataSource={(fullWheelPreview ?? []).map((t) => ({
+                key: t.position,
+                index: t.position,
+                mainsStr: (t.mains ?? []).join(' '),
+                claveStr: typeof t.clave === 'number' ? String(t.clave) : '',
+              }))}
+              columns={[
+                { title: '#', dataIndex: 'index', key: 'index', width: 56 },
+                { title: 'Mains', dataIndex: 'mainsStr', key: 'mains' },
+                { title: 'Clave', dataIndex: 'claveStr', key: 'clave', width: 80 },
+              ]}
+              pagination={false}
+              scroll={{ x: 320 }}
+              locale={{
+                emptyText:
+                  progress?.full_wheel_status === 'waiting'
+                    ? 'Generando full wheel...'
+                    : 'Sin datos. Pulsa "Generar boletos (full wheel)" para generar el archivo.',
+              }}
+            />
           </div>
-          <Table
-            size="small"
-            dataSource={
-              (progress?.candidate_pool ?? [])
-                .slice(0, candidateDisplayCount)
-                .map((t, i) => ({
-                  key: i,
-                  index: i + 1,
-                  mainsStr: (t.mains ?? []).join(' '),
-                  claveStr: typeof t.clave === 'number' ? String(t.clave) : '',
-                }))
-            }
-            columns={[
-              { title: '#', dataIndex: 'index', key: 'index', width: 56 },
-              { title: 'Mains', dataIndex: 'mainsStr', key: 'mains' },
-              { title: 'Clave', dataIndex: 'claveStr', key: 'clave', width: 80 },
-            ]}
-            pagination={false}
-            scroll={{ x: 320 }}
-            locale={{ emptyText: 'Sin datos. Pulsa "Generar todo" para ejecutar el pipeline de El Gordo.' }}
-          />
         </div>
 
         {/* Right: steps + current draw */}
@@ -327,11 +367,34 @@ export function ElGordoPredictionPage() {
                   {runAllLoading ? (
                     <>
                       <Spin size="small" style={{ marginRight: 8 }} />
-                      Ejecutando… (paso {displayStep + 1}/5)
+                      Ejecutando… (paso {displayStep + 1}/4)
                     </>
                   ) : (
                     'Generar todo'
                   )}
+                </button>
+                <button
+                  type="button"
+                  className="resultados-features-iconbtn"
+                  disabled={
+                    !cutoffDrawId ||
+                    !progress?.rules_applied ||
+                    progress.full_wheel_status === 'waiting' ||
+                    progress.full_wheel_status === 'done'
+                  }
+                  onClick={handleGenerateFullWheel}
+                  style={{
+                    padding: '8px 16px',
+                    borderRadius: 999,
+                    border: '1px solid var(--color-border)',
+                    background: 'transparent',
+                    color: 'var(--color-text)',
+                    fontSize: '0.9rem',
+                  }}
+                >
+                  {progress?.full_wheel_status === 'waiting'
+                    ? 'Generando boletos…'
+                    : 'Generar boletos (full wheel)'}
                 </button>
                 <button
                   type="button"
@@ -406,9 +469,18 @@ export function ElGordoPredictionPage() {
                 {progress.rules_applied ? <Tag color="success">Hecho</Tag> : <Tag>Pendiente</Tag>}
                 {progress.rule_flags?.rules_used?.length ? ` · ${progress.rule_flags.rules_used.join(', ')}` : ''}
               </Descriptions.Item>
-              <Descriptions.Item label="5. Pool de candidatos">
-                {(progress.candidate_pool_count ?? 0) > 0 ? <Tag color="success">Hecho</Tag> : <Tag>Pendiente</Tag>}
-                {progress.candidate_pool_count != null && ` · ${progress.candidate_pool_count} boletos`}
+              <Descriptions.Item label="5. Full wheel (boletos)">
+                {progress.full_wheel_status === 'waiting' ? (
+                  <Tag color="processing">En curso</Tag>
+                ) : (progress.full_wheel_total_tickets ?? 0) > 0 ? (
+                  <Tag color="success">Hecho</Tag>
+                ) : progress.full_wheel_status === 'error' ? (
+                  <Tag color="error">Error</Tag>
+                ) : (
+                  <Tag>Pendiente</Tag>
+                )}
+                {progress.full_wheel_total_tickets != null &&
+                  ` · ${progress.full_wheel_total_tickets.toLocaleString()} boletos`}
               </Descriptions.Item>
             </Descriptions>
             {(progress.filtered_mains_probs?.length || progress.filtered_clave_probs?.length) ? (
@@ -424,17 +496,6 @@ export function ElGordoPredictionPage() {
                 </p>
               </div>
             ) : null}
-            {(progress.candidate_pool?.length ?? 0) > 0 && (
-              <div style={{ marginTop: 16 }}>
-                <div style={{ marginBottom: 8, fontWeight: 600 }}>Muestra del pool ({Math.min(10, progress.candidate_pool!.length)} primeros)</div>
-                <Table
-                  size="small"
-                  dataSource={progress.candidate_pool!.slice(0, 10).map((t, i) => ({ key: i, mains: (t.mains ?? []).join(' '), clave: t.clave }))}
-                  columns={[{ title: 'Mains', dataIndex: 'mains' }, { title: 'Clave', dataIndex: 'clave', width: 80 }]}
-                  pagination={false}
-                />
-              </div>
-            )}
           </>
         ) : (
           <Spin size="small" />

@@ -17,6 +17,7 @@ import time
 from contextlib import asynccontextmanager
 from statistics import mean
 from typing import Optional, List, Dict, Iterable, Sequence, Tuple
+from itertools import combinations
 
 from dotenv import load_dotenv
 
@@ -547,24 +548,196 @@ def _generate_full_wheel_file_from_pool(
         "total_tickets": total,
     }
 
-    def _stats(rows: List[Dict]) -> Dict:
-        nums = [int(r.get("number") or 0) for r in rows]
-        return {
-            "count": len(nums),
-            "sum": sum(nums),
-            "even": sum(1 for n in nums if n % 2 == 0),
-            "odd": sum(1 for n in nums if n % 2 != 0),
-        }
 
-    stats = {"mains": _stats(filtered_mains), "stars": _stats(filtered_stars)}
+def _el_gordo_ticket_tier(mains: Sequence[int]) -> int:
+    """
+    Classify an El Gordo ticket into quality tiers, reusing the same structural
+    ideas as Euromillones:
+
+    - Penalize long consecutive runs.
+    - Penalize all-in-one decade or all same last digit.
+    - Penalize all odd or all even.
+
+    Returns 0 (best) .. 3 (worst).
+    """
+    nums = sorted(int(n) for n in mains)
+    score = 0
+
+    # Consecutive runs
+    longest_run = 1
+    current_run = 1
+    for i in range(1, len(nums)):
+        if nums[i] == nums[i - 1] + 1:
+            current_run += 1
+            longest_run = max(longest_run, current_run)
+        else:
+            current_run = 1
+    if longest_run >= 4:
+        score += 3
+    elif longest_run == 3:
+        score += 1
+
+    # Same decade (10s) or same last digit
+    decades = {n // 10 for n in nums}
+    last_digits = {n % 10 for n in nums}
+    if len(decades) == 1:
+        score += 2
+    if len(last_digits) == 1:
+        score += 2
+
+    # All odd or all even
+    odds = sum(1 for n in nums if n % 2 == 1)
+    evens = len(nums) - odds
+    if odds == len(nums) or evens == len(nums):
+        score += 2
+
+    if score >= 5:
+        return 3
+    if score >= 3:
+        return 2
+    if score >= 1:
+        return 1
+    return 0
+
+
+def _iter_el_gordo_tickets_from_pool(
+    mains_pool: Iterable[int],
+    clave_pool: Iterable[int],
+) -> Iterable[Tuple[Sequence[int], int]]:
+    """
+    Yield all El Gordo tickets in manifold order (mirror Euromillones full wheel).
+
+    Traverses the (main_combo_index × clave_index) grid in a diagonal pattern so we
+    avoid long runs of identical mains or identical clave. Each (mains[5], clave)
+    is yielded exactly once.
+
+    - mains_pool: ordered mains (length 54 expected after Step 4 extend)
+    - clave_pool: ordered claves (length 10 expected)
+    """
+    mains_list = list(dict.fromkeys(int(x) for x in mains_pool))
+    clave_list = list(dict.fromkeys(int(x) for x in clave_pool))
+    if len(mains_list) < 5:
+        raise ValueError(f"Need at least 5 mains, got {len(mains_list)}")
+    if not clave_list:
+        raise ValueError("Need at least 1 clave")
+
+    main_idx_combos = list(combinations(range(len(mains_list)), 5))
+    clave_indices = list(range(len(clave_list)))
+
+    seed = (hash((tuple(mains_list), tuple(clave_list))) & 0xFFFFFFFF)
+    rng = random.Random(seed)
+    rng.shuffle(main_idx_combos)
+    rng.shuffle(clave_indices)
+
+    nm = len(main_idx_combos)
+    nc = len(clave_list)
+    total = nm * nc
+    for k in range(total):
+        i = k % nm
+        t = k // nm
+        j = (t + i) % nc
+        mains = [mains_list[idx] for idx in main_idx_combos[i]]
+        clave = clave_list[clave_indices[j]]
+        yield mains, int(clave)
+
+
+def _generate_el_gordo_full_wheel_file(
+    mains_pool: Iterable[int],
+    clave_pool: Iterable[int],
+    draw_date: str,
+) -> dict:
+    """
+    Generate full El Gordo wheel TXT from the given pools (mirror Euromillones).
+
+    - Tickets are generated in manifold order: diagonal traversal over
+      (main combos × claves) with deterministic shuffle to avoid long runs
+      of identical mains or clave.
+    - Tier is applied to main numbers only: _el_gordo_ticket_tier(mains) → 0..3.
+    - Write tier by tier (0 → 1 → 2 → 3); within each tier, buffer and shuffle
+      with a deterministic seed so the order is reproducible.
+    """
+    # Debug: show the exact pools used by the wheeling system (after Step 4)
+    mains_list_dbg = list(mains_pool)
+    clave_list_dbg = list(clave_pool)
+    print(
+        f"[el-gordo-fullwheel] START draw_date={draw_date} mains_pool={mains_list_dbg} clave_pool={clave_list_dbg}",
+        flush=True,
+    )
+
+    # Use local lists for iteration below so we don't re-iterate the debug copies.
+    mains_pool = mains_list_dbg
+    clave_pool = clave_list_dbg
+
+    root = Path(_ROOT_DIR)
+    out_dir = root / "el_gordo_pools"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"el_gordo_{draw_date}.txt"
+
+    position = 0
+    total_by_tier = [0, 0, 0, 0]
+    debug_first_tickets: List[Tuple[List[int], int]] = []
+
+    with out_path.open("w", encoding="utf-8", buffering=1024 * 1024) as f:
+        for tier in range(4):
+            seed = (hash(("el_gordo_full_wheel", draw_date, tier)) & 0xFFFFFFFF)
+            rng = random.Random(seed)
+            buffer: List[Tuple[List[int], int]] = []
+            buffer_size = 1000
+
+            for mains, clave in _iter_el_gordo_tickets_from_pool(mains_pool, clave_pool):
+                t = _el_gordo_ticket_tier(mains)
+                if t != tier:
+                    continue
+                buffer.append((list(mains), int(clave)))
+                if len(buffer) >= buffer_size:
+                    rng.shuffle(buffer)
+                    for m, c in buffer:
+                        position += 1
+                        mains_str = ",".join(str(n) for n in m)
+                        f.write(f"{position};{mains_str};{c}\n")
+                        total_by_tier[tier] += 1
+                    buffer.clear()
+
+            if buffer:
+                rng.shuffle(buffer)
+                for m, c in buffer:
+                    position += 1
+                    mains_str = ",".join(str(n) for n in m)
+                    f.write(f"{position};{mains_str};{c}\n")
+                    total_by_tier[tier] += 1
+
+    # Debug: collect first 30 tickets from the generated file
+    try:
+        with out_path.open("r", encoding="utf-8") as f_debug:
+            for _ in range(30):
+                line = f_debug.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    pos_str, mains_str, clave_str = line.split(";")
+                    pos = int(pos_str)
+                    mains = [int(x) for x in mains_str.split(",") if x]
+                    clave = int(clave_str)
+                    debug_first_tickets.append((mains, clave))
+                except Exception:
+                    continue
+        print(
+            f"[el-gordo-fullwheel] first_tickets (up to 30): {debug_first_tickets}",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"[el-gordo-fullwheel] debug read failed: {e}", flush=True)
+
+    total = position
     return {
-        "filtered_mains": filtered_mains,
-        "filtered_stars": filtered_stars,
-        "rules_used": rules_used,
-        "excluded": excluded,
-        "stats": stats,
-        "snapshot_mains": base_mains,
-        "snapshot_stars": [one_star],
+        "file_path": str(out_path),
+        "draw_date": draw_date,
+        "good_tickets": total_by_tier[0] + total_by_tier[1] + total_by_tier[2],
+        "bad_tickets": total_by_tier[3],
+        "total_tickets": total,
     }
 
 
@@ -666,9 +839,30 @@ def build_el_gordo_step4_pool(
     filtered_clave_items.extend(extras[:max_extras])
     filtered_clave = filtered_clave_items[:4]
 
-    # Randomly reorder mains and clave so Step 5 receives shuffled pools.
+    # Randomly reorder prioritized subset so Step 5 receives shuffled pools.
     random.shuffle(filtered_mains)
     random.shuffle(filtered_clave)
+
+    # --- Extend to full 54 mains and 10 claves (mirror Euromillones full wheel pool) ---
+    selected_main_nums = {int(r.get("number") or 0) for r in filtered_mains}
+    for item in mains_ranking:
+        n = int(item.get("number") or 0)
+        if n < MAIN_MIN or n > MAIN_MAX:
+            continue
+        if n in selected_main_nums:
+            continue
+        filtered_mains.append({"number": n, "p": item.get("p") or 0.0})
+        selected_main_nums.add(n)
+
+    selected_clave_nums = {int(r.get("number") or 0) for r in filtered_clave}
+    for item in clave_ranking:
+        n = int(item.get("number") or 0)
+        if n < CLAVE_MIN or n > CLAVE_MAX:
+            continue
+        if n in selected_clave_nums:
+            continue
+        filtered_clave.append({"number": n, "p": item.get("p") or 0.0})
+        selected_clave_nums.add(n)
 
     def _stats(rows: List[Dict]) -> Dict:
         nums = [int(r.get("number") or 0) for r in rows]
@@ -915,10 +1109,12 @@ METADATA_COLLECTION = "scraper_metadata"
 EUROMILLONES_TRAIN_PROGRESS_COLLECTION = "euromillones_train_progress"
 EUROMILLONES_COMPARE_RESULTS_COLLECTION = "euromillones_compare_results"
 EL_GORDO_TRAIN_PROGRESS_COLLECTION = "el_gordo_train_progress"
+EL_GORDO_COMPARE_RESULTS_COLLECTION = "el_gordo_compare_results"
 # Cost per Euromillones ticket (€) for compare total cost
 EUROMILLONES_TICKET_COST_EUR = 2.50
-# Lock so only one full-wheel reorder runs at a time (avoids concurrent file write / corrupt state)
+# Locks so only one full-wheel reorder per lottery runs at a time (avoids concurrent file write / corrupt state)
 _EUROMILLONES_REORDER_LOCK = threading.Lock()
+_EL_GORDO_REORDER_LOCK = threading.Lock()
 EL_GORDO_BUY_QUEUE_COLLECTION = "el_gordo_buy_queue"
 LA_PRIMITIVA_BUY_QUEUE_COLLECTION = "la_primitiva_buy_queue"
 EUROMILLONES_BUY_QUEUE_COLLECTION = "euromillones_buy_queue"
@@ -947,6 +1143,9 @@ async def lifespan(app: FastAPI):
         [("current_id", 1), ("pre_id", 1)], unique=True
     )
     db[EL_GORDO_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
+    db[EL_GORDO_COMPARE_RESULTS_COLLECTION].create_index(
+        [("current_id", 1), ("pre_id", 1)], unique=True
+    )
     db[EL_GORDO_BUY_QUEUE_COLLECTION].create_index([("status", 1), ("created_at", 1)])
     db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
     # bot_credentials: no index on "order" at startup (optional; avoids conflict if one already exists)
@@ -1988,7 +2187,7 @@ def api_euromillones_prepare_dataset(
 def api_el_gordo_train_progress(
     cutoff_draw_id: str | None = Query(None, description="id_sorteo for this training run (El Gordo)."),
 ):
-    """Return El Gordo training progress for the given cutoff_draw_id (dataset prepared, models trained)."""
+    """Return El Gordo training progress (mirror Euromillones: dataset, models, probs, rules, candidate_pool, full_wheel_*)."""
     if db is None:
         raise HTTPException(500, detail="Database not connected")
     if not cutoff_draw_id:
@@ -2003,6 +2202,23 @@ def api_el_gordo_train_progress(
             content={"progress": None},
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
+    # Full wheel elapsed seconds (mirror Euromillones)
+    full_status = doc.get("full_wheel_status")
+    started_at = doc.get("full_wheel_started_at")
+    generated_at = doc.get("full_wheel_generated_at")
+    full_elapsed: Optional[int] = None
+    if started_at:
+        try:
+            start_dt = dt.fromisoformat(str(started_at).replace("Z", "+00:00"))
+            if full_status == "done" and generated_at:
+                end_dt = dt.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+            else:
+                end_dt = dt.utcnow()
+            diff = end_dt - start_dt
+            full_elapsed = max(0, int(diff.total_seconds()))
+        except Exception:
+            full_elapsed = None
+
     progress = {
         "cutoff_draw_id": doc.get("cutoff_draw_id"),
         "dataset_prepared": bool(doc.get("dataset_prepared")),
@@ -2028,6 +2244,16 @@ def api_el_gordo_train_progress(
         "candidate_pool_at": doc.get("candidate_pool_at"),
         "candidate_pool_count": doc.get("candidate_pool_count"),
         "bought_tickets": doc.get("bought_tickets"),
+        "full_wheel_draw_date": doc.get("full_wheel_draw_date"),
+        "full_wheel_file_path": doc.get("full_wheel_file_path"),
+        "full_wheel_total_tickets": doc.get("full_wheel_total_tickets"),
+        "full_wheel_good_tickets": doc.get("full_wheel_good_tickets"),
+        "full_wheel_bad_tickets": doc.get("full_wheel_bad_tickets"),
+        "full_wheel_generated_at": doc.get("full_wheel_generated_at"),
+        "full_wheel_started_at": doc.get("full_wheel_started_at"),
+        "full_wheel_status": full_status,
+        "full_wheel_error": doc.get("full_wheel_error"),
+        "full_wheel_elapsed_seconds": full_elapsed,
     }
     return JSONResponse(
         content={"progress": progress},
@@ -2128,6 +2354,109 @@ def api_el_gordo_betting_pool(
             "candidate_pool": pool,
             "candidate_pool_count": len(pool),
             "bought_tickets": bought,
+        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/el-gordo/betting/pool-from-file")
+def api_el_gordo_betting_pool_from_file(
+    draw_date: str | None = Query(
+        None,
+        description="Draw date YYYY-MM-DD; use full_wheel_file_path for that date.",
+    ),
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="Optional id_sorteo; used when draw_date not provided.",
+    ),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """
+    Return a paginated slice of the El Gordo full-wheeling pool from TXT (mirror Euromillones).
+
+    Uses skip/limit on the file lines. Each line: position;mains_csv;clave.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    date_str = (draw_date or "").strip()[:10] or None
+    cutoff = (cutoff_draw_id or "").strip() or None
+
+    if not date_str and not cutoff:
+        last = (_get_last_draw_date("el-gordo") or "").strip()
+        if last:
+            date_str = last[:10]
+
+    doc = None
+    if cutoff:
+        doc = coll.find_one({"cutoff_draw_id": cutoff})
+        if doc is None and cutoff.isdigit():
+            doc = coll.find_one({"cutoff_draw_id": int(cutoff)})
+    if doc is None and date_str:
+        doc = coll.find_one({"full_wheel_draw_date": date_str}) or coll.find_one({"probs_fecha_sorteo": date_str})
+    if doc is None:
+        return JSONResponse(
+            content={
+                "draw_date": date_str,
+                "cutoff_draw_id": cutoff,
+                "total": 0,
+                "skip": skip,
+                "limit": limit,
+                "tickets": [],
+            },
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+
+    path = (doc.get("full_wheel_file_path") or "").strip()
+    total = int(doc.get("full_wheel_total_tickets") or 0)
+
+    if not path or total <= 0:
+        return JSONResponse(
+            content={
+                "draw_date": date_str,
+                "cutoff_draw_id": cutoff,
+                "total": total,
+                "skip": skip,
+                "limit": limit,
+                "tickets": [],
+            },
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+
+    tickets_list: List[Dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for _ in range(skip):
+                if not f.readline():
+                    break
+            for _ in range(limit):
+                line = f.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    pos_str, mains_str, clave_str = line.split(";")
+                    position = int(pos_str)
+                    mains = [int(x) for x in mains_str.split(",") if x]
+                    clave = int(clave_str)
+                except Exception:
+                    continue
+                tickets_list.append({"position": position, "mains": mains, "clave": clave})
+    except FileNotFoundError:
+        raise HTTPException(404, detail="Full wheel file not found on disk")
+
+    return JSONResponse(
+        content={
+            "draw_date": (doc.get("full_wheel_draw_date") or date_str),
+            "cutoff_draw_id": doc.get("cutoff_draw_id") or cutoff,
+            "total": total,
+            "skip": skip,
+            "limit": limit,
+            "tickets": tickets_list,
         },
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
@@ -2915,6 +3244,195 @@ def _euromillones_full_wheel_reorder_txt(
     print("[reorder] done.", flush=True)
 
 
+def _el_gordo_full_wheel_reorder_txt(
+    path: str,
+    main_set: set,
+    clave_set: set,
+    draw_date: str,
+) -> None:
+    """
+    Reorder El Gordo full wheel TXT using position_generator_el_gordo rules.
+
+    - Compute first_position from draw year/month via position_generator_el_gordo.
+    - Stream once to find jackpot + 2th/3th/4th old positions.
+    - If jackpot_position < first_position: skip reorder.
+    - Else: choose a small number of 2th/3th/4th tickets to move into bands
+      near first_position, build a swap list, and rewrite swapped lines up to
+      jackpot_position (mirror Euromillones approach).
+    """
+    from refer.position import position_generator_el_gordo
+
+    date_str = (draw_date or "")[:10]
+    if not date_str or len(date_str) < 7:
+        raise HTTPException(400, detail="Draw date required for reorder (El Gordo)")
+    try:
+        year = int(date_str[:4])
+        month = int(date_str[5:7])
+    except (ValueError, IndexError):
+        raise HTTPException(400, detail="Invalid draw date format for reorder (El Gordo)")
+    first_position = position_generator_el_gordo(year, month)
+    if first_position < 1:
+        raise HTTPException(400, detail="first_position must be positive (El Gordo)")
+    print(f"[el-gordo-reorder] draw_date={date_str} year={year} month={month} first_position={first_position}", flush=True)
+
+    jackpot_position: Optional[int] = None
+    second_positions: List[int] = []
+    third_positions: List[int] = []
+    fourth_positions: List[int] = []
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pos_str, mains_str, clave_str = line.split(";")
+                position = int(pos_str)
+                mains = [int(x) for x in mains_str.split(",") if x]
+                clave = int(clave_str)
+            except Exception:
+                continue
+            if len(mains) != 5:
+                continue
+            hits_main = sum(1 for n in mains if n in main_set)
+            hits_clave = 1 if clave in clave_set else 0
+            # 1th..4th categories for El Gordo (5+1, 5+0, 4+1, 4+0)
+            if hits_main == 5 and hits_clave == 1:
+                jackpot_position = position
+                break
+            if hits_main == 5 and hits_clave == 0:
+                second_positions.append(position)
+            elif hits_main == 4 and hits_clave == 1:
+                third_positions.append(position)
+            elif hits_main == 4 and hits_clave == 0:
+                fourth_positions.append(position)
+
+    if jackpot_position is None:
+        raise HTTPException(
+            404,
+            detail="Jackpot (5+clave) not found in El Gordo full wheel file; cannot reorder",
+        )
+    print(
+        f"[el-gordo-reorder] jackpot_position={jackpot_position} | 2th count={len(second_positions)} 3th={len(third_positions)} 4th={len(fourth_positions)}",
+        flush=True,
+    )
+
+    # If jackpot is already before first_position, skip reorder
+    if jackpot_position < first_position:
+        print(
+            f"[el-gordo-reorder] jackpot_position {jackpot_position} < first_position {first_position}; skipping reorder",
+            flush=True,
+        )
+        return
+
+    # min_count ranges (slightly stronger than Euromillones: more 3th/4th to move)
+    import random as rand_module
+
+    n_2 = rand_module.randint(1, 2)
+    n_3 = rand_module.randint(5, 10)
+    n_4 = rand_module.randint(15, 20)
+    cand_2 = [p for p in second_positions if p > first_position]
+    cand_3 = [p for p in third_positions if p > first_position]
+    cand_4 = [p for p in fourth_positions if p > first_position]
+    to_move_2 = rand_module.sample(cand_2, min(n_2, len(cand_2))) if cand_2 else []
+    to_move_3 = rand_module.sample(cand_3, min(n_3, len(cand_3))) if cand_3 else []
+    to_move_4 = rand_module.sample(cand_4, min(n_4, len(cand_4))) if cand_4 else []
+    print(
+        f"[el-gordo-reorder] marks n_2={n_2} n_3={n_3} n_4={n_4} | candidates >first: 2th={len(cand_2)} 3th={len(cand_3)} 4th={len(cand_4)}",
+        flush=True,
+    )
+    print(
+        f"[el-gordo-reorder] to_move_2={to_move_2} to_move_3={to_move_3} to_move_4={to_move_4}",
+        flush=True,
+    )
+
+    def range_list_el(lo: float, hi: int) -> List[int]:
+        return list(range(max(1, int(lo)), hi + 1))
+
+    r_2 = range_list_el(first_position * 0.8, first_position - 1)
+    r_3 = range_list_el(first_position * 0.5, first_position - 1)
+    r_4 = range_list_el(first_position * 0.3, first_position - 1)
+    used: set = {first_position}
+
+    def pick_distinct_el(pool: List[int], count: int, available: List[int]) -> List[Tuple[int, int]]:
+        out: List[Tuple[int, int]] = []
+        avail = [x for x in available if x not in used]
+        if not avail or count <= 0:
+            return out
+        k = min(count, len(avail))
+        chosen = rand_module.sample(avail, k)
+        for old_pos, new_pos in zip(pool[:k], chosen):
+            used.add(new_pos)
+            out.append((old_pos, new_pos))
+        return out
+
+    moves: List[Tuple[int, int]] = [(jackpot_position, first_position)]
+    used.add(first_position)
+    moves.extend(pick_distinct_el(to_move_2, len(to_move_2), r_2))
+    moves.extend(pick_distinct_el(to_move_3, len(to_move_3), r_3))
+    moves.extend(pick_distinct_el(to_move_4, len(to_move_4), r_4))
+    print(
+        f"[el-gordo-reorder] ranges 2th len={len(r_2)} 3th len={len(r_3)} 4th len={len(r_4)} | moves ({len(moves)}): {moves}",
+        flush=True,
+    )
+
+    moved_from: set[int] = set()
+    moved_to: Dict[int, int] = {}
+    for old_pos, new_pos in moves:
+        moved_from.add(old_pos)
+        moved_to[new_pos] = old_pos
+
+    moved_content: Dict[int, Tuple[str, str]] = {}
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            raw = line.rstrip("\n")
+            if not raw:
+                continue
+            try:
+                pos_str, mains_str, clave_str = raw.split(";")
+                position = int(pos_str)
+            except Exception:
+                continue
+            if position in moved_from:
+                moved_content[position] = (mains_str, clave_str)
+            if position >= jackpot_position and len(moved_content) == len(moved_from):
+                break
+
+    dirpath = os.path.dirname(path)
+    fd, temp_path = tempfile.mkstemp(suffix=".txt", prefix="el_gordo_reorder_", dir=dirpath if dirpath else ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            with open(path, "r", encoding="utf-8") as src:
+                for line in src:
+                    raw = line.rstrip("\n")
+                    if not raw:
+                        out.write(line)
+                        continue
+                    try:
+                        pos_str, mains_str, clave_str = raw.split(";")
+                        position = int(pos_str)
+                    except Exception:
+                        out.write(line)
+                        continue
+                    if position <= jackpot_position and position in moved_to:
+                        old_pos = moved_to[position]
+                        mains_str2, clave_str2 = moved_content.get(old_pos, (mains_str, clave_str))
+                        out.write(f"{position};{mains_str2};{clave_str2}\n")
+                    else:
+                        out.write(line if line.endswith("\n") else line + "\n")
+        print(
+            f"[el-gordo-reorder] writing swapped lines up to {jackpot_position} and streamed tail to {path}",
+            flush=True,
+        )
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+    print("[el-gordo-reorder] done.", flush=True)
+
 def _euromillones_full_wheel_compare(
     current_id: str,
     pre_id: str,
@@ -3074,6 +3592,164 @@ def _euromillones_full_wheel_compare(
     return result
 
 
+def _el_gordo_full_wheel_compare(
+    current_id: str,
+    pre_id: str,
+    db_instance,
+) -> Dict:
+    """
+    Compare El Gordo full wheel TXT against draw result.
+
+    - Stream TXT and compute for each (main_hits, clave_hit) category:
+      * first_position (first time it appears)
+      * total count of tickets.
+    - Also record jackpot_position (5 mains + clave), and counts/first positions
+      for 2th(5+0), 3th(4+1), 4th(4+0).
+    - Save summary to el_gordo_compare_results; if result already exists, return it.
+    """
+    pre_id_clean = pre_id.strip()
+    coll_compare = db_instance[EL_GORDO_COMPARE_RESULTS_COLLECTION]
+    existing = coll_compare.find_one({"current_id": current_id, "pre_id": pre_id_clean})
+    if existing:
+        out = {k: v for k, v in existing.items() if k != "_id"}
+        return _item_to_json(out)
+
+    coll_draws = db_instance["el_gordo"]
+    doc = coll_draws.find_one({"id_sorteo": current_id})
+    if doc is None and current_id.isdigit():
+        doc = coll_draws.find_one({"id_sorteo": int(current_id)})
+    if not doc:
+        raise HTTPException(404, detail="El Gordo draw not found")
+    draw = _build_draw(doc, "ELGR")
+    draw_norm = normalize_draw(draw)
+
+    # El Gordo: use raw collection fields for clarity.
+    # - doc["numbers"]: first 5 = mains
+    # - doc["reintegro"]: clave
+    raw_numbers = doc.get("numbers") or []
+    raw_reintegro = doc.get("reintegro")
+
+    main_draw: list[int] = [int(x) for x in raw_numbers[:5]]
+    clave_draw: int | None = None
+    try:
+        if raw_reintegro is not None and str(raw_reintegro).strip():
+            clave_draw = int(raw_reintegro)
+    except (TypeError, ValueError):
+        clave_draw = None
+
+    # Fallback: if reintegro missing, try last number from parsed numbers/combinacion_acta
+    if (len(main_draw) != 5 or clave_draw is None):
+        numbers = draw_norm.get("numbers") or []
+        combinacion_acta = draw.get("combinacion_acta") or ""
+        if len(numbers) >= 6:
+            main_draw = [int(x) for x in numbers[:5]]
+            try:
+                clave_draw = int(numbers[-1])
+            except (TypeError, ValueError):
+                clave_draw = None
+        elif isinstance(combinacion_acta, str) and combinacion_acta.strip():
+            parts = re.findall(r"\b\d{1,2}\b", combinacion_acta)
+            nums = [int(p) for p in parts if p.isdigit()]
+            if len(nums) >= 6:
+                main_draw = nums[:5]
+                clave_draw = nums[-1]
+
+    if len(main_draw) != 5 or clave_draw is None:
+        raise HTTPException(400, detail="El Gordo draw mains/clave missing or invalid")
+    main_set = set(main_draw)
+    clave_set = {int(clave_draw)}
+    draw_date = (draw.get("fecha_sorteo") or "")[:10] or None
+
+    coll_progress = db_instance[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+    if progress_doc is None and pre_id_clean.isdigit():
+        progress_doc = coll_progress.find_one({"cutoff_draw_id": int(pre_id_clean)})
+    if not progress_doc:
+        raise HTTPException(404, detail="El Gordo training progress not found for pre_id")
+    path = (progress_doc.get("full_wheel_file_path") or "").strip()
+    if not path:
+        raise HTTPException(400, detail="El Gordo full wheel file not generated for this pre_id")
+    if not os.path.isfile(path):
+        raise HTTPException(404, detail="El Gordo full wheel file not found on disk")
+
+    category_first_pos: Dict[Tuple[int, int], int] = {}
+    category_counts: Dict[Tuple[int, int], int] = {}
+    jackpot_position: Optional[int] = None
+    second_first: Optional[int] = None
+    third_first: Optional[int] = None
+    fourth_first: Optional[int] = None
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pos_str, mains_str, clave_str = line.split(";")
+                position = int(pos_str)
+                mains = [int(x) for x in mains_str.split(",") if x]
+                clave = int(clave_str)
+            except Exception:
+                continue
+            if len(mains) != 5:
+                continue
+            hits_main = sum(1 for n in mains if n in main_set)
+            hits_clave = 1 if clave in clave_set else 0
+            key = (hits_main, hits_clave)
+            if key not in category_first_pos:
+                category_first_pos[key] = position
+            category_counts[key] = category_counts.get(key, 0) + 1
+            if hits_main == 5 and hits_clave == 1:
+                if jackpot_position is None:
+                    jackpot_position = position
+            elif hits_main == 5 and hits_clave == 0:
+                if second_first is None:
+                    second_first = position
+            elif hits_main == 4 and hits_clave == 1:
+                if third_first is None:
+                    third_first = position
+            elif hits_main == 4 and hits_clave == 0:
+                if fourth_first is None:
+                    fourth_first = position
+
+    if jackpot_position is None:
+        raise HTTPException(
+            404,
+            detail="Jackpot (5+clave) not found in El Gordo full wheel file; cannot compute compare result",
+        )
+
+    categories_out: List[Dict] = []
+    for (hm, hc), first_pos in sorted(category_first_pos.items(), key=lambda kv: (-(kv[0][0]), -kv[0][1])):
+        label = f"{hm}+{hc}"
+        categories_out.append(
+            {
+                "category": label,
+                "main_hits": hm,
+                "clave_hit": hc,
+                "first_position": first_pos,
+                "count": category_counts.get((hm, hc), 0),
+            }
+        )
+
+    result = {
+        "current_id": current_id,
+        "date": draw.get("fecha_sorteo"),
+        "pre_id": pre_id_clean,
+        "jackpot_position": jackpot_position,
+        "pos_2th": second_first,
+        "pos_3th": third_first,
+        "pos_4th": fourth_first,
+        "categories": categories_out,
+        "total_categories": len(categories_out),
+    }
+    coll_compare.replace_one(
+        {"current_id": current_id, "pre_id": pre_id_clean},
+        {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
+        upsert=True,
+    )
+    print(f"[el-gordo-compare] saved result for current_id={current_id} pre_id={pre_id_clean} jackpot_position={jackpot_position}", flush=True)
+    return result
+
 @app.get("/api/euromillones/compare/full-wheel")
 def api_euromillones_compare_full_wheel(
     current_id: str = Query(..., description="id_sorteo of the draw to evaluate (result)."),
@@ -3091,6 +3767,48 @@ def api_euromillones_compare_full_wheel(
         raise
     except Exception as e:
         raise HTTPException(500, detail=f"Compare failed: {e}")
+    return JSONResponse(content=_item_to_json(result))
+
+
+@app.get("/api/el-gordo/compare/full-wheel")
+def api_el_gordo_compare_full_wheel(
+    current_id: str = Query(..., description="id_sorteo of the El Gordo draw to evaluate (result)."),
+    pre_id: str = Query(..., description="cutoff_draw_id or probs_draw_id for the El Gordo full wheel run."),
+):
+    """
+    Compare El Gordo full wheel TXT (from pre_id) against draw result (current_id).
+    Returns and saves summary: jackpot_position, 2th/3th/4th first positions,
+    and first_position + count for every (main_hits, clave_hit) category.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    try:
+        result = _el_gordo_full_wheel_compare(current_id.strip(), pre_id.strip(), db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=f"El Gordo compare failed: {e}")
+    return JSONResponse(content=_item_to_json(result))
+
+
+@app.get("/api/el-gordo/compare/full-wheel")
+def api_el_gordo_compare_full_wheel(
+    current_id: str = Query(..., description="id_sorteo of the El Gordo draw to evaluate (result)."),
+    pre_id: str = Query(..., description="cutoff_draw_id or probs_draw_id for the El Gordo full wheel run."),
+):
+    """
+    Compare El Gordo full wheel TXT (from pre_id) against draw result (current_id).
+    Returns and saves summary: jackpot_position, 2th/3th/4th first positions,
+    and first_position + count for every (main_hits, clave_hit) category.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    try:
+        result = _el_gordo_full_wheel_compare(current_id.strip(), pre_id.strip(), db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=f"El Gordo compare failed: {e}")
     return JSONResponse(content=_item_to_json(result))
 
 
@@ -3323,6 +4041,83 @@ def api_euromillones_compare_full_wheel_reorder(
         return JSONResponse(content=_item_to_json(result))
     finally:
         _EUROMILLONES_REORDER_LOCK.release()
+
+
+@app.post("/api/el-gordo/compare/full-wheel/reorder")
+def api_el_gordo_compare_full_wheel_reorder(
+    current_id: str = Query(..., description="id_sorteo of the El Gordo draw (result); draw date from this."),
+    pre_id: str = Query(..., description="cutoff_draw_id or probs_draw_id for the El Gordo full wheel TXT."),
+):
+    """
+    Reorder tickets in the El Gordo full wheel TXT (swap mains/clave only),
+    then run compare. Uses draw date from current_id for first_position via
+    position_generator_el_gordo. If result already exists with reorder_applied,
+    returns cached result. If another reorder is in progress, returns 503.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    pre_id_clean = pre_id.strip()
+    current_id_clean = current_id.strip()
+    coll_compare = db[EL_GORDO_COMPARE_RESULTS_COLLECTION]
+    existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
+    if existing and existing.get("reorder_applied") is True:
+        result = {k: v for k, v in existing.items() if k != "_id"}
+        return JSONResponse(content=_item_to_json(result))
+    if not _EL_GORDO_REORDER_LOCK.acquire(blocking=False):
+        raise HTTPException(
+            503,
+            detail="El Gordo reorder already in progress. Please retry later.",
+        )
+    try:
+        coll_draws = db["el_gordo"]
+        doc = coll_draws.find_one({"id_sorteo": current_id_clean})
+        if doc is None and current_id_clean.isdigit():
+            doc = coll_draws.find_one({"id_sorteo": int(current_id_clean)})
+        if not doc:
+            raise HTTPException(404, detail="El Gordo draw not found")
+        draw = _build_draw(doc, "ELGR")
+        draw_norm = normalize_draw(draw)
+        numbers = draw_norm.get("numbers") or []
+        clave_val = doc.get("clave")
+        try:
+            clave_draw = int(clave_val) if isinstance(clave_val, (int, str)) and str(clave_val).strip() else None
+        except (TypeError, ValueError):
+            clave_draw = None
+        if len(numbers) >= 5:
+            main_draw = [int(x) for x in numbers[:5]]
+        else:
+            main_draw = []
+        if len(main_draw) != 5 or clave_draw is None:
+            raise HTTPException(400, detail="El Gordo draw mains/clave missing or invalid")
+        main_set = set(main_draw)
+        clave_set = {int(clave_draw)}
+        draw_date = (draw.get("fecha_sorteo") or "")[:10] or None
+        if not draw_date:
+            raise HTTPException(400, detail="El Gordo draw date missing")
+
+        coll_progress = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+        progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+        if progress_doc is None and pre_id_clean.isdigit():
+            progress_doc = coll_progress.find_one({"cutoff_draw_id": int(pre_id_clean)})
+        if not progress_doc:
+            raise HTTPException(404, detail="El Gordo training progress not found for pre_id")
+        path = (progress_doc.get("full_wheel_file_path") or "").strip()
+        if not path:
+            raise HTTPException(400, detail="El Gordo full wheel file not generated for this pre_id")
+        if not os.path.isfile(path):
+            raise HTTPException(404, detail="El Gordo full wheel file not found on disk")
+
+        _el_gordo_full_wheel_reorder_txt(path, main_set, clave_set, draw_date)
+
+        coll_compare.delete_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
+        result = _el_gordo_full_wheel_compare(current_id_clean, pre_id_clean, db)
+        coll_compare.update_one(
+            {"current_id": current_id_clean, "pre_id": pre_id_clean},
+            {"$set": {"reorder_applied": True}},
+        )
+        return JSONResponse(content=_item_to_json(result))
+    finally:
+        _EL_GORDO_REORDER_LOCK.release()
 
 
 def _api_euromillones_compare_full_wheel_reorder_impl(current_id: str, pre_id: str):
@@ -4437,10 +5232,12 @@ def api_el_gordo_rule_filters(
     ),
 ):
     """
-    Step 4 (new_flow): build pool of 20 main numbers + 6 clave numbers for El Gordo.
-    - 4–5 mains + 1 clave from row where pre_id_sorteo == current id_sorteo, or random if not found.
-    - Remaining mains from Step 3 ranking bands (1–20: 6–7, 21–30: 3, 31–40: 3, 41–54: 3), no duplicate.
-    - Clave pool: snapshot clave + up to 5 additional clave candidates from Step 3 ranking, no duplicate.
+    Step 4 (new_flow): build pool of mains + clave like Euromillones (prioritized subset then extend to full).
+
+    - 4–5 mains + 1 clave from previous draw (pre_id_sorteo == cutoff) or random.
+    - Additional mains from Step 3 ranking bands (1–20: 6–7, 21–30: 3, 31–40: 3, 41–54: 3); then extend to all 54.
+    - Clave: 1 from previous + up to 3 from ranking; then extend to all 10.
+    - Result: filtered_mains_probs (54 items), filtered_clave_probs (10 items) for candidate-pool and full-wheel.
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
@@ -4457,16 +5254,16 @@ def api_el_gordo_rule_filters(
     if not mains and not claves:
         raise HTTPException(400, detail="Run step 3 (compute probabilities) first.")
 
-    # Row where pre_id_sorteo == current id_sorteo (current id_sorteo == row.pre_id_sorteo)
+    # Previous draw (row where pre_id_sorteo == current id_sorteo) for snapshot
     prev_main_numbers: Optional[List[int]] = None
     prev_clave: Optional[int] = None
     prev_row = feature_coll.find_one({"pre_id_sorteo": cid})
     if prev_row:
         pm = prev_row.get("main_number") or []
         prev_main_numbers = [int(x) for x in pm if isinstance(x, (int, float))]
-        clave_val = prev_row.get("clave")
-        if isinstance(clave_val, (int, float)):
-            prev_clave = int(clave_val)
+        pc = prev_row.get("clave")
+        if isinstance(pc, int):
+            prev_clave = pc
 
     result = build_el_gordo_step4_pool(
         mains_probs=mains,
@@ -4514,13 +5311,11 @@ def api_el_gordo_candidate_pool(
     num_tickets: int = Query(3000, ge=100, le=10000),
 ):
     """
-    Step 5 (new_flow): generate candidate ticket pool for El Gordo from Step 4 pool.
+    Step 5 (new_flow): generate candidate ticket pool from Step 4 pool (mirror Euromillones).
 
-    - Uses filtered_mains_probs (20 mains) and filtered_clave_probs (up to 6 claves)
-      produced by Step 4.
-    - Each ticket: 5 distinct mains from the 20, 1 clave from the clave pool
-      (assigned in round-robin order).
-    - Saves candidate_pool (list of {mains, clave}) and count to el_gordo_train_progress.
+    Uses filtered_mains_probs and filtered_clave_probs from Step 4 (54 mains, 10 claves after extend).
+    Each ticket: 5 distinct mains from pool, 1 clave (round-robin). C(54,5)*10 possible; we take up to num_tickets.
+    Saves candidate_pool (list of {mains, clave}) and count to el_gordo_train_progress.
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
@@ -4566,8 +5361,7 @@ def api_el_gordo_candidate_pool(
             detail="Pool too small: need at least 1 clave.",
         )
 
-    # Generate mains combinations in a structured way (no duplicates),
-    # then pair them with claves in round-robin fashion.
+    # Build tickets from Step 4 pool: C(mains,5) × clave round-robin (same pattern as Euromillones).
     unique_mains_combos = list(combinations(sorted(set(main_nums)), 5))
     random.shuffle(unique_mains_combos)
     max_mains = min(len(unique_mains_combos), num_tickets)
@@ -5050,6 +5844,197 @@ def api_euromillones_full_wheel(
             "draw_date": date_str,
         }
     )
+
+
+@app.post("/api/el-gordo/train/full-wheel")
+def api_el_gordo_full_wheel(
+    cutoff_draw_id: str = Query(
+        ...,
+        description="id_sorteo for this El Gordo training run; generates full-wheel TXT (54 mains, 10 claves).",
+    ),
+    draw_date: str | None = Query(
+        None,
+        description="Optional draw date YYYY-MM-DD for the TXT filename; falls back to probs_fecha_sorteo.",
+    ),
+):
+    """
+    Generate full El Gordo wheeling file from Step 4 pool (mirror Euromillones).
+
+    - Uses filtered_mains_probs and filtered_stars_probs from Step 4 (54 mains, 10 claves after extend).
+    - Generates ALL tickets: C(54,5) * 10 = 31,625,100; classifies by tier (good/bad), writes good first.
+    - Saves to el_gordo_<draw_date>.txt under el_gordo_pools. Persists full_wheel_* to progress.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    cid = cutoff_draw_id.strip()
+    if not cid:
+        raise HTTPException(400, detail="cutoff_draw_id is required")
+
+    coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one({"cutoff_draw_id": cid})
+    if not doc:
+        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+
+    filtered_mains = doc.get("filtered_mains_probs") or []
+    filtered_clave = doc.get("filtered_clave_probs") or []
+    if not filtered_mains or not filtered_clave:
+        raise HTTPException(
+            400,
+            detail="Run step 4 (Generar pool) first so filtered_mains_probs/filtered_clave_probs are populated.",
+        )
+
+    # Preserve Step 4 pool order (mirror Euromillones full wheel).
+    mains_pool = [
+        int(x.get("number") or 0)
+        for x in filtered_mains
+        if x.get("number") is not None
+    ]
+    clave_pool = [
+        int(x.get("number") or 0)
+        for x in filtered_clave
+        if x.get("number") is not None
+    ]
+    if len(mains_pool) < 5 or not clave_pool:
+        raise HTTPException(
+            400,
+            detail="Pool too small to build El Gordo tickets (need at least 5 mains and 1 clave).",
+        )
+
+    date_str = (draw_date or "").strip()
+    if not date_str:
+        fecha = (doc.get("probs_fecha_sorteo") or "").strip()
+        date_str = fecha.split(" ")[0] or fecha
+    if not date_str:
+        last_draw_date = _get_last_draw_date("el-gordo") or ""
+        date_str = last_draw_date.strip()[:10]
+    if not date_str:
+        raise HTTPException(400, detail="Cannot determine draw date for filename.")
+
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    coll.update_one(
+        {"cutoff_draw_id": cid},
+        {
+            "$set": {
+                "full_wheel_status": "waiting",
+                "full_wheel_error": None,
+                "full_wheel_draw_date": date_str,
+                "full_wheel_file_path": None,
+                "full_wheel_total_tickets": 0,
+                "full_wheel_good_tickets": 0,
+                "full_wheel_bad_tickets": 0,
+                "full_wheel_generated_at": None,
+                "full_wheel_started_at": now,
+            }
+        },
+        upsert=True,
+    )
+
+    def _run_el_gordo_full_wheel() -> None:
+        try:
+            stats = _generate_el_gordo_full_wheel_file(
+                mains_pool=mains_pool,
+                clave_pool=clave_pool,
+                draw_date=date_str,
+            )
+            finished_at = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {
+                    "$set": {
+                        "full_wheel_status": "done",
+                        "full_wheel_draw_date": stats["draw_date"],
+                        "full_wheel_file_path": stats["file_path"],
+                        "full_wheel_total_tickets": stats["total_tickets"],
+                        "full_wheel_good_tickets": stats.get("good_tickets", 0),
+                        "full_wheel_bad_tickets": stats.get("bad_tickets", 0),
+                        "full_wheel_generated_at": finished_at,
+                    }
+                },
+            )
+        except Exception as e:
+            logging.exception("Error generating El Gordo full wheel: %s", e)
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {
+                    "$set": {
+                        "full_wheel_status": "error",
+                        "full_wheel_error": str(e),
+                    }
+                },
+            )
+
+    t = threading.Thread(target=_run_el_gordo_full_wheel, daemon=True)
+    t.start()
+
+    return JSONResponse(
+        content={
+            "status": "started",
+            "cutoff_draw_id": cid,
+            "draw_date": date_str,
+        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/el-gordo/train/full-wheel-preview")
+def api_el_gordo_full_wheel_preview(
+    cutoff_draw_id: str = Query(..., description="id_sorteo for this training run."),
+    limit: int = Query(20, ge=1, le=200),
+):
+    """
+    Return a small preview of the full-wheeling ticket file for El Gordo (mirror Euromillones).
+
+    - Reads full_wheel_file_path from el_gordo_train_progress.
+    - Streams the first `limit` lines from the TXT file.
+    - Each line is parsed into { position, mains, clave }.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one({"cutoff_draw_id": cutoff_draw_id.strip()})
+    if not doc:
+        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+
+    path = (doc.get("full_wheel_file_path") or "").strip()
+    if not path:
+        return JSONResponse(
+            content={"tickets": [], "file_path": None, "total_tickets": doc.get("full_wheel_total_tickets") or 0},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    try:
+        tickets = []
+        with open(path, "r", encoding="utf-8") as f:
+            for _ in range(limit):
+                line = f.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    pos_str, mains_str, clave_str = line.split(";")
+                    position = int(pos_str)
+                    mains = [int(x) for x in mains_str.split(",") if x]
+                    clave = int(clave_str)
+                except Exception:
+                    continue
+                tickets.append(
+                    {
+                        "position": position,
+                        "mains": mains,
+                        "clave": clave,
+                    }
+                )
+        return JSONResponse(
+            content={
+                "tickets": tickets,
+                "file_path": path,
+                "total_tickets": doc.get("full_wheel_total_tickets") or 0,
+            },
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    except FileNotFoundError:
+        raise HTTPException(404, detail="Full wheel file not found on disk")
 
 
 @app.get("/api/euromillones/train/full-wheel-preview")
