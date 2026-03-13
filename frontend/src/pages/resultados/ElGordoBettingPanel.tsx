@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Spin, Tooltip } from 'antd';
+import { Spin, Tooltip, Pagination } from 'antd';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
@@ -180,6 +180,8 @@ export function ElGordoBettingPanel() {
   const [bucket, setBucket] = useState<ElGordoTicket[]>([]);
   const [realPool, setRealPool] = useState<ElGordoTicket[]>([]);
   const [candidateCount, setCandidateCount] = useState(100);
+  const [totalTickets, setTotalTickets] = useState(0);
+  const [page, setPage] = useState(1);
   const [searchParams] = useSearchParams();
   const drawDate = searchParams.get('draw_date') ?? '';
   const cutoffDrawId = searchParams.get('cutoff_draw_id') ?? '';
@@ -203,18 +205,15 @@ export function ElGordoBettingPanel() {
       if (!res.ok) {
         if (showLoading) {
           setError(data.detail ?? res.statusText ?? 'Error al cargar pool');
-          setCandidatePool([]);
           setLastDrawDate(null);
         }
         return;
       }
       setLastDrawDate(data.last_draw_date ?? null);
-      setCandidatePool(Array.isArray(data.candidate_pool) ? data.candidate_pool : []);
       setRealPool(Array.isArray(data.bought_tickets) ? data.bought_tickets : []);
     } catch (e) {
       if (showLoading) {
         setError(e instanceof Error ? e.message : 'Error al cargar pool');
-        setCandidatePool([]);
         setLastDrawDate(null);
       }
     } finally {
@@ -222,9 +221,56 @@ export function ElGordoBettingPanel() {
     }
   }, [drawDate, cutoffDrawId]);
 
+  const fetchCandidatePage = useCallback(
+    async (showLoading = true) => {
+      if (showLoading && !loadingShownOnce.current) {
+        loadingShownOnce.current = true;
+        setLoading(true);
+        setError('');
+      }
+      try {
+        const params = new URLSearchParams();
+        if (drawDate) params.set('draw_date', drawDate);
+        else if (cutoffDrawId) params.set('cutoff_draw_id', cutoffDrawId);
+        const skip = (page - 1) * candidateCount;
+        params.set('skip', String(skip));
+        params.set('limit', String(candidateCount));
+        const url = `${API_URL}/api/el-gordo/betting/pool-from-file?${params.toString()}`;
+        const res = await fetch(url, { cache: 'no-store' });
+        const data = await res.json();
+        if (!res.ok) {
+          if (showLoading) {
+            setError(data.detail ?? res.statusText ?? 'Error al cargar pool de candidatos');
+            setCandidatePool([]);
+            setTotalTickets(0);
+          }
+          return;
+        }
+        setCandidatePool(Array.isArray(data.tickets) ? data.tickets : []);
+        setTotalTickets(typeof data.total === 'number' ? data.total : 0);
+      } catch (e) {
+        if (showLoading) {
+          setError(e instanceof Error ? e.message : 'Error al cargar pool de candidatos');
+          setCandidatePool([]);
+          setTotalTickets(0);
+        }
+      } finally {
+        if (showLoading) setLoading(false);
+      }
+    },
+    [drawDate, cutoffDrawId, page, candidateCount],
+  );
+
   useEffect(() => {
-    fetchBettingPool();
-  }, [fetchBettingPool]);
+    const run = async () => {
+      setLoading(true);
+      setError('');
+      await fetchBettingPool(false);
+      await fetchCandidatePage(false);
+      setLoading(false);
+    };
+    run();
+  }, [fetchBettingPool, fetchCandidatePage]);
 
   const addToBucket = (ticket: ElGordoTicket) => {
     if (bucket.length >= BUCKET_MAX) return;
@@ -327,8 +373,10 @@ export function ElGordoBettingPanel() {
     const tickets = q?.tickets;
     if (Array.isArray(tickets)) for (const t of tickets) inQueue.add(ticketKey(t));
   }
-  const availableCandidates = candidatePool.filter((t) => !inBucketOrReal.has(ticketKey(t)) && !inQueue.has(ticketKey(t)));
-  const displayedCandidates = availableCandidates.slice(0, candidateCount);
+  const availableCandidates = candidatePool.filter(
+    (t) => !inBucketOrReal.has(ticketKey(t)) && !inQueue.has(ticketKey(t)),
+  );
+  const displayedCandidates = availableCandidates;
 
   if (loading) {
     return (
@@ -379,8 +427,17 @@ export function ElGordoBettingPanel() {
               </div>
             </div>
             <p style={{ margin: '0 0 var(--space-sm)', fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
-              {candidatePool.length} boletos · {availableCandidates.length} disponibles · mostrando {displayedCandidates.length} · máx. {BUCKET_MAX} en la cesta
+              {totalTickets} boletos en full wheel · página {page} · mostrando {displayedCandidates.length} · máx. {BUCKET_MAX} en la cesta
             </p>
+            <Pagination
+              size="small"
+              current={page}
+              pageSize={candidateCount}
+              total={totalTickets}
+              onChange={(p) => setPage(p)}
+              showSizeChanger={false}
+              style={{ marginBottom: 'var(--space-sm)' }}
+            />
             <div className="el-gordo-betting-gallery">
               {displayedCandidates.length === 0 ? (
                 <p style={{ margin: 'auto', fontSize: '0.85rem', color: 'var(--color-text-muted)', gridColumn: '1 / -1' }}>

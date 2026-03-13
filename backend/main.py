@@ -1523,6 +1523,8 @@ _PUBLIC_API_PATHS = {
     "/api/la-primitiva/betting/bot/complete",
     # Dev-only helper to seed test bought tickets for Euromillones. Do NOT expose in production.
     "/api/dev/euromillones/betting/seed-test-bought",
+    # Dev-only helper to seed test bought tickets for El Gordo. Do NOT expose in production.
+    "/api/dev/el-gordo/betting/seed-test-bought",
 }
 
 
@@ -3325,26 +3327,9 @@ def _el_gordo_full_wheel_reorder_txt(
         )
         return
 
-    # min_count ranges (slightly stronger than Euromillones: more 3th/4th to move)
+    # Decide which high‑prize tickets to move:
+    # Only move if there is currently NO ticket of that category before first_position.
     import random as rand_module
-
-    n_2 = rand_module.randint(1, 2)
-    n_3 = rand_module.randint(5, 10)
-    n_4 = rand_module.randint(15, 20)
-    cand_2 = [p for p in second_positions if p > first_position]
-    cand_3 = [p for p in third_positions if p > first_position]
-    cand_4 = [p for p in fourth_positions if p > first_position]
-    to_move_2 = rand_module.sample(cand_2, min(n_2, len(cand_2))) if cand_2 else []
-    to_move_3 = rand_module.sample(cand_3, min(n_3, len(cand_3))) if cand_3 else []
-    to_move_4 = rand_module.sample(cand_4, min(n_4, len(cand_4))) if cand_4 else []
-    print(
-        f"[el-gordo-reorder] marks n_2={n_2} n_3={n_3} n_4={n_4} | candidates >first: 2th={len(cand_2)} 3th={len(cand_3)} 4th={len(cand_4)}",
-        flush=True,
-    )
-    print(
-        f"[el-gordo-reorder] to_move_2={to_move_2} to_move_3={to_move_3} to_move_4={to_move_4}",
-        flush=True,
-    )
 
     def range_list_el(lo: float, hi: int) -> List[int]:
         return list(range(max(1, int(lo)), hi + 1))
@@ -3352,25 +3337,42 @@ def _el_gordo_full_wheel_reorder_txt(
     r_2 = range_list_el(first_position * 0.8, first_position - 1)
     r_3 = range_list_el(first_position * 0.5, first_position - 1)
     r_4 = range_list_el(first_position * 0.3, first_position - 1)
-    used: set = {first_position}
 
-    def pick_distinct_el(pool: List[int], count: int, available: List[int]) -> List[Tuple[int, int]]:
-        out: List[Tuple[int, int]] = []
-        avail = [x for x in available if x not in used]
-        if not avail or count <= 0:
-            return out
-        k = min(count, len(avail))
-        chosen = rand_module.sample(avail, k)
-        for old_pos, new_pos in zip(pool[:k], chosen):
-            used.add(new_pos)
-            out.append((old_pos, new_pos))
-        return out
+    used: set[int] = {first_position}
+
+    def pick_single_move(candidates: List[int], band: List[int]) -> List[Tuple[int, int]]:
+        """
+        Select exactly ONE ticket from `candidates` and assign it to ONE new
+        position in `band`, avoiding collisions with already used positions.
+        Returns [(old_pos, new_pos)] or [].
+        """
+        if not candidates or not band:
+            return []
+        avail = [x for x in band if x not in used]
+        if not avail:
+            return []
+        old_pos = rand_module.choice(candidates)
+        new_pos = rand_module.choice(avail)
+        used.add(new_pos)
+        return [(old_pos, new_pos)]
+
+    # Check if there is already at least one ticket of each category before first_position
+    has_2_before = any(p < first_position for p in second_positions)
+    has_3_before = any(p < first_position for p in third_positions)
+    has_4_before = any(p < first_position for p in fourth_positions)
+
+    cand_2 = [p for p in second_positions if p > first_position]
+    cand_3 = [p for p in third_positions if p > first_position]
+    cand_4 = [p for p in fourth_positions if p > first_position]
 
     moves: List[Tuple[int, int]] = [(jackpot_position, first_position)]
     used.add(first_position)
-    moves.extend(pick_distinct_el(to_move_2, len(to_move_2), r_2))
-    moves.extend(pick_distinct_el(to_move_3, len(to_move_3), r_3))
-    moves.extend(pick_distinct_el(to_move_4, len(to_move_4), r_4))
+    if not has_2_before:
+        moves.extend(pick_single_move(cand_2, r_2))
+    if not has_3_before:
+        moves.extend(pick_single_move(cand_3, r_3))
+    if not has_4_before:
+        moves.extend(pick_single_move(cand_4, r_4))
     print(
         f"[el-gordo-reorder] ranges 2th len={len(r_2)} 3th len={len(r_3)} 4th len={len(r_4)} | moves ({len(moves)}): {moves}",
         flush=True,
@@ -3620,14 +3622,17 @@ def _el_gordo_full_wheel_compare(
         doc = coll_draws.find_one({"id_sorteo": int(current_id)})
     if not doc:
         raise HTTPException(404, detail="El Gordo draw not found")
+    # Normalized draw (used later for fecha_sorteo and optional fallbacks)
     draw = _build_draw(doc, "ELGR")
-    draw_norm = normalize_draw(draw)
-
-    # El Gordo: use raw collection fields for clarity.
-    # - doc["numbers"]: first 5 = mains
+    # Use raw collection fields so we exactly match the UI:
+    # - doc["numbers"]: first 5 entries = mains
     # - doc["reintegro"]: clave
     raw_numbers = doc.get("numbers") or []
     raw_reintegro = doc.get("reintegro")
+    print(
+        f"[el-gordo-compare] raw draw current_id={current_id!r} numbers={raw_numbers} reintegro={raw_reintegro}",
+        flush=True,
+    )
 
     main_draw: list[int] = [int(x) for x in raw_numbers[:5]]
     clave_draw: int | None = None
@@ -3636,9 +3641,14 @@ def _el_gordo_full_wheel_compare(
             clave_draw = int(raw_reintegro)
     except (TypeError, ValueError):
         clave_draw = None
+    print(
+        f"[el-gordo-compare] parsed from raw -> mains={main_draw} clave={clave_draw}",
+        flush=True,
+    )
 
-    # Fallback: if reintegro missing, try last number from parsed numbers/combinacion_acta
-    if (len(main_draw) != 5 or clave_draw is None):
+    # Fallback: if reintegro missing, try from normalized numbers / combinacion_acta.
+    if len(main_draw) != 5 or clave_draw is None:
+        draw_norm = normalize_draw(draw)
         numbers = draw_norm.get("numbers") or []
         combinacion_acta = draw.get("combinacion_acta") or ""
         if len(numbers) >= 6:
@@ -3653,12 +3663,20 @@ def _el_gordo_full_wheel_compare(
             if len(nums) >= 6:
                 main_draw = nums[:5]
                 clave_draw = nums[-1]
+        print(
+            f"[el-gordo-compare] parsed from fallback -> mains={main_draw} clave={clave_draw}",
+            flush=True,
+        )
 
     if len(main_draw) != 5 or clave_draw is None:
+        print(
+            f"[el-gordo-compare] ERROR mains/clave invalid -> mains={main_draw} clave={clave_draw}",
+            flush=True,
+        )
         raise HTTPException(400, detail="El Gordo draw mains/clave missing or invalid")
     main_set = set(main_draw)
     clave_set = {int(clave_draw)}
-    draw_date = (draw.get("fecha_sorteo") or "")[:10] or None
+    draw_date = (doc.get("fecha_sorteo") or "")[:10] or None
 
     coll_progress = db_instance[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
     progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
@@ -3702,6 +3720,8 @@ def _el_gordo_full_wheel_compare(
             if hits_main == 5 and hits_clave == 1:
                 if jackpot_position is None:
                     jackpot_position = position
+                # Stop scanning once jackpot (5+clave) is found, like Euromillones.
+                break
             elif hits_main == 5 and hits_clave == 0:
                 if second_first is None:
                     second_first = position
@@ -3861,6 +3881,71 @@ def api_euromillones_compare_analysis(
     return JSONResponse(content={"rows": rows})
 
 
+@app.get("/api/el-gordo/compare/analysis")
+def api_el_gordo_compare_analysis(
+    limit: int = Query(200, ge=1, le=1000, description="Max rows to return, sorted by date desc"),
+):
+    """
+    Analysis of El Gordo full-wheel compares.
+
+    Reads el_gordo_compare_results and returns rows sorted by date desc:
+      - date
+      - current_id
+      - pre_id
+      - jackpot_position (5+clave)
+      - pos_2th (5+0), pos_3th (4+1), pos_4th (4+0)
+      - all categories from 'categories' array (1ª..8ª, Reintegro, etc.)
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    coll = db[EL_GORDO_COMPARE_RESULTS_COLLECTION]
+    cursor = coll.find(
+        {},
+        projection={
+            "_id": 0,
+            "date": 1,
+            "current_id": 1,
+            "pre_id": 1,
+            "jackpot_position": 1,
+            "pos_2th": 1,
+            "pos_3th": 1,
+            "pos_4th": 1,
+            "categories": 1,
+        },
+    ).sort("date", -1).limit(limit)
+    rows: List[Dict[str, Any]] = []
+    for doc in cursor:
+        date_str = (doc.get("date") or "")[:10]
+        cats = doc.get("categories") or []
+        # Ensure categories is always a list of dicts
+        norm_cats: List[Dict[str, Any]] = []
+        for c in cats:
+            if not isinstance(c, dict):
+                continue
+            norm_cats.append(
+                {
+                    "category": str(c.get("category") or ""),
+                    "main_hits": int(c.get("main_hits") or 0),
+                    "clave_hit": int(c.get("clave_hit") or 0),
+                    "first_position": int(c.get("first_position") or 0),
+                    "count": int(c.get("count") or 0),
+                }
+            )
+        rows.append(
+            {
+                "date": date_str,
+                "current_id": str(doc.get("current_id") or ""),
+                "pre_id": str(doc.get("pre_id") or ""),
+                "jackpot_position": int(doc.get("jackpot_position") or 0),
+                "pos_2th": int(doc.get("pos_2th") or 0) if doc.get("pos_2th") is not None else None,
+                "pos_3th": int(doc.get("pos_3th") or 0) if doc.get("pos_3th") is not None else None,
+                "pos_4th": int(doc.get("pos_4th") or 0) if doc.get("pos_4th") is not None else None,
+                "categories": norm_cats,
+            }
+        )
+    return JSONResponse(content={"rows": rows})
+
+
 @app.get("/api/euromillones/compare/full-wheel/tickets")
 def api_euromillones_compare_full_wheel_tickets(
     current_id: str = Query(..., description="id_sorteo of the draw (result)."),
@@ -4011,6 +4096,153 @@ def api_euromillones_compare_full_wheel_tickets(
     )
 
 
+@app.get("/api/el-gordo/compare/full-wheel/tickets")
+def api_el_gordo_compare_full_wheel_tickets(
+    current_id: str = Query(..., description="id_sorteo of the draw (result)."),
+    pre_id: str = Query(..., description="cutoff_draw_id for the full wheel run."),
+    skip: int = Query(0, ge=0, description="Number of tickets to skip from the start (0‑based)."),
+    limit: int = Query(100, ge=1, le=100, description="Page size (max 100)."),
+):
+    """
+    Paginated view of tickets in the El Gordo full wheel TXT (after any reorder).
+
+    Returns tickets with:
+      - position (No)
+      - mains (array)
+      - clave (number)
+      - main_hits / clave_hit
+      - category label (1ª..8ª, Reintegro) based on hits vs result draw.
+    Uses skip/limit on the position number (1‑based). Does not load the whole file into RAM.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    pre_id_clean = pre_id.strip()
+    current_id_clean = current_id.strip()
+
+    # Resolve draw and main/clave sets (same parsing as _el_gordo_full_wheel_compare)
+    coll_draws = db["el_gordo"]
+    doc = coll_draws.find_one({"id_sorteo": current_id_clean})
+    if doc is None and current_id_clean.isdigit():
+        doc = coll_draws.find_one({"id_sorteo": int(current_id_clean)})
+    if not doc:
+        raise HTTPException(404, detail="El Gordo draw not found")
+
+    raw_numbers = doc.get("numbers") or []
+    raw_reintegro = doc.get("reintegro")
+    main_draw: List[int] = [int(x) for x in raw_numbers[:5]]
+    clave_draw: Optional[int] = None
+    try:
+        if raw_reintegro is not None and str(raw_reintegro).strip():
+            clave_draw = int(raw_reintegro)
+    except (TypeError, ValueError):
+        clave_draw = None
+
+    if len(main_draw) != 5 or clave_draw is None:
+        raise HTTPException(400, detail="El Gordo draw mains/clave missing or invalid")
+
+    main_set = set(main_draw)
+    clave_set = {clave_draw}
+
+    # Resolve TXT path from train progress
+    coll_progress = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+    if progress_doc is None and pre_id_clean.isdigit():
+        progress_doc = coll_progress.find_one({"cutoff_draw_id": int(pre_id_clean)})
+    if not progress_doc:
+        raise HTTPException(404, detail="El Gordo training progress not found for pre_id")
+    path = (progress_doc.get("full_wheel_file_path") or "").strip()
+    if not path:
+        raise HTTPException(400, detail="El Gordo full wheel file not generated for this pre_id")
+    if not os.path.isfile(path):
+        raise HTTPException(404, detail="El Gordo full wheel file not found on disk")
+
+    # Total tickets: estimate as last position in file (streaming)
+    total_tickets: Optional[int] = None
+    last_pos = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pos_str, _m, _c = line.split(";")
+                p = int(pos_str)
+                if p > last_pos:
+                    last_pos = p
+            except Exception:
+                continue
+    total_tickets = last_pos
+
+    # Map (hm, hc) -> label like "1ª (5 + 1)" etc.
+    category_labels_el_gordo: Dict[Tuple[int, int], str] = {
+        (5, 1): "1ª (5 + 1)",
+        (5, 0): "2ª (5 + 0)",
+        (4, 1): "3ª (4 + 1)",
+        (4, 0): "4ª (4 + 0)",
+        (3, 1): "5ª (3 + 1)",
+        (3, 0): "6ª (3 + 0)",
+        (2, 1): "7ª (2 + 1)",
+        (2, 0): "8ª (2 + 0)",
+        (0, 1): "Reintegro",
+    }
+
+    def label_for_el_gordo(hm: int, hc: int) -> str:
+        return category_labels_el_gordo.get((hm, hc), f"{hm}+{hc}")
+
+    # Stream TXT and collect only tickets in [skip, skip+limit)
+    items: List[Dict] = []
+    start_pos = skip + 1  # positions are 1‑based
+    end_pos = skip + limit
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pos_str, mains_str, clave_str = line.split(";")
+                position = int(pos_str)
+            except Exception:
+                continue
+            if position < start_pos:
+                continue
+            if position > end_pos:
+                break
+            mains = [int(x) for x in mains_str.split(",") if x]
+            try:
+                clave = int(clave_str)
+            except Exception:
+                continue
+            if len(mains) != 5:
+                continue
+            hits_main = sum(1 for n in mains if n in main_set)
+            hits_clave = 1 if clave in clave_set else 0
+            items.append(
+                {
+                    "position": position,
+                    "mains": mains,
+                    "clave": clave,
+                    "first_main": mains[0],
+                    "category": label_for_el_gordo(hits_main, hits_clave),
+                    "main_hits": hits_main,
+                    "clave_hit": hits_clave,
+                }
+            )
+            if len(items) >= limit:
+                break
+
+    return JSONResponse(
+        content={
+            "current_id": current_id_clean,
+            "pre_id": pre_id_clean,
+            "skip": skip,
+            "limit": limit,
+            "total_tickets": total_tickets,
+            "tickets": items,
+        }
+    )
+
+
 @app.post("/api/euromillones/compare/full-wheel/reorder")
 def api_euromillones_compare_full_wheel_reorder(
     current_id: str = Query(..., description="id_sorteo of the draw (result); draw date from this."),
@@ -4058,12 +4290,15 @@ def api_el_gordo_compare_full_wheel_reorder(
         raise HTTPException(500, detail="Database not connected")
     pre_id_clean = pre_id.strip()
     current_id_clean = current_id.strip()
+    print(f"[el-gordo-reorder-api] START current_id={current_id_clean!r} pre_id={pre_id_clean!r}", flush=True)
     coll_compare = db[EL_GORDO_COMPARE_RESULTS_COLLECTION]
     existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
     if existing and existing.get("reorder_applied") is True:
+        print("[el-gordo-reorder-api] existing result with reorder_applied=true, returning cached", flush=True)
         result = {k: v for k, v in existing.items() if k != "_id"}
         return JSONResponse(content=_item_to_json(result))
     if not _EL_GORDO_REORDER_LOCK.acquire(blocking=False):
+        print("[el-gordo-reorder-api] reorder lock busy, returning 503", flush=True)
         raise HTTPException(
             503,
             detail="El Gordo reorder already in progress. Please retry later.",
@@ -4075,23 +4310,32 @@ def api_el_gordo_compare_full_wheel_reorder(
             doc = coll_draws.find_one({"id_sorteo": int(current_id_clean)})
         if not doc:
             raise HTTPException(404, detail="El Gordo draw not found")
-        draw = _build_draw(doc, "ELGR")
-        draw_norm = normalize_draw(draw)
-        numbers = draw_norm.get("numbers") or []
-        clave_val = doc.get("clave")
+
+        # Parse mains + clave exactly like compare
+        raw_numbers = doc.get("numbers") or []
+        raw_reintegro = doc.get("reintegro")
+        print(
+            f"[el-gordo-reorder-api] raw draw numbers={raw_numbers} reintegro={raw_reintegro}",
+            flush=True,
+        )
+        main_draw: list[int] = [int(x) for x in raw_numbers[:5]]
+        clave_draw: int | None = None
         try:
-            clave_draw = int(clave_val) if isinstance(clave_val, (int, str)) and str(clave_val).strip() else None
+            if raw_reintegro is not None and str(raw_reintegro).strip():
+                clave_draw = int(raw_reintegro)
         except (TypeError, ValueError):
             clave_draw = None
-        if len(numbers) >= 5:
-            main_draw = [int(x) for x in numbers[:5]]
-        else:
-            main_draw = []
+
         if len(main_draw) != 5 or clave_draw is None:
+            print(
+                f"[el-gordo-reorder-api] ERROR mains/clave invalid -> mains={main_draw} clave={clave_draw}",
+                flush=True,
+            )
             raise HTTPException(400, detail="El Gordo draw mains/clave missing or invalid")
+
         main_set = set(main_draw)
         clave_set = {int(clave_draw)}
-        draw_date = (draw.get("fecha_sorteo") or "")[:10] or None
+        draw_date = (doc.get("fecha_sorteo") or "")[:10] or None
         if not draw_date:
             raise HTTPException(400, detail="El Gordo draw date missing")
 
@@ -4107,14 +4351,20 @@ def api_el_gordo_compare_full_wheel_reorder(
         if not os.path.isfile(path):
             raise HTTPException(404, detail="El Gordo full wheel file not found on disk")
 
+        print(
+            f"[el-gordo-reorder-api] calling _el_gordo_full_wheel_reorder_txt path={path} mains={sorted(main_set)} clave_set={clave_set}",
+            flush=True,
+        )
         _el_gordo_full_wheel_reorder_txt(path, main_set, clave_set, draw_date)
 
         coll_compare.delete_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
+        print("[el-gordo-reorder-api] running compare after reorder", flush=True)
         result = _el_gordo_full_wheel_compare(current_id_clean, pre_id_clean, db)
         coll_compare.update_one(
             {"current_id": current_id_clean, "pre_id": pre_id_clean},
             {"$set": {"reorder_applied": True}},
         )
+        print("[el-gordo-reorder-api] DONE", flush=True)
         return JSONResponse(content=_item_to_json(result))
     finally:
         _EL_GORDO_REORDER_LOCK.release()
@@ -4275,6 +4525,70 @@ def api_dev_euromillones_seed_test_bought(
         doc = coll.find_one({"cutoff_draw_id": int(cutoff)})
     if not doc:
         raise HTTPException(404, detail=f"euromillones_train_progress not found for cutoff_draw_id={cutoff}")
+
+    coll.update_one(
+        {"_id": doc["_id"]},
+        {
+            "$set": {
+                "bought_tickets": tickets,
+                "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        },
+    )
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "cutoff_draw_id": cutoff,
+            "saved_count": len(tickets),
+        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.post("/api/dev/el-gordo/betting/seed-test-bought")
+def api_dev_el_gordo_seed_test_bought(
+    cutoff_draw_id: str = Query("", description="cutoff_draw_id of el_gordo_train_progress doc to seed"),
+):
+    """
+    DEV-ONLY: seed some test bought tickets into el_gordo_train_progress.bought_tickets.
+    This endpoint is public (no Authorization). Do NOT enable in production.
+
+    It mirrors the Euromillones dev endpoint but uses El Gordo ticket shape:
+      { "mains": [..5 numbers..], "clave": X }.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    cutoff = cutoff_draw_id.strip()
+    if not cutoff:
+        # Fallback to last cutoff_draw_id from train progress
+        coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+        doc = coll.find_one(
+            projection={"cutoff_draw_id": 1},
+            sort=[("probs_fecha_sorteo", -1), ("_id", -1)],
+        )
+        if not doc:
+            raise HTTPException(404, detail="No el_gordo_train_progress doc found to seed")
+        cutoff = str(doc.get("cutoff_draw_id") or "").strip()
+        if not cutoff and isinstance(doc.get("cutoff_draw_id"), int):
+            cutoff = str(doc.get("cutoff_draw_id"))
+        if not cutoff:
+            raise HTTPException(400, detail="cutoff_draw_id missing and cannot infer last one")
+
+    tickets = [
+        {"mains": [1, 2, 3, 4, 5], "clave": 1},
+        {"mains": [10, 20, 30, 40, 50], "clave": 5},
+        {"mains": [7, 14, 21, 28, 35], "clave": 7},
+        {"mains": [11, 22, 33, 44, 54], "clave": 9},
+        {"mains": [6, 16, 26, 36, 46], "clave": 3},
+    ]
+
+    coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    # Try string cutoff_draw_id then int
+    doc = coll.find_one({"cutoff_draw_id": cutoff})
+    if not doc and cutoff.isdigit():
+        doc = coll.find_one({"cutoff_draw_id": int(cutoff)})
+    if not doc:
+        raise HTTPException(404, detail=f"el_gordo_train_progress not found for cutoff_draw_id={cutoff}")
 
     coll.update_one(
         {"_id": doc["_id"]},

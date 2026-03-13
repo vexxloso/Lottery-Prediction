@@ -156,7 +156,7 @@ export function SimulationPage() {
     'fullwheel',
   );
   /** El Gordo: which ticket pool to compare vs real result — prediction, bought, or full wheel. */
-  const [compareElGordoSource, setCompareElGordoSource] = useState<'prediction' | 'bought' | 'fullwheel'>('prediction');
+  const [compareElGordoSource, setCompareElGordoSource] = useState<'prediction' | 'bought' | 'fullwheel'>('fullwheel');
   const [showComparePoolTable, setShowComparePoolTable] = useState(false);
   // Euromillones: cached result from full-wheel compare endpoint (euromillones_compare_results)
   const [euromillonesFullWheelLoading, setEuromillonesFullWheelLoading] = useState(false);
@@ -200,6 +200,13 @@ export function SimulationPage() {
       count: number;
     }[];
   } | null>(null);
+  const [elGordoFullWheelTickets, setElGordoFullWheelTickets] = useState<
+    { position: number; mains: number[]; clave: number; first_main: number; category: string }[]
+  >([]);
+  const [elGordoFullWheelTicketsTotal, setElGordoFullWheelTicketsTotal] = useState(0);
+  const [elGordoFullWheelTicketsPage, setElGordoFullWheelTicketsPage] = useState(1);
+  const [elGordoFullWheelTicketsLoading, setElGordoFullWheelTicketsLoading] = useState(false);
+  const [showElGordoFullWheelTickets, setShowElGordoFullWheelTickets] = useState(false);
   const [featureRowsLoading, setFeatureRowsLoading] = useState(false);
   const [featureRowsError, setFeatureRowsError] = useState('');
   const [featureRows, setFeatureRows] = useState<EuromillonesFeatureRow[]>([]);
@@ -745,6 +752,51 @@ export function SimulationPage() {
     }
   };
 
+  const loadElGordoFullWheelTickets = async (page: number) => {
+    if (!drawId || !searchParams.get('prev_id')) return;
+    const prevId = searchParams.get('prev_id')!.trim();
+    const limit = 100;
+    const skip = (page - 1) * limit;
+    try {
+      setElGordoFullWheelTicketsLoading(true);
+      const params = new URLSearchParams({
+        current_id: drawId,
+        pre_id: prevId,
+        skip: String(skip),
+        limit: String(limit),
+      });
+      const res = await fetch(`${API_URL}/api/el-gordo/compare/full-wheel/tickets?${params.toString()}`);
+      const data = await res.json();
+      if (!res.ok || data.detail) {
+        throw new Error(
+          typeof data.detail === 'string'
+            ? data.detail
+            : 'Error al cargar boletos full wheel El Gordo',
+        );
+      }
+      const tickets = Array.isArray(data.tickets) ? (data.tickets as any[]) : [];
+      setElGordoFullWheelTickets(
+        tickets.map((t) => ({
+          position: Number(t.position),
+          mains: (t.mains ?? []).map(Number),
+          clave: Number(t.clave),
+          first_main: Number(t.first_main),
+          category: String(t.category ?? ''),
+        })),
+      );
+      setElGordoFullWheelTicketsTotal(Number(data.total_tickets ?? 0));
+      setElGordoFullWheelTicketsPage(page);
+      setShowElGordoFullWheelTickets(true);
+    } catch (e) {
+      console.error(e);
+      setElGordoFullWheelError(
+        e instanceof Error ? e.message : 'Error al cargar boletos full wheel El Gordo',
+      );
+    } finally {
+      setElGordoFullWheelTicketsLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (view === 'compare') {
       setCompareError('');
@@ -1108,9 +1160,7 @@ export function SimulationPage() {
                                 : slug === 'el-gordo'
                                   ? compareElGordoSource === 'bought'
                                     ? 'Boletos comprados'
-                                    : compareElGordoSource === 'fullwheel'
-                                      ? 'Full wheel'
-                                      : 'Predicción'
+                                    : 'Full wheel'
                                   : `Predicción (pool con cutoff ${compareProgress.cutoff_draw_id})`}
                           </h4>
                           {(slug === 'la-primitiva' || slug === 'euromillones' || slug === 'el-gordo') && (
@@ -1120,27 +1170,17 @@ export function SimulationPage() {
                               aria-label="Origen de boletos"
                               style={{ marginBottom: '0.5rem', gap: 0 }}
                             >
-                              {slug !== 'euromillones' && (
+                              {slug === 'la-primitiva' && (
                                 <button
                                   type="button"
                                   role="tab"
-                                  aria-selected={
-                                    slug === 'la-primitiva'
-                                      ? compareLaPrimitivaSource === 'prediction'
-                                      : compareElGordoSource === 'prediction'
-                                  }
+                                  aria-selected={compareLaPrimitivaSource === 'prediction'}
                                   className={`resultados-tab ${
-                                    (slug === 'la-primitiva'
-                                      ? compareLaPrimitivaSource
-                                      : compareElGordoSource) === 'prediction'
+                                    compareLaPrimitivaSource === 'prediction'
                                       ? 'resultados-tab--active'
                                       : ''
                                   }`}
-                                  onClick={() =>
-                                    slug === 'la-primitiva'
-                                      ? setCompareLaPrimitivaSource('prediction')
-                                      : setCompareElGordoSource('prediction')
-                                  }
+                                  onClick={() => setCompareLaPrimitivaSource('prediction')}
                                 >
                                   Predicción
                                 </button>
@@ -1274,6 +1314,12 @@ export function SimulationPage() {
                                 } else {
                                   void loadEuromillonesFullWheelTickets(1);
                                 }
+                              } else if (slug === 'el-gordo' && compareElGordoSource === 'fullwheel') {
+                                if (showElGordoFullWheelTickets) {
+                                  setShowElGordoFullWheelTickets(false);
+                                } else {
+                                  void loadElGordoFullWheelTickets(1);
+                                }
                               } else {
                                 setShowComparePoolTable((v) => !v);
                               }
@@ -1312,7 +1358,8 @@ export function SimulationPage() {
                               <line x1="15" y1="4" x2="15" y2="20" />
                             </svg>
                           </button>
-                          {!(slug === 'euromillones' && compareEuromillonesSource === 'fullwheel') && (
+                          {slug !== 'el-gordo' &&
+                            !(slug === 'euromillones' && compareEuromillonesSource === 'fullwheel') && (
                             <button
                               type="button"
                               className="form-input"
@@ -1520,6 +1567,25 @@ export function SimulationPage() {
                             return null;
                           }
                           const r = elGordoFullWheelResult;
+                          // Build lookup by (main_hits, clave_hit) so we can show 1ª–8ª + Reintegro in fixed order.
+                          const byKey = new Map<string, typeof r.categories[number]>();
+                          r.categories.forEach((row) => {
+                            const key = `${row.main_hits}-${row.clave_hit}`;
+                            if (!byKey.has(key)) {
+                              byKey.set(key, row);
+                            }
+                          });
+                          const orderedKeys: { key: string; label: string }[] = [
+                            { key: '5-1', label: '1ª (5 + 1)' },
+                            { key: '5-0', label: '2ª (5 + 0)' },
+                            { key: '4-1', label: '3ª (4 + 1)' },
+                            { key: '4-0', label: '4ª (4 + 0)' },
+                            { key: '3-1', label: '5ª (3 + 1)' },
+                            { key: '3-0', label: '6ª (3 + 0)' },
+                            { key: '2-1', label: '7ª (2 + 1)' },
+                            { key: '2-0', label: '8ª (2 + 0)' },
+                            { key: '0-1', label: 'Reintegro' },
+                          ];
                           return (
                             <div style={{ marginTop: 'var(--space-md)' }}>
                               <div className="resultados-features-table-wrap" style={{ marginBottom: 'var(--space-sm)' }}>
@@ -1529,23 +1595,101 @@ export function SimulationPage() {
                                       <th>Categoría</th>
                                       <th>Hits (main+clave)</th>
                                       <th>First position</th>
-                                      <th>Count</th>
                                     </tr>
                                   </thead>
                                   <tbody>
-                                    {r.categories.map((row) => (
-                                      <tr key={row.category}>
-                                        <td>{row.category}</td>
-                                        <td>
-                                          {row.main_hits}+{row.clave_hit}
-                                        </td>
-                                        <td>{row.first_position.toLocaleString()}</td>
-                                        <td>{row.count}</td>
-                                      </tr>
-                                    ))}
+                                    {orderedKeys.map(({ key, label }) => {
+                                      const row = byKey.get(key);
+                                      if (!row) return null;
+                                      return (
+                                        <tr key={key}>
+                                          <td>{label}</td>
+                                          <td>
+                                            {row.main_hits}+{row.clave_hit}
+                                          </td>
+                                          <td>{row.first_position.toLocaleString()}</td>
+                                        </tr>
+                                      );
+                                    })}
                                   </tbody>
                                 </table>
                               </div>
+                              {showElGordoFullWheelTickets && (
+                                <div
+                                  className="resultados-features-table-wrap"
+                                  style={{
+                                    marginTop: 'var(--space-md)',
+                                    marginBottom: 'var(--space-md)',
+                                    maxHeight: 420,
+                                    overflowY: 'auto',
+                                  }}
+                                >
+                                  {elGordoFullWheelTicketsLoading ? (
+                                    <p style={{ margin: 0 }}>Cargando boletos…</p>
+                                  ) : elGordoFullWheelTickets.length === 0 ? (
+                                    <p style={{ margin: 0 }}>No hay boletos para mostrar.</p>
+                                  ) : (
+                                    <>
+                                      <table className="resultados-features-table">
+                                        <thead>
+                                          <tr>
+                                            <th>No</th>
+                                            <th>Números principales</th>
+                                            <th>Clave</th>
+                                            <th>Categoría</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {elGordoFullWheelTickets.map((t) => {
+                                            const isWinning =
+                                              t.category.startsWith('1ª') ||
+                                              t.category.startsWith('2ª') ||
+                                              t.category.startsWith('3ª') ||
+                                              t.category.startsWith('4ª') ||
+                                              t.category.startsWith('5ª') ||
+                                              t.category.startsWith('6ª') ||
+                                              t.category.startsWith('7ª') ||
+                                              t.category.startsWith('8ª') ||
+                                              t.category.startsWith('Reintegro');
+                                            return (
+                                              <tr
+                                                key={t.position}
+                                                style={
+                                                  isWinning
+                                                    ? {
+                                                        background:
+                                                          'linear-gradient(90deg, rgba(255,249,196,0.9), rgba(255,236,179,0.9))',
+                                                      }
+                                                    : undefined
+                                                }
+                                              >
+                                                <td>{t.position.toLocaleString()}</td>
+                                                <td>{t.mains.join(', ')}</td>
+                                                <td>{t.clave}</td>
+                                                <td>{t.category}</td>
+                                              </tr>
+                                            );
+                                          })}
+                                        </tbody>
+                                      </table>
+                                      {elGordoFullWheelTicketsTotal > 100 && (
+                                        <div style={{ marginTop: '0.5rem', display: 'flex', justifyContent: 'flex-end' }}>
+                                          <Pagination
+                                            size="small"
+                                            current={elGordoFullWheelTicketsPage}
+                                            total={elGordoFullWheelTicketsTotal}
+                                            pageSize={100}
+                                            showSizeChanger={false}
+                                            onChange={(pageNum) => {
+                                              void loadElGordoFullWheelTickets(pageNum);
+                                            }}
+                                          />
+                                        </div>
+                                      )}
+                                    </>
+                                  )}
+                                </div>
+                              )}
                             </div>
                           );
                         }
@@ -2021,87 +2165,9 @@ export function SimulationPage() {
                             slug === 'la-primitiva'
                               ? (compareDraw as { complementario?: number | null }).complementario
                               : undefined;
-                          let runningPrize = 0;
-                          pool.slice(0, limit).forEach((t) => {
-                            const anyTicket = t as any;
-                            const mains = (anyTicket.mains ?? []).map(Number);
-                            const starsOrClave =
-                              slug === 'la-primitiva'
-                                ? anyTicket.reintegro != null
-                                  ? [Number(anyTicket.reintegro)]
-                                  : []
-                                : Array.isArray(anyTicket.stars)
-                                  ? anyTicket.stars.map(Number)
-                                  : anyTicket.clave != null
-                                    ? [Number(anyTicket.clave)]
-                                    : [];
-                            const hitsMain = mains.filter((n: number) => mainSet.has(n)).length;
-                            const hitsStar = starsOrClave.filter((n: number) => starSet.has(n)).length;
-                            const hitsComplementario =
-                              slug === 'la-primitiva' &&
-                              complementario != null &&
-                              mains.includes(complementario)
-                                ? 1
-                                : 0;
-                            const is5C =
-                              slug === 'la-primitiva' && hitsMain === 5 && hitsComplementario === 1;
-                            const prizePerTicket =
-                              is5C
-                                ? (prizeLookup.get('5-C') ?? 0)
-                                : prizeLookup.get(`${hitsMain}-${hitsStar}`) ?? 0;
-                            runningPrize += prizePerTicket;
-                          });
-                          const totalCost = limit * TICKET_BUDGET_EUR;
-                          const totalPrize = runningPrize;
-                          const totalEarning = totalPrize - totalCost;
-                          return (
-                            <div
-                              className="euromillones-train-current-draw-card"
-                              style={{ marginTop: 'var(--space-md)', padding: 'var(--space-md)' }}
-                            >
-                              <div
-                                style={{
-                                  fontSize: '0.75rem',
-                                  color: 'var(--color-text-muted)',
-                                  marginBottom: 'var(--space-xs)',
-                                  textTransform: 'uppercase',
-                                  letterSpacing: '0.04em',
-                                }}
-                              >
-                                Resumen de {limit} boletos
-                              </div>
-                              <div style={{ fontSize: '0.9rem', display: 'grid', rowGap: 4 }}>
-                                <div>
-                                  <strong>Boletos seleccionados</strong> {limit}
-                                </div>
-                                <div>
-                                  <strong>Coste total</strong> {totalCost.toFixed(2)} €
-                                </div>
-                                <div>
-                                  <strong>Premio total</strong> {totalPrize.toFixed(2)} €
-                                </div>
-                                <div>
-                                  <strong>Ganancia</strong>{' '}
-                                  <span
-                                    style={{
-                                      color:
-                                        totalEarning > 0
-                                          ? 'var(--color-success, green)'
-                                          : totalEarning < 0
-                                          ? 'var(--color-error, #c00)'
-                                          : 'inherit',
-                                    }}
-                                  >
-                                    {totalEarning === 0
-                                      ? '0.00 €'
-                                      : `${totalEarning > 0 ? '+' : ''}${totalEarning.toFixed(
-                                          2,
-                                        )} €`}
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-                          );
+                        // We don't show the generic summary card (Boletos seleccionados / Coste / Premio / Ganancia)
+                        // because the user requested to hide it.
+                        return null;
                         })()
                       )}
 
@@ -2167,56 +2233,6 @@ export function SimulationPage() {
                                   })}{' '}
                                   €
                                 </span>
-                              </div>
-                            </div>
-                          </div>
-                        )}
-                      {slug === 'el-gordo' &&
-                        compareElGordoSource === 'fullwheel' &&
-                        elGordoFullWheelResult && (
-                          <div
-                            className="euromillones-train-current-draw-card"
-                            style={{ marginTop: 'var(--space-md)', padding: 'var(--space-md)' }}
-                          >
-                            <div
-                              style={{
-                                fontSize: '0.75rem',
-                                color: 'var(--color-text-muted)',
-                                marginBottom: 'var(--space-xs)',
-                                textTransform: 'uppercase',
-                                letterSpacing: '0.04em',
-                              }}
-                            >
-                              Resumen full wheel El Gordo
-                            </div>
-                            <div style={{ fontSize: '0.9rem', display: 'grid', rowGap: 4 }}>
-                              <div>
-                                <strong>Jackpot (5+clave) posición</strong>{' '}
-                                {elGordoFullWheelResult.jackpot_position != null
-                                  ? elGordoFullWheelResult.jackpot_position.toLocaleString()
-                                  : '—'}
-                              </div>
-                              <div>
-                                <strong>2ª (5+0) primera</strong>{' '}
-                                {elGordoFullWheelResult.pos_2th != null
-                                  ? elGordoFullWheelResult.pos_2th.toLocaleString()
-                                  : '—'}
-                              </div>
-                              <div>
-                                <strong>3ª (4+1) primera</strong>{' '}
-                                {elGordoFullWheelResult.pos_3th != null
-                                  ? elGordoFullWheelResult.pos_3th.toLocaleString()
-                                  : '—'}
-                              </div>
-                              <div>
-                                <strong>4ª (4+0) primera</strong>{' '}
-                                {elGordoFullWheelResult.pos_4th != null
-                                  ? elGordoFullWheelResult.pos_4th.toLocaleString()
-                                  : '—'}
-                              </div>
-                              <div>
-                                <strong>Total categorías</strong>{' '}
-                                {elGordoFullWheelResult.categories.length}
                               </div>
                             </div>
                           </div>

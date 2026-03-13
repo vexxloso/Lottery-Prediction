@@ -5,16 +5,19 @@ import { ElGordoApuestasPanel } from './ElGordoApuestasPanel';
 import { ElGordoBettingPanel } from './ElGordoBettingPanel';
 import { ElGordoFeatureModelPanel } from './ElGordoFeatureModelPanel';
 import { ElGordoPredictionPage } from './ElGordoPredictionPage';
+import { ElGordoAnalysisPage } from './ElGordoAnalysisPage';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
-type ElGordoTab = 'results' | 'prediction' | 'grafico' | 'betting';
+ type ElGordoTab = 'results' | 'prediction' | 'grafico' | 'betting' | 'analisis';
 
 export function ResultadosElGordo() {
   const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = (searchParams.get('tab') as ElGordoTab | null) ?? 'results';
   const activeTab: ElGordoTab =
-    tabParam === 'prediction' || tabParam === 'grafico' || tabParam === 'betting' ? tabParam : 'results';
+    tabParam === 'prediction' || tabParam === 'grafico' || tabParam === 'betting' || tabParam === 'analisis'
+      ? tabParam
+      : 'results';
   const hasCutoffDraw = !!searchParams.get('cutoff_draw_id');
 
   const setActiveTab = useCallback(
@@ -82,6 +85,15 @@ export function ResultadosElGordo() {
         >
           Apuestas
         </button>
+        <button
+          type="button"
+          className={`resultados-tab ${activeTab === 'analisis' ? 'resultados-tab--active' : ''}`}
+          role="tab"
+          aria-selected={activeTab === 'analisis'}
+          onClick={() => setActiveTab('analisis')}
+        >
+          Análisis
+        </button>
       </div>
 
       <div className="resultados-tab-content">
@@ -99,6 +111,11 @@ export function ResultadosElGordo() {
         {activeTab === 'betting' && (
           <div className="resultados-euromillones-features">
             <ElGordoBettingPanel />
+          </div>
+        )}
+        {activeTab === 'analisis' && (
+          <div className="resultados-euromillones-features">
+            <ElGordoAnalysisPage />
           </div>
         )}
       </div>

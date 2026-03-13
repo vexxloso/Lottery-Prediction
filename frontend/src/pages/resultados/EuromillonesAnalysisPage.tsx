@@ -161,7 +161,7 @@ export function EuromillonesAnalysisPage() {
         {chartData.length === 0 ? (
           <p style={{ marginTop: 0 }}>No hay datos para el gráfico.</p>
         ) : (
-          <div style={{ width: '100%', height: 360 }}>
+          <div style={{ width: '100%', height: 520 }}>
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={chartData}>
                 <CartesianGrid strokeDasharray="3 3" />
