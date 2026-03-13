@@ -37,6 +37,16 @@ interface TrainProgressLaPrimitiva {
   candidate_pool?: { mains: number[]; reintegro: number }[];
   candidate_pool_at?: string;
   candidate_pool_count?: number;
+  full_wheel_draw_date?: string;
+  full_wheel_file_path?: string;
+  full_wheel_total_tickets?: number;
+  full_wheel_good_tickets?: number;
+  full_wheel_bad_tickets?: number;
+  full_wheel_generated_at?: string;
+  full_wheel_started_at?: string;
+  full_wheel_status?: 'waiting' | 'done' | 'error';
+  full_wheel_error?: string | null;
+  full_wheel_elapsed_seconds?: number;
 }
 
 export function LaPrimitivaPredictionPage() {
@@ -54,8 +64,12 @@ export function LaPrimitivaPredictionPage() {
     complementario: number | null;
     reintegro: number | null;
   } | null>(null);
-  const [candidateDisplayCount, setCandidateDisplayCount] = useState(20);
-  const CANDIDATE_COUNT_OPTIONS = [10, 20, 30, 50, 100, 300, 500, 1000, 2000, 3000];
+  const [candidateDisplayCount] = useState(20);
+  const [fullWheelPreview, setFullWheelPreview] = useState<
+    { position: number; mains: number[] }[] | null
+  >(null);
+  // Local flag so the step 5 button is disabled immediately after click.
+  const [startingFullWheel, setStartingFullWheel] = useState(false);
 
   // Load feature-model row for the selected cutoff draw
   useEffect(() => {
@@ -105,23 +119,27 @@ export function LaPrimitivaPredictionPage() {
   }, []);
 
   const fetchProgress = useCallback(
-    async (cacheBust = false) => {
+    async (cacheBust = false, silent = false) => {
       if (!cutoffDrawId) {
         setProgress(null);
         return;
       }
-      setProgressLoading(true);
+      if (!silent) {
+        setProgressLoading(true);
+      }
       try {
         const url = `${API_URL}/api/la-primitiva/train/progress?cutoff_draw_id=${encodeURIComponent(
           cutoffDrawId,
         )}${cacheBust ? `&_t=${Date.now()}` : ''}`;
-        const res = await fetch(url, { cache: 'no-store' });
+        const res = await fetch(url, { cache: 'no-store', method: 'POST' });
         const data = await res.json();
         setProgress((data.progress as TrainProgressLaPrimitiva) ?? null);
       } catch {
         setProgress(null);
       } finally {
-        setProgressLoading(false);
+        if (!silent) {
+          setProgressLoading(false);
+        }
       }
     },
     [cutoffDrawId],
@@ -131,6 +149,60 @@ export function LaPrimitivaPredictionPage() {
     fetchProgress();
   }, [fetchProgress]);
 
+  // Load a small preview of the full-wheel tickets when available.
+  useEffect(() => {
+    const loadPreview = async () => {
+      if (!cutoffDrawId) {
+        setFullWheelPreview(null);
+        return;
+      }
+      if ((progress?.full_wheel_total_tickets ?? 0) <= 0) {
+        setFullWheelPreview(null);
+        return;
+      }
+      try {
+        const params = new URLSearchParams({ cutoff_draw_id: cutoffDrawId, limit: '20' });
+        const res = await fetch(
+          `${API_URL}/api/la-primitiva/train/full-wheel-preview?${params.toString()}`,
+          { cache: 'no-store' },
+        );
+        const data = await res.json();
+        if (!res.ok || data.detail) {
+          setFullWheelPreview(null);
+          return;
+        }
+        setFullWheelPreview(
+          Array.isArray(data.tickets)
+            ? (data.tickets as any[]).map((t) => ({
+                position: Number(t.position),
+                mains: Array.isArray(t.mains) ? t.mains.map(Number) : [],
+              }))
+            : null,
+        );
+      } catch {
+        setFullWheelPreview(null);
+      }
+    };
+    void loadPreview();
+  }, [cutoffDrawId, progress?.full_wheel_total_tickets]);
+
+  // While full wheel generation is running (status === 'waiting'), poll backend
+  // for updated progress so the UI refreshes automatically when it finishes.
+  useEffect(() => {
+    if (!cutoffDrawId) return;
+    if (progress?.full_wheel_status !== 'waiting') return;
+    let cancelled = false;
+    const interval = window.setInterval(() => {
+      if (cancelled) return;
+      void fetchProgress(true, true);
+    }, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [cutoffDrawId, progress?.full_wheel_status, fetchProgress]);
+
+  // Steps 1‑4: generate number pool (dataset, models, probs, rule filters).
   const currentStep =
     progress == null
       ? 0
@@ -210,25 +282,10 @@ export function LaPrimitivaPredictionPage() {
       await fetchProgress(true);
       await delay(3000);
       setRunningStep(4);
-
-      // Step 5: candidate pool (tickets)
-      res = await fetch(
-        `${API_URL}/api/la-primitiva/train/candidate-pool?cutoff_draw_id=${encodeURIComponent(
-          cutoffDrawId,
-        )}&num_tickets=3000`,
-        { method: 'POST' },
-      );
-      data = await res.json();
-      if (!res.ok)
-        throw new Error(
-          (data as { detail?: string }).detail ??
-            'Error generando pool de boletos',
-        );
-      await fetchProgress(true);
       notification.success({
         message: 'Pipeline La Primitiva completado',
         description:
-          'Pasos 1 a 5 ejecutados para La Primitiva. Progreso guardado en la base de datos.',
+          'Pasos 1 a 4 ejecutados. Pool de números generado y guardado en la base de datos.',
         placement: 'topRight',
         duration: 5,
       });
@@ -288,17 +345,54 @@ export function LaPrimitivaPredictionPage() {
             ? ('process' as const)
             : ('wait' as const),
     },
-    {
-      title: 'Pool de candidatos',
-      status: runAllLoading
-        ? (runningStep >= 4 ? ('process' as const) : ('wait' as const))
-        : (progress?.candidate_pool_count ?? 0) > 0
-          ? ('finish' as const)
-          : currentStep === 4
-            ? ('process' as const)
-            : ('wait' as const),
-    },
   ];
+
+  const handleGenerateCandidatePool = async () => {
+    if (!cutoffDrawId) return;
+    try {
+      setStartingFullWheel(true);
+      const params = new URLSearchParams({ cutoff_draw_id: cutoffDrawId });
+      if (currentDraw?.date) {
+        params.set('draw_date', currentDraw.date);
+      }
+      const res = await fetch(
+        `${API_URL}/api/la-primitiva/train/full-wheel?${params.toString()}`,
+        {
+          method: 'POST',
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(
+          (data as { detail?: string }).detail ??
+            'Error iniciando generación de boletos (full wheeling)',
+        );
+      }
+      await fetchProgress(true);
+      notification.success({
+        message: 'Generación iniciada (full wheeling)',
+        description:
+          'La generación del archivo de boletos de La Primitiva se está ejecutando en segundo plano (full wheel).',
+        placement: 'topRight',
+        duration: 4,
+      });
+    } catch (e) {
+      const msg =
+        e instanceof Error
+          ? e.message
+          : 'Error iniciando generación de boletos (full wheeling) para La Primitiva';
+      notification.error({
+        message: 'Error',
+        description: msg,
+        placement: 'topRight',
+        duration: 5,
+      });
+    } finally {
+      // Once progress is refreshed, startingFullWheel no longer matters; the button will stay
+      // disabled while progress.full_wheel_status === 'waiting'.
+      setStartingFullWheel(false);
+    }
+  };
 
   return (
     <section className="resultados-features-card resultados-theme-la-primitiva euromillones-train-split">
@@ -342,59 +436,31 @@ export function LaPrimitivaPredictionPage() {
                 ← Volver
               </button>
               <h4 className="resultados-features-chart-title" style={{ margin: 0 }}>
-                Pool de candidatos La Primitiva
+                Pool de boletos La Primitiva (full wheel – vista previa)
               </h4>
             </div>
-            <span
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                fontSize: '0.85rem',
-                color: 'var(--color-text-muted)',
-              }}
-            >
-              Mostrar:
-              <Select
-                value={candidateDisplayCount}
-                onChange={setCandidateDisplayCount}
-                options={CANDIDATE_COUNT_OPTIONS.map((n) => ({
-                  label: String(n),
-                  value: n,
-                }))}
-                style={{ width: 90 }}
-                size="small"
-              />
-            </span>
+            {/* Removed page-size select; always show first 20 tickets for preview. */}
           </div>
           <Table
             size="small"
             dataSource={
-              (progress?.candidate_pool ?? [])
+              (fullWheelPreview ?? [])
                 .slice(0, candidateDisplayCount)
                 .map((t, i) => ({
-                  key: i,
-                  index: i + 1,
+                  key: t.position ?? i,
+                  index: t.position ?? i + 1,
                   mainsStr: (t.mains ?? []).join(' '),
-                  reinStr:
-                    typeof t.reintegro === 'number' ? String(t.reintegro) : '',
                 }))
             }
             columns={[
               { title: '#', dataIndex: 'index', key: 'index', width: 56 },
               { title: 'Mains', dataIndex: 'mainsStr', key: 'mains' },
-              {
-                title: 'Reintegro',
-                dataIndex: 'reinStr',
-                key: 'reintegro',
-                width: 100,
-              },
             ]}
             pagination={false}
             scroll={{ x: 320 }}
             locale={{
               emptyText:
-                'Todavía no hay pool de candidatos para La Primitiva. Se añadirá en los próximos pasos.',
+                'Todavía no hay archivo full wheel para La Primitiva. Genera el pool de boletos (paso 5) para verlo aquí.',
             }}
           />
         </div>
@@ -451,12 +517,41 @@ export function LaPrimitivaPredictionPage() {
                   {runAllLoading ? (
                     <>
                       <Spin size="small" style={{ marginRight: 8 }} />
-                      Ejecutando… (paso {displayStep + 1}/5)
+                      Ejecutando… (paso {displayStep + 1}/4)
                     </>
                   ) : (
-                    'Generar todo'
+                    'Generar pool de números (pasos 1‑4)'
                   )}
                 </button>
+                <button
+                  type="button"
+                  className="resultados-features-iconbtn"
+                  disabled={
+                    runAllLoading ||
+                    !cutoffDrawId ||
+                    startingFullWheel ||
+                    progress?.full_wheel_status === 'waiting' ||
+                    (progress?.full_wheel_status === 'done' &&
+                      !!progress?.full_wheel_file_path)
+                  }
+                  onClick={handleGenerateCandidatePool}
+                  style={{
+                    padding: '8px 16px',
+                    borderRadius: 999,
+                    border: '1px solid var(--color-border)',
+                    background: 'transparent',
+                    color: 'var(--color-text)',
+                    fontSize: '0.9rem',
+                  }}
+                >
+                  Generar pool de boletos (paso 5)
+                </button>
+                {(startingFullWheel || progress?.full_wheel_status === 'waiting') && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.85rem' }}>
+                    <Spin size="small" />
+                    <span>Generando boletos (full wheel)…</span>
+                  </div>
+                )}
                 <button
                   type="button"
                   className="resultados-features-iconbtn"

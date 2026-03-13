@@ -150,8 +150,8 @@ export function SimulationPage() {
     bought_tickets?: CompareTicket[];
   } | null>(null);
   const [comparePoolLimit, setComparePoolLimit] = useState(20);
-  /** La Primitiva: which ticket pool to compare vs real result — prediction or bought. */
-  const [compareLaPrimitivaSource, setCompareLaPrimitivaSource] = useState<'prediction' | 'bought'>('prediction');
+  /** La Primitiva: which ticket pool to compare vs real result — bought or full wheel. */
+  const [compareLaPrimitivaSource, setCompareLaPrimitivaSource] = useState<'bought' | 'fullwheel'>('fullwheel');
   const [compareEuromillonesSource, setCompareEuromillonesSource] = useState<'prediction' | 'bought' | 'fullwheel'>(
     'fullwheel',
   );
@@ -207,6 +207,33 @@ export function SimulationPage() {
   const [elGordoFullWheelTicketsPage, setElGordoFullWheelTicketsPage] = useState(1);
   const [elGordoFullWheelTicketsLoading, setElGordoFullWheelTicketsLoading] = useState(false);
   const [showElGordoFullWheelTickets, setShowElGordoFullWheelTickets] = useState(false);
+  const [laPrimitivaFullWheelTickets, setLaPrimitivaFullWheelTickets] = useState<
+    { position: number; mains: number[] }[]
+  >([]);
+  const [laPrimitivaFullWheelTicketsTotal, setLaPrimitivaFullWheelTicketsTotal] = useState(0);
+  const [laPrimitivaFullWheelTicketsPage, setLaPrimitivaFullWheelTicketsPage] = useState(1);
+  const [laPrimitivaFullWheelTicketsLoading, setLaPrimitivaFullWheelTicketsLoading] = useState(false);
+  const [showLaPrimitivaFullWheelTickets, setShowLaPrimitivaFullWheelTickets] = useState(false);
+  // La Primitiva: cached result from full-wheel compare endpoint (la_primitiva_compare_results)
+  const [laPrimitivaFullWheelLoading, setLaPrimitivaFullWheelLoading] = useState(false);
+  const [laPrimitivaFullWheelError, setLaPrimitivaFullWheelError] = useState('');
+  const [laPrimitivaFullWheelResult, setLaPrimitivaFullWheelResult] = useState<{
+    current_id: string;
+    date: string | null;
+    pre_id: string;
+    jackpot_position: number | null;
+    pos_2th: number | null;
+    pos_3th: number | null;
+    pos_4th: number | null;
+    categories: {
+      category: string;
+      main_hits: number;
+      reintegro_hit: number;
+      first_position: number;
+      count: number;
+    }[];
+    total_categories: number;
+  } | null>(null);
   const [featureRowsLoading, setFeatureRowsLoading] = useState(false);
   const [featureRowsError, setFeatureRowsError] = useState('');
   const [featureRows, setFeatureRows] = useState<EuromillonesFeatureRow[]>([]);
@@ -455,6 +482,86 @@ export function SimulationPage() {
     };
   }, [slug, view, compareElGordoSource, searchParams, drawId, API_URL]);
 
+  // La Primitiva compare: load aggregated full-wheel result when needed
+  useEffect(() => {
+    if (
+      slug !== 'la-primitiva' ||
+      view !== 'compare' ||
+      compareLaPrimitivaSource !== 'fullwheel'
+    ) {
+      setLaPrimitivaFullWheelLoading(false);
+      setLaPrimitivaFullWheelError('');
+      return;
+    }
+    const prevId = searchParams.get('prev_id')?.trim();
+    if (!drawId || !prevId) {
+      setLaPrimitivaFullWheelResult(null);
+      setLaPrimitivaFullWheelError('');
+      setLaPrimitivaFullWheelLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLaPrimitivaFullWheelLoading(true);
+    setLaPrimitivaFullWheelError('');
+    const params = new URLSearchParams({ current_id: drawId, pre_id: prevId });
+    const url = `${API_URL}/api/la-primitiva/compare/full-wheel/reorder?${params.toString()}`;
+    const maxRetries = 3;
+    const retryDelayMs = 2000;
+
+    const tryFetch = (attempt: number): Promise<void> =>
+      fetch(url, { method: 'POST' })
+        .then((res) => res.json().then((data) => ({ ok: res.ok, status: res.status, data })))
+        .then(({ ok, status, data }) => {
+          if (cancelled) return;
+          if (status === 503 && attempt < maxRetries) {
+            setLaPrimitivaFullWheelError(
+              `Calculando comparación full wheel La Primitiva… (${attempt + 1}/${maxRetries})`,
+            );
+            return new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs)).then(() =>
+              tryFetch(attempt + 1),
+            );
+          }
+          if (!ok || data.detail) {
+            setLaPrimitivaFullWheelResult(null);
+            setLaPrimitivaFullWheelError(
+              status === 503
+                ? 'Calculando comparación full wheel La Primitiva…'
+                : typeof data.detail === 'string'
+                  ? data.detail
+                  : 'Error al cargar comparación full wheel La Primitiva',
+            );
+            return;
+          }
+          setLaPrimitivaFullWheelResult({
+            current_id: String(data.current_id ?? drawId),
+            date: data.date ?? null,
+            pre_id: String(data.pre_id ?? prevId),
+            jackpot_position:
+              typeof data.jackpot_position === 'number' ? data.jackpot_position : null,
+            pos_2th: typeof data.pos_2th === 'number' ? data.pos_2th : null,
+            pos_3th: typeof data.pos_3th === 'number' ? data.pos_3th : null,
+            pos_4th: typeof data.pos_4th === 'number' ? data.pos_4th : null,
+            categories: Array.isArray(data.categories) ? data.categories : [],
+            total_categories: Number(data.total_categories ?? 0),
+          });
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          setLaPrimitivaFullWheelResult(null);
+          setLaPrimitivaFullWheelError(
+            e instanceof Error ? e.message : 'Error al cargar comparación full wheel La Primitiva',
+          );
+        })
+        .finally(() => {
+          if (!cancelled) setLaPrimitivaFullWheelLoading(false);
+        });
+
+    void tryFetch(0);
+    return () => {
+      cancelled = true;
+    };
+  }, [slug, view, compareLaPrimitivaSource, searchParams, drawId, API_URL]);
+
   // Load Euromillones feature-model rows for Prediction tab
   useEffect(() => {
     const loadFeatureRows = async () => {
@@ -633,9 +740,9 @@ export function SimulationPage() {
     if (!compareProgress || !compareDraw) return;
     const pool =
       slug === 'la-primitiva'
-        ? (compareLaPrimitivaSource === 'bought'
-            ? (compareProgress.bought_tickets ?? [])
-            : (compareProgress.candidate_pool ?? []))
+        ? compareLaPrimitivaSource === 'bought'
+          ? (compareProgress.bought_tickets ?? [])
+          : (compareProgress.candidate_pool ?? [])
         : slug === 'euromillones'
           ? (compareEuromillonesSource === 'bought'
               ? (compareProgress.bought_tickets ?? [])
@@ -646,7 +753,8 @@ export function SimulationPage() {
                 : (compareProgress.candidate_pool ?? []))
             : (compareProgress.candidate_pool ?? []);
     const limit =
-      (slug === 'la-primitiva' && compareLaPrimitivaSource === 'bought') ||
+      (slug === 'la-primitiva' &&
+        (compareLaPrimitivaSource === 'bought' || compareLaPrimitivaSource === 'fullwheel')) ||
       (slug === 'euromillones' && compareEuromillonesSource === 'bought') ||
       (slug === 'el-gordo' && compareElGordoSource === 'bought')
         ? pool.length
@@ -794,6 +902,50 @@ export function SimulationPage() {
       );
     } finally {
       setElGordoFullWheelTicketsLoading(false);
+    }
+  };
+
+  const loadLaPrimitivaFullWheelTickets = async (page: number) => {
+    if (!drawId || !searchParams.get('prev_id')) return;
+    const prevId = searchParams.get('prev_id')!.trim();
+    const limit = 100;
+    const skip = (page - 1) * limit;
+    try {
+      setLaPrimitivaFullWheelTicketsLoading(true);
+      const params = new URLSearchParams({
+        current_id: drawId,
+        pre_id: prevId,
+        skip: String(skip),
+        limit: String(limit),
+      });
+      const res = await fetch(
+        `${API_URL}/api/la-primitiva/compare/full-wheel/tickets?${params.toString()}`,
+      );
+      const data = await res.json();
+      if (!res.ok || data.detail) {
+        throw new Error(
+          typeof data.detail === 'string'
+            ? data.detail
+            : 'Error al cargar boletos full wheel La Primitiva',
+        );
+      }
+      const tickets = Array.isArray(data.tickets) ? (data.tickets as any[]) : [];
+      setLaPrimitivaFullWheelTickets(
+        tickets.map((t) => ({
+          position: Number(t.position),
+          mains: (t.mains ?? []).map(Number),
+        })),
+      );
+      setLaPrimitivaFullWheelTicketsTotal(Number(data.total_tickets ?? 0));
+      setLaPrimitivaFullWheelTicketsPage(page);
+      setShowLaPrimitivaFullWheelTickets(true);
+    } catch (e) {
+      console.error(e);
+      setLaPrimitivaFullWheelError(
+        e instanceof Error ? e.message : 'Error al cargar boletos full wheel La Primitiva',
+      );
+    } finally {
+      setLaPrimitivaFullWheelTicketsLoading(false);
     }
   };
 
@@ -1152,7 +1304,7 @@ export function SimulationPage() {
                             {slug === 'la-primitiva'
                               ? compareLaPrimitivaSource === 'bought'
                                 ? 'Boletos comprados'
-                                : 'Predicción'
+                                : 'Full wheel'
                               : slug === 'euromillones'
                                 ? compareEuromillonesSource === 'bought'
                                   ? 'Boletos comprados'
@@ -1174,15 +1326,15 @@ export function SimulationPage() {
                                 <button
                                   type="button"
                                   role="tab"
-                                  aria-selected={compareLaPrimitivaSource === 'prediction'}
+                                  aria-selected={compareLaPrimitivaSource === 'fullwheel'}
                                   className={`resultados-tab ${
-                                    compareLaPrimitivaSource === 'prediction'
+                                    compareLaPrimitivaSource === 'fullwheel'
                                       ? 'resultados-tab--active'
                                       : ''
                                   }`}
-                                  onClick={() => setCompareLaPrimitivaSource('prediction')}
+                                  onClick={() => setCompareLaPrimitivaSource('fullwheel')}
                                 >
-                                  Predicción
+                                  Full wheel
                                 </button>
                               )}
                               {/* For Euromillones/El Gordo: include Full wheel + Boletos comprados; La Primitiva: prediction + bought. */}
@@ -1249,7 +1401,9 @@ export function SimulationPage() {
                           )}
                           <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--color-text-muted)' }}>
                             {slug === 'la-primitiva'
-                              ? `${comparePoolCount} boletos${compareLaPrimitivaSource === 'bought' ? ' comprados' : ' en el pool'}.`
+                              ? compareLaPrimitivaSource === 'fullwheel'
+                                ? `${comparePoolCount} boletos (full wheel)`
+                                : `${comparePoolCount} boletos comprados.`
                               : slug === 'euromillones'
                                 ? `${comparePoolCount} boletos${compareEuromillonesSource === 'bought' ? ' comprados' : ' en el pool'}.`
                                 : slug === 'el-gordo'
@@ -1269,7 +1423,9 @@ export function SimulationPage() {
                           }}
                         >
                           {!(
-                            (slug === 'la-primitiva' && compareLaPrimitivaSource === 'bought') ||
+                            (slug === 'la-primitiva' &&
+                              (compareLaPrimitivaSource === 'bought' ||
+                                compareLaPrimitivaSource === 'fullwheel')) ||
                             (slug === 'euromillones' &&
                               (compareEuromillonesSource === 'bought' ||
                                 compareEuromillonesSource === 'fullwheel')) ||
@@ -1307,6 +1463,17 @@ export function SimulationPage() {
                           <button
                             type="button"
                             className="form-input"
+                            disabled={
+                              (slug === 'euromillones' &&
+                                compareEuromillonesSource === 'fullwheel' &&
+                                euromillonesFullWheelTicketsLoading) ||
+                              (slug === 'el-gordo' &&
+                                compareElGordoSource === 'fullwheel' &&
+                                elGordoFullWheelTicketsLoading) ||
+                              (slug === 'la-primitiva' &&
+                                compareLaPrimitivaSource === 'fullwheel' &&
+                                laPrimitivaFullWheelTicketsLoading)
+                            }
                             onClick={() => {
                               if (slug === 'euromillones' && compareEuromillonesSource === 'fullwheel') {
                                 if (showEuromillonesFullWheelTickets) {
@@ -1320,12 +1487,20 @@ export function SimulationPage() {
                                 } else {
                                   void loadElGordoFullWheelTickets(1);
                                 }
+                              } else if (slug === 'la-primitiva' && compareLaPrimitivaSource === 'fullwheel') {
+                                if (showLaPrimitivaFullWheelTickets) {
+                                  setShowLaPrimitivaFullWheelTickets(false);
+                                } else {
+                                  void loadLaPrimitivaFullWheelTickets(1);
+                                }
                               } else {
                                 setShowComparePoolTable((v) => !v);
                               }
                             }}
                             title={
-                              slug === 'euromillones' && compareEuromillonesSource === 'fullwheel'
+                              (slug === 'euromillones' && compareEuromillonesSource === 'fullwheel') ||
+                              (slug === 'el-gordo' && compareElGordoSource === 'fullwheel') ||
+                              (slug === 'la-primitiva' && compareLaPrimitivaSource === 'fullwheel')
                                 ? 'Ver boletos full wheel'
                                 : showComparePoolTable
                                   ? 'Ocultar tabla'
@@ -1339,27 +1514,48 @@ export function SimulationPage() {
                               minWidth: '2.5rem',
                             }}
                           >
-                            <svg
-                              xmlns="http://www.w3.org/2000/svg"
-                              width="18"
-                              height="18"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              aria-hidden
-                            >
-                              <rect x="3" y="4" width="18" height="16" rx="2" ry="2" />
-                              <line x1="3" y1="10" x2="21" y2="10" />
-                              <line x1="3" y1="16" x2="21" y2="16" />
-                              <line x1="9" y1="4" x2="9" y2="20" />
-                              <line x1="15" y1="4" x2="15" y2="20" />
-                            </svg>
+                            {(slug === 'euromillones' &&
+                              compareEuromillonesSource === 'fullwheel' &&
+                              euromillonesFullWheelTicketsLoading) ||
+                            (slug === 'el-gordo' &&
+                              compareElGordoSource === 'fullwheel' &&
+                              elGordoFullWheelTicketsLoading) ||
+                            (slug === 'la-primitiva' &&
+                              compareLaPrimitivaSource === 'fullwheel' &&
+                              laPrimitivaFullWheelTicketsLoading) ? (
+                              <span
+                                style={{
+                                  width: 18,
+                                  height: 18,
+                                  display: 'inline-block',
+                                  borderRadius: '50%',
+                                  border: '2px solid currentColor',
+                                  borderTopColor: 'transparent',
+                                  animation: 'spin 0.6s linear infinite',
+                                }}
+                              />
+                            ) : (
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                width="18"
+                                height="18"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                aria-hidden
+                              >
+                                <rect x="3" y="4" width="18" height="16" rx="2" ry="2" />
+                                <line x1="3" y1="10" x2="21" y2="10" />
+                                <line x1="3" y1="16" x2="21" y2="16" />
+                                <line x1="9" y1="4" x2="9" y2="20" />
+                                <line x1="15" y1="4" x2="15" y2="20" />
+                              </svg>
+                            )}
                           </button>
-                          {slug !== 'el-gordo' &&
-                            !(slug === 'euromillones' && compareEuromillonesSource === 'fullwheel') && (
+                          {slug === 'euromillones' && compareEuromillonesSource !== 'fullwheel' && (
                             <button
                               type="button"
                               className="form-input"
@@ -1686,6 +1882,147 @@ export function SimulationPage() {
                                           />
                                         </div>
                                       )}
+                                    </>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        }
+                        if (slug === 'la-primitiva' && compareLaPrimitivaSource === 'fullwheel') {
+                          if (laPrimitivaFullWheelLoading && !laPrimitivaFullWheelResult) {
+                            return (
+                              <p style={{ margin: '0.5rem 0 0' }}>
+                                Calculando comparación full wheel La Primitiva…
+                              </p>
+                            );
+                          }
+                          if (laPrimitivaFullWheelError && !laPrimitivaFullWheelLoading) {
+                            return (
+                              <p style={{ margin: '0.5rem 0 0', color: 'var(--color-error)' }}>
+                                {laPrimitivaFullWheelError}
+                              </p>
+                            );
+                          }
+                          if (!laPrimitivaFullWheelResult) {
+                            return null;
+                          }
+                          const r = laPrimitivaFullWheelResult;
+                          const mainSetFullWheel = new Set(compareDraw.main.map(Number));
+                          const byKey = new Map<string, (typeof r.categories)[number]>();
+                          r.categories.forEach((row) => {
+                            const key = `${row.main_hits}-${row.reintegro_hit}`;
+                            if (!byKey.has(key)) {
+                              byKey.set(key, row);
+                            }
+                          });
+
+                          // Fixed 1ª–5ª mapping only; hide all other categories (2 aciertos + C, etc.).
+                          const orderedKeys: { key: string; label: string }[] = [
+                            { key: '6-0', label: '1ª (6 aciertos)' },
+                            { key: '5-1', label: '2ª (5 + C)' },
+                            { key: '5-0', label: '3ª (5 aciertos)' },
+                            { key: '4-0', label: '4ª (4 aciertos)' },
+                            { key: '3-0', label: '5ª (3 aciertos)' },
+                          ];
+                          return (
+                            <div style={{ marginTop: 'var(--space-md)' }}>
+                              <div className="resultados-features-table-wrap" style={{ marginBottom: 'var(--space-sm)' }}>
+                                <table className="resultados-features-table">
+                                  <thead>
+                                    <tr>
+                                      <th>Categoría</th>
+                                      <th>Hits (main)</th>
+                                      <th>First position</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {orderedKeys.map(({ key, label }) => {
+                                      const row = byKey.get(key);
+                                      if (!row) return null;
+                                      return (
+                                        <tr key={key}>
+                                          <td>{label}</td>
+                                          <td>{row.main_hits}</td>
+                                          <td>{row.first_position.toLocaleString()}</td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                              {showLaPrimitivaFullWheelTickets && (
+                                <div
+                                  className="resultados-features-table-wrap"
+                                  style={{
+                                    marginTop: 'var(--space-md)',
+                                    marginBottom: 'var(--space-md)',
+                                    maxHeight: 420,
+                                    overflowY: 'auto',
+                                  }}
+                                >
+                                  {laPrimitivaFullWheelTicketsLoading ? (
+                                    <p style={{ margin: 0 }}>Cargando boletos…</p>
+                                  ) : laPrimitivaFullWheelTickets.length === 0 ? (
+                                    <p style={{ margin: 0 }}>No hay boletos para mostrar.</p>
+                                  ) : (
+                                    <>
+                                      <table className="resultados-features-table">
+                                        <thead>
+                                          <tr>
+                                            <th>No</th>
+                                            <th>Números principales</th>
+                                            <th>Categoría</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {laPrimitivaFullWheelTickets.map((t) => {
+                                            const hitsMain = t.mains.filter((n) => mainSetFullWheel.has(n)).length;
+                                            // Winning ticket = any of 1ª–5ª categories: 6,5,4,3,2 aciertos.
+                                            const isWinning = hitsMain >= 2;
+                                            let categoryLabel = '';
+                                            if (hitsMain === 6) categoryLabel = '1ª (6 aciertos)';
+                                            else if (hitsMain === 5) categoryLabel = '2ª (5 aciertos)';
+                                            else if (hitsMain === 4) categoryLabel = '3ª (4 aciertos)';
+                                            else if (hitsMain === 3) categoryLabel = '4ª (3 aciertos)';
+                                            else if (hitsMain === 2) categoryLabel = '5ª (2 aciertos)';
+                                            return (
+                                              <tr
+                                                key={t.position}
+                                                style={
+                                                  isWinning
+                                                    ? {
+                                                        background:
+                                                          'linear-gradient(90deg, rgba(220,252,231,0.9), rgba(187,247,208,0.9))',
+                                                      }
+                                                    : undefined
+                                                }
+                                              >
+                                                <td>{t.position.toLocaleString()}</td>
+                                                <td>{t.mains.join(', ')}</td>
+                                                <td>{categoryLabel || '—'}</td>
+                                              </tr>
+                                            );
+                                          })}
+                                        </tbody>
+                                        <tfoot>
+                                          <tr>
+                                            <td colSpan={2} style={{ textAlign: 'right' }}>
+                                              <Pagination
+                                                size="small"
+                                                current={laPrimitivaFullWheelTicketsPage}
+                                                total={laPrimitivaFullWheelTicketsTotal}
+                                                pageSize={100}
+                                                showSizeChanger={false}
+                                                showQuickJumper
+                                                onChange={(pageNum) => {
+                                                  void loadLaPrimitivaFullWheelTickets(pageNum);
+                                                }}
+                                              />
+                                            </td>
+                                          </tr>
+                                        </tfoot>
+                                      </table>
                                     </>
                                   )}
                                 </div>

@@ -549,6 +549,113 @@ def _generate_full_wheel_file_from_pool(
     }
 
 
+def _iter_la_primitiva_tickets_from_pool(
+    mains_pool: Iterable[int],
+) -> Iterable[List[int]]:
+    """
+    Iterate all La Primitiva tickets (6 mains) for the given ordered pool.
+
+    - mains_pool: ordered mains numbers (expected length 49, already extended
+      and prioritized by Step 4).
+
+    We:
+    - Deduplicate while preserving order.
+    - Build all index combinations of length 6.
+    - Deterministically shuffle the combinations using a seed derived from
+      the mains list, so the traversal is "manifold" (not lexicographic) but
+      reproducible.
+    """
+    mains_list = list(dict.fromkeys(int(x) for x in mains_pool))
+    if len(mains_list) < 6:
+        raise ValueError(f"Need at least 6 mains, got {len(mains_list)}")
+
+    main_idx_combos = list(combinations(range(len(mains_list)), 6))
+    seed = (hash(tuple(mains_list)) & 0xFFFFFFFF)
+    rng = random.Random(seed)
+    rng.shuffle(main_idx_combos)
+
+    for idxs in main_idx_combos:
+        yield [mains_list[i] for i in idxs]
+
+
+def _la_primitiva_ticket_tier(mains: Sequence[int]) -> int:
+    """
+    Classify a La Primitiva ticket into quality tiers (0 best .. 3 worst),
+    reusing the same structural ideas as El Gordo/Euromillones.
+    """
+    return _el_gordo_ticket_tier(mains)
+
+
+def _generate_la_primitiva_full_wheel_file(
+    mains_pool: Iterable[int],
+    draw_date: str,
+) -> dict:
+    """
+    Generate full La Primitiva wheel from the given mains pool and save to TXT.
+
+    - Uses structural rules (via _la_primitiva_ticket_tier) to group tickets
+      into tiers 0..3.
+    - Tickets are written tier by tier (0 → 1 → 2 → 3) so structurally
+      weaker patterns are pushed toward the end of the file.
+    - Each line: "position;m1,m2,m3,m4,m5,m6"
+    """
+    root = Path(_ROOT_DIR)
+    out_dir = root / "la_primitiva_pools"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"la_primitiva_{draw_date}.txt"
+    print(
+        f"[la-prim-fullwheel] start generate TXT draw_date={draw_date!r} mains_pool_len={len(list(dict.fromkeys(int(x) for x in mains_pool)))} path={out_path}",
+        flush=True,
+    )
+
+    position = 0
+    total_by_tier = [0, 0, 0, 0]
+
+    with out_path.open("w", encoding="utf-8", buffering=1024 * 1024) as f:
+        for tier in range(4):
+            seed = (hash((draw_date, "la-primitiva", tier)) & 0xFFFFFFFF)
+            rng = random.Random(seed)
+            buffer: List[List[int]] = []
+            buffer_size = 1000
+
+            for mains in _iter_la_primitiva_tickets_from_pool(mains_pool):
+                t = _la_primitiva_ticket_tier(mains)
+                if t != tier:
+                    continue
+                buffer.append(list(mains))
+                if len(buffer) >= buffer_size:
+                    rng.shuffle(buffer)
+                    for m in buffer:
+                        position += 1
+                        mains_str = ",".join(str(n) for n in m)
+                        f.write(f"{position};{mains_str}\n")
+                        total_by_tier[tier] += 1
+                    buffer.clear()
+
+            if buffer:
+                rng.shuffle(buffer)
+                for m in buffer:
+                    position += 1
+                    mains_str = ",".join(str(n) for n in m)
+                    f.write(f"{position};{mains_str}\n")
+                    total_by_tier[tier] += 1
+
+    good_count = total_by_tier[0] + total_by_tier[1] + total_by_tier[2]
+    bad_count = total_by_tier[3]
+    total = position
+    print(
+        f"[la-prim-fullwheel] finished TXT draw_date={draw_date!r} total={total} good={good_count} bad={bad_count}",
+        flush=True,
+    )
+    return {
+        "file_path": str(out_path),
+        "draw_date": draw_date,
+        "good_tickets": good_count,
+        "bad_tickets": bad_count,
+        "total_tickets": total,
+    }
+
+
 def _el_gordo_ticket_tier(mains: Sequence[int]) -> int:
     """
     Classify an El Gordo ticket into quality tiers, reusing the same structural
@@ -901,11 +1008,17 @@ def build_la_primitiva_step4_pool(
         * From 1st–20th select 6–8 (random)
         * From 21st–35th select 4
         * From 36th–49th select 4
-      Final mains list is truncated to 20.
+      These form the *prioritized* mains set (up to 20 numbers).
     - Reintegro pool:
         * 1 reintegro from previous draw (snapshot) if available, else random
         * Up to 3 additional reintegros from ranking (reintegro_probs sorted by p), no duplicate
-      Final reintegro list is truncated to 4.
+      These form the *prioritized* reintegro set (up to 4 numbers).
+
+    After building the prioritized sets, we EXTEND them so that:
+      - filtered_mains contains ALL 49 mains (1..49), ordered with prioritized mains first,
+        then remaining numbers in probability order.
+      - filtered_reintegro contains ALL 10 reintegros (0..9), ordered with prioritized
+        reintegros first, then remaining numbers in probability order.
     """
     if seed is not None:
         random.seed(seed)
@@ -955,7 +1068,7 @@ def build_la_primitiva_step4_pool(
             exclude.add(int(item.get("number") or 0))
         return chosen
 
-    # Main pool cap 20; distribution: 4–5 prev + (6–8) + 4 + 4 from bands
+    # Prioritized main pool target: 4–5 prev + (6–8) + 4 + 4 from bands (<= 20)
     MAIN_POOL_MAX = 20
     top_count = random.choice([6, 7, 8])
     from_1_20 = take_random_from_ranking(mains_ranking, 1, 20, top_count, main_set)
@@ -971,9 +1084,9 @@ def build_la_primitiva_step4_pool(
         filtered_mains_items.append({"number": n, "p": p})
     for seg in (from_1_20, from_21_35, from_36_49):
         filtered_mains_items.extend(seg)
-    filtered_mains = filtered_mains_items[:MAIN_POOL_MAX]
+    prioritized_mains = filtered_mains_items[:MAIN_POOL_MAX]
 
-    # --- Reintegro pool (cap 4): snapshot + top ranking reintegros (avoid duplicates) ---
+    # --- Reintegro prioritized pool (cap 4): snapshot + top ranking reintegros (avoid duplicates) ---
     REIN_POOL_MAX = 4
     filtered_rein_items: List[Dict] = []
     p_rein = next(
@@ -985,11 +1098,42 @@ def build_la_primitiva_step4_pool(
     extras = [x for x in rein_ranking if int(x.get("number") or 0) not in rein_set]
     max_extras = max(0, REIN_POOL_MAX - len(filtered_rein_items))
     filtered_rein_items.extend(extras[:max_extras])
-    filtered_rein = filtered_rein_items[:REIN_POOL_MAX]
+    prioritized_rein = filtered_rein_items[:REIN_POOL_MAX]
 
-    # Randomly reorder mains and reintegro so Step 5 receives shuffled pools.
-    random.shuffle(filtered_mains)
-    random.shuffle(filtered_rein)
+    # --- Extend to full 49 mains and 10 reintegros (prioritized first, then remaining by prob) ---
+    prioritized_main_numbers = {int(x["number"]) for x in prioritized_mains}
+    extended_mains: List[Dict] = list(prioritized_mains)
+    for item in mains_ranking:
+        n = int(item.get("number") or 0)
+        if n < MAIN_MIN or n > MAIN_MAX or n in prioritized_main_numbers:
+            continue
+        extended_mains.append({"number": n, "p": item.get("p") or 0.0})
+        prioritized_main_numbers.add(n)
+        if len(prioritized_main_numbers) >= (MAIN_MAX - MAIN_MIN + 1):
+            break
+    # Ensure all 1..49 present (fallback in case probs missing some numbers)
+    for n in range(MAIN_MIN, MAIN_MAX + 1):
+        if n not in prioritized_main_numbers:
+            extended_mains.append({"number": n, "p": 0.0})
+            prioritized_main_numbers.add(n)
+
+    prioritized_rein_numbers = {int(x["number"]) for x in prioritized_rein}
+    extended_rein: List[Dict] = list(prioritized_rein)
+    for item in rein_ranking:
+        n = int(item.get("number") or 0)
+        if n < REIN_MIN or n > REIN_MAX or n in prioritized_rein_numbers:
+            continue
+        extended_rein.append({"number": n, "p": item.get("p") or 0.0})
+        prioritized_rein_numbers.add(n)
+        if len(prioritized_rein_numbers) >= (REIN_MAX - REIN_MIN + 1):
+            break
+    for n in range(REIN_MIN, REIN_MAX + 1):
+        if n not in prioritized_rein_numbers:
+            extended_rein.append({"number": n, "p": 0.0})
+            prioritized_rein_numbers.add(n)
+
+    filtered_mains = extended_mains
+    filtered_rein = extended_rein
 
     def _stats(rows: List[Dict]) -> Dict:
         nums = [int(r.get("number") or 0) for r in rows]
@@ -1110,15 +1254,17 @@ EUROMILLONES_TRAIN_PROGRESS_COLLECTION = "euromillones_train_progress"
 EUROMILLONES_COMPARE_RESULTS_COLLECTION = "euromillones_compare_results"
 EL_GORDO_TRAIN_PROGRESS_COLLECTION = "el_gordo_train_progress"
 EL_GORDO_COMPARE_RESULTS_COLLECTION = "el_gordo_compare_results"
+LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION = "la_primitiva_train_progress"
+LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION = "la_primitiva_compare_results"
 # Cost per Euromillones ticket (€) for compare total cost
 EUROMILLONES_TICKET_COST_EUR = 2.50
 # Locks so only one full-wheel reorder per lottery runs at a time (avoids concurrent file write / corrupt state)
 _EUROMILLONES_REORDER_LOCK = threading.Lock()
 _EL_GORDO_REORDER_LOCK = threading.Lock()
+_LA_PRIMITIVA_REORDER_LOCK = threading.Lock()
 EL_GORDO_BUY_QUEUE_COLLECTION = "el_gordo_buy_queue"
 LA_PRIMITIVA_BUY_QUEUE_COLLECTION = "la_primitiva_buy_queue"
 EUROMILLONES_BUY_QUEUE_COLLECTION = "euromillones_buy_queue"
-LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION = "la_primitiva_train_progress"
 BOT_CREDENTIALS_COLLECTION = "bot_credentials"
 
 logger = logging.getLogger("lottery")
@@ -1146,8 +1292,14 @@ async def lifespan(app: FastAPI):
     db[EL_GORDO_COMPARE_RESULTS_COLLECTION].create_index(
         [("current_id", 1), ("pre_id", 1)], unique=True
     )
-    db[EL_GORDO_BUY_QUEUE_COLLECTION].create_index([("status", 1), ("created_at", 1)])
     db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION].create_index("cutoff_draw_id", unique=True)
+    db[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION].create_index(
+        [("current_id", 1), ("pre_id", 1)], unique=True
+    )
+    db[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION].create_index(
+        [("current_id", 1), ("pre_id", 1)], unique=True
+    )
+    db[EL_GORDO_BUY_QUEUE_COLLECTION].create_index([("status", 1), ("created_at", 1)])
     # bot_credentials: no index on "order" at startup (optional; avoids conflict if one already exists)
     yield
     if client:
@@ -1525,6 +1677,8 @@ _PUBLIC_API_PATHS = {
     "/api/dev/euromillones/betting/seed-test-bought",
     # Dev-only helper to seed test bought tickets for El Gordo. Do NOT expose in production.
     "/api/dev/el-gordo/betting/seed-test-bought",
+    # Dev-only helper to seed test bought tickets for La Primitiva. Do NOT expose in production.
+    "/api/dev/la-primitiva/betting/seed-test-bought",
 }
 
 
@@ -3435,6 +3589,233 @@ def _el_gordo_full_wheel_reorder_txt(
         raise
     print("[el-gordo-reorder] done.", flush=True)
 
+
+def _la_primitiva_full_wheel_reorder_txt(
+    path: str,
+    main_set: set,
+    draw_date: str,
+) -> None:
+    """
+    Reorder La Primitiva full wheel TXT using position_generator_la_primitiva rules.
+
+    - Compute first_position from draw year/month via position_generator_la_primitiva.
+    - First pass: loop TXT until jackpot (6 mains hit); while scanning, store
+      2th/3th/4th "old" positions (5‑hit, 4‑hit, 3‑hit tickets).
+    - Second pass: loop TXT until first_position and store 2th/3th/4th "new"
+      positions (already early winners).
+    - If there is no early winner of a given tier (new count < 1), choose one
+      candidate from the corresponding old positions and move it into a band:
+        r_2 = [0.8 * first_position ... first_position - 1]
+        r_3 = [0.6 * first_position ... first_position - 1]
+        r_4 = [0.4 * first_position ... first_position - 1]
+      avoiding collisions and keeping jackpot moved to first_position.
+    - Overwrite the TXT in place via a temporary file, swapping only mains
+      content; line positions (No) remain unchanged.
+    """
+    from refer.position import position_generator_la_primitiva
+
+    date_str = (draw_date or "")[:10]
+    if not date_str or len(date_str) < 7:
+        raise HTTPException(400, detail="Draw date required for reorder (La Primitiva)")
+    try:
+        year = int(date_str[:4])
+        month = int(date_str[5:7])
+    except (ValueError, IndexError):
+        raise HTTPException(400, detail="Invalid draw date format for reorder (La Primitiva)")
+    first_position = position_generator_la_primitiva(year, month)
+    if first_position < 1:
+        raise HTTPException(400, detail="first_position must be positive (La Primitiva)")
+    print(
+        f"[la-prim-reorder] draw_date={date_str} year={year} month={month} first_position={first_position}",
+        flush=True,
+    )
+
+    # First pass: scan until jackpot and collect old positions for 2th/3th/4th.
+    jackpot_position: Optional[int] = None
+    second_old: List[int] = []
+    third_old: List[int] = []
+    fourth_old: List[int] = []
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pos_str, mains_str = line.split(";")
+                position = int(pos_str)
+                mains = [int(x) for x in mains_str.split(",") if x]
+            except Exception:
+                continue
+            if len(mains) != 6:
+                continue
+            hits_main = sum(1 for n in mains if n in main_set)
+            if hits_main == 6:
+                jackpot_position = position
+                break
+            elif hits_main == 5:
+                second_old.append(position)
+            elif hits_main == 4:
+                third_old.append(position)
+            elif hits_main == 3:
+                fourth_old.append(position)
+
+    if jackpot_position is None:
+        raise HTTPException(
+            404,
+            detail="Jackpot (6 mains) not found in La Primitiva full wheel file; cannot reorder",
+        )
+    print(
+        f"[la-prim-reorder] jackpot_position={jackpot_position} | 2th_old={len(second_old)} 3th_old={len(third_old)} 4th_old={len(fourth_old)}",
+        flush=True,
+    )
+
+    # If jackpot is already before first_position, skip reorder.
+    if jackpot_position < first_position:
+        print(
+            f"[la-prim-reorder] jackpot_position {jackpot_position} < first_position {first_position}; skipping reorder",
+            flush=True,
+        )
+        return
+
+    # Second pass: scan up to first_position and count existing early winners per tier.
+    second_new: List[int] = []
+    third_new: List[int] = []
+    fourth_new: List[int] = []
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pos_str, mains_str = line.split(";")
+                position = int(pos_str)
+                mains = [int(x) for x in mains_str.split(",") if x]
+            except Exception:
+                continue
+            if position > first_position:
+                break
+            if len(mains) != 6:
+                continue
+            hits_main = sum(1 for n in mains if n in main_set)
+            if hits_main == 5:
+                second_new.append(position)
+            elif hits_main == 4:
+                third_new.append(position)
+            elif hits_main == 3:
+                fourth_new.append(position)
+
+    has_2_before = len(second_new) > 0
+    has_3_before = len(third_new) > 0
+    has_4_before = len(fourth_new) > 0
+
+    import random as rand_module
+
+    def range_list_lp(lo: float, hi: int) -> List[int]:
+        return list(range(max(1, int(lo)), hi + 1))
+
+    r_2 = range_list_lp(first_position * 0.8, first_position - 1)
+    r_3 = range_list_lp(first_position * 0.6, first_position - 1)
+    r_4 = range_list_lp(first_position * 0.4, first_position - 1)
+
+    used: set[int] = {first_position}
+
+    def pick_single_move(candidates: List[int], band: List[int]) -> List[Tuple[int, int]]:
+        """
+        Select exactly ONE ticket from `candidates` (> first_position) and assign it
+        to ONE new position in `band`, avoiding already used positions.
+        Returns [(old_pos, new_pos)] or [].
+        """
+        if not candidates or not band:
+            return []
+        pool = [p for p in candidates if p > first_position]
+        if not pool:
+            return []
+        avail = [x for x in band if x not in used]
+        if not avail:
+            return []
+        old_pos = rand_module.choice(pool)
+        new_pos = rand_module.choice(avail)
+        used.add(new_pos)
+        return [(old_pos, new_pos)]
+
+    moves: List[Tuple[int, int]] = [(jackpot_position, first_position)]
+    used.add(first_position)
+    if not has_2_before:
+        moves.extend(pick_single_move(second_old, r_2))
+    if not has_3_before:
+        moves.extend(pick_single_move(third_old, r_3))
+    if not has_4_before:
+        moves.extend(pick_single_move(fourth_old, r_4))
+
+    print(
+        f"[la-prim-reorder] ranges len r_2={len(r_2)} r_3={len(r_3)} r_4={len(r_4)} | moves ({len(moves)}): {moves}",
+        flush=True,
+    )
+
+    # Build mapping: for each new position -> old position (only for moved tickets)
+    moved_from: set[int] = set()
+    moved_to: Dict[int, int] = {}
+    for old_pos, new_pos in moves:
+        moved_from.add(old_pos)
+        moved_to[new_pos] = old_pos
+
+    # Read only the moved tickets' content into memory
+    moved_content: Dict[int, str] = {}
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            raw = line.rstrip("\n")
+            if not raw:
+                continue
+            try:
+                pos_str, mains_str = raw.split(";")
+                position = int(pos_str)
+            except Exception:
+                continue
+            if position in moved_from:
+                moved_content[position] = mains_str
+            if position >= jackpot_position and len(moved_content) == len(moved_from):
+                break
+
+    # Write to temp file, streaming from original; only swapped tickets use moved_content
+    dirpath = os.path.dirname(path)
+    fd, temp_path = tempfile.mkstemp(
+        suffix=".txt", prefix="la_primitiva_reorder_", dir=dirpath if dirpath else "."
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            with open(path, "r", encoding="utf-8") as src:
+                for line in src:
+                    raw = line.rstrip("\n")
+                    if not raw:
+                        out.write(line)
+                        continue
+                    try:
+                        pos_str, mains_str = raw.split(";")
+                        position = int(pos_str)
+                    except Exception:
+                        out.write(line)
+                        continue
+                    if position <= jackpot_position and position in moved_to:
+                        old_pos = moved_to[position]
+                        mains_str2 = moved_content.get(old_pos, mains_str)
+                        out.write(f"{position};{mains_str2}\n")
+                    else:
+                        out.write(line if line.endswith("\n") else line + "\n")
+        print(
+            f"[la-prim-reorder] writing swapped lines up to {jackpot_position} and streamed tail to {path}",
+            flush=True,
+        )
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+    print("[la-prim-reorder] done.", flush=True)
+
 def _euromillones_full_wheel_compare(
     current_id: str,
     pre_id: str,
@@ -3770,6 +4151,206 @@ def _el_gordo_full_wheel_compare(
     print(f"[el-gordo-compare] saved result for current_id={current_id} pre_id={pre_id_clean} jackpot_position={jackpot_position}", flush=True)
     return result
 
+
+def _la_primitiva_full_wheel_compare(
+    current_id: str,
+    pre_id: str,
+    db_instance,
+) -> Dict:
+    """
+    Compare La Primitiva full wheel TXT against draw result.
+
+    - Stream TXT and compute for each (main_hits, reintegro_hit) category:
+      * first_position (first time it appears)
+      * total count of tickets.
+    - Also record jackpot_position (6 mains), and first positions for
+      2th(5 hits), 3th(4 hits), 4th(3 hits).
+    - Stop scanning once jackpot appears (like Euromillones/El Gordo).
+    - Save summary to la_primitiva_compare_results; if result already exists, return it.
+    """
+    pre_id_clean = pre_id.strip()
+    coll_compare = db_instance[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION]
+    existing = coll_compare.find_one({"current_id": current_id, "pre_id": pre_id_clean})
+    if existing:
+        out = {k: v for k, v in existing.items() if k != "_id"}
+        return _item_to_json(out)
+
+    # Resolve draw from la_primitiva collection
+    coll_draws = db_instance["la_primitiva"]
+    doc = coll_draws.find_one({"id_sorteo": current_id})
+    if doc is None and current_id.isdigit():
+        doc = coll_draws.find_one({"id_sorteo": int(current_id)})
+    if not doc:
+        raise HTTPException(404, detail="La Primitiva draw not found")
+
+    draw = _build_draw(doc, "LAPR")
+    numbers = draw.get("numbers") or []
+    combinacion_acta = draw.get("combinacion_acta") or ""
+    reintegro_value = draw.get("reintegro")
+    complementario_value = draw.get("complementario")
+
+    main_draw: list[int] = []
+    reintegro_draw: int | None = None
+    complementario_draw: int | None = None
+
+    # Prefer numbers array if it contains at least 6 mains.
+    if len(numbers) >= 6:
+        main_draw = [int(x) for x in numbers[:6]]
+    else:
+        # Fallback to combinacion_acta parsing.
+        parts = re.findall(r"\b\d{1,2}\b", str(combinacion_acta))
+        nums = [int(p) for p in parts if p.isdigit()]
+        if len(nums) >= 6:
+            main_draw = nums[:6]
+
+    # Reintegro: prefer explicit field (not used in ranking, but kept for completeness/logging if needed).
+    try:
+        if reintegro_value is not None and str(reintegro_value).strip():
+            reintegro_draw = int(reintegro_value)
+    except (TypeError, ValueError):
+        reintegro_draw = None
+
+    # Complementario (bonus number).
+    try:
+        if complementario_value is not None and str(complementario_value).strip():
+            complementario_draw = int(complementario_value)
+    except (TypeError, ValueError):
+        complementario_draw = None
+
+    if len(main_draw) != 6:
+        raise HTTPException(400, detail="La Primitiva draw mains missing or invalid")
+    main_set = set(main_draw)
+    complementario_set = {complementario_draw} if complementario_draw is not None else set()
+    draw_date = (draw.get("fecha_sorteo") or doc.get("fecha_sorteo") or "")[:10] or None
+
+    # Resolve TXT path from training progress
+    coll_progress = db_instance[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+    progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+    if progress_doc is None and pre_id_clean.isdigit():
+        progress_doc = coll_progress.find_one({"cutoff_draw_id": int(pre_id_clean)})
+    if not progress_doc:
+        raise HTTPException(404, detail="La Primitiva training progress not found for pre_id")
+    path = (progress_doc.get("full_wheel_file_path") or "").strip()
+    if not path:
+        raise HTTPException(400, detail="La Primitiva full wheel file not generated for this pre_id")
+    if not os.path.isfile(path):
+        raise HTTPException(404, detail="La Primitiva full wheel file not found on disk")
+
+    # We only care about 5 official La Primitiva categories based on mains + complementario:
+    # 1ª: (6,0) -> 6 aciertos
+    # 2ª: (5,1) -> 5 + C
+    # 3ª: (5,0) -> 5 aciertos
+    # 4ª: (4,0) -> 4 aciertos
+    # 5ª: (3,0) -> 3 aciertos
+    category_first_pos: Dict[Tuple[int, int], int] = {}
+    category_counts: Dict[Tuple[int, int], int] = {}
+    jackpot_position: Optional[int] = None
+    second_first: Optional[int] = None
+    third_first: Optional[int] = None
+    fourth_first: Optional[int] = None
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pos_str, mains_str = line.split(";")
+                position = int(pos_str)
+                mains = [int(x) for x in mains_str.split(",") if x]
+            except Exception:
+                continue
+            if len(mains) != 6:
+                continue
+            hits_main = sum(1 for n in mains if n in main_set)
+            has_complementario = bool(
+                complementario_set and any(n in complementario_set for n in mains)
+            )
+
+            # Map to one of the 5 official categories (or ignore if not matching any).
+            key: Optional[Tuple[int, int]] = None
+            if hits_main == 6:
+                key = (6, 0)  # 1ª
+            elif hits_main == 5 and has_complementario:
+                key = (5, 1)  # 2ª
+            elif hits_main == 5:
+                key = (5, 0)  # 3ª
+            elif hits_main == 4:
+                key = (4, 0)  # 4ª
+            elif hits_main == 3:
+                key = (3, 0)  # 5ª
+
+            if key is not None:
+                if key not in category_first_pos:
+                    category_first_pos[key] = position
+                category_counts[key] = category_counts.get(key, 0) + 1
+
+            if hits_main == 6:
+                if jackpot_position is None:
+                    jackpot_position = position
+                # Stop scanning once jackpot (6 mains) is found.
+                break
+            elif hits_main == 5:
+                if second_first is None:
+                    second_first = position
+            elif hits_main == 4:
+                if third_first is None:
+                    third_first = position
+            elif hits_main == 3:
+                if fourth_first is None:
+                    fourth_first = position
+
+    if jackpot_position is None:
+        raise HTTPException(
+            404,
+            detail="Jackpot (6 mains) not found in La Primitiva full wheel file; cannot compute compare result",
+        )
+
+    # Build categories array in fixed canonical order (exactly 5 entries).
+    ordered_keys: List[Tuple[Tuple[int, int], str]] = [
+        ((6, 0), "1ª (6 aciertos)"),
+        ((5, 1), "2ª (5 + C)"),
+        ((5, 0), "3ª (5 aciertos)"),
+        ((4, 0), "4ª (4 aciertos)"),
+        ((3, 0), "5ª (3 aciertos)"),
+    ]
+    categories_out: List[Dict] = []
+    for (key, label) in ordered_keys:
+        hm, ch = key
+        first_pos = category_first_pos.get(key, 0)
+        count = category_counts.get(key, 0)
+        categories_out.append(
+            {
+                "category": label,
+                "main_hits": hm,
+                "reintegro_hit": ch,
+                "first_position": first_pos,
+                "count": count,
+            }
+        )
+
+    result = {
+        "current_id": current_id,
+        "date": draw_date,
+        "pre_id": pre_id_clean,
+        "jackpot_position": jackpot_position,
+        "pos_2th": second_first,
+        "pos_3th": third_first,
+        "pos_4th": fourth_first,
+        "categories": categories_out,
+        "total_categories": len(categories_out),
+    }
+    coll_compare.replace_one(
+        {"current_id": current_id, "pre_id": pre_id_clean},
+        {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
+        upsert=True,
+    )
+    print(
+        f"[la-prim-compare] saved result for current_id={current_id} pre_id={pre_id_clean} jackpot_position={jackpot_position}",
+        flush=True,
+    )
+    return result
+
 @app.get("/api/euromillones/compare/full-wheel")
 def api_euromillones_compare_full_wheel(
     current_id: str = Query(..., description="id_sorteo of the draw to evaluate (result)."),
@@ -3810,6 +4391,26 @@ def api_el_gordo_compare_full_wheel(
         raise HTTPException(500, detail=f"El Gordo compare failed: {e}")
     return JSONResponse(content=_item_to_json(result))
 
+
+@app.get("/api/la-primitiva/compare/full-wheel")
+def api_la_primitiva_compare_full_wheel(
+    current_id: str = Query(..., description="id_sorteo of the La Primitiva draw to evaluate (result)."),
+    pre_id: str = Query(..., description="cutoff_draw_id or probs_draw_id for the La Primitiva full wheel run."),
+):
+    """
+    Compare La Primitiva full wheel TXT (from pre_id) against draw result (current_id).
+    Returns and saves summary: jackpot_position, 2th/3th/4th first positions,
+    and first_position + count for every (main_hits, reintegro_hit) category.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    try:
+        result = _la_primitiva_full_wheel_compare(current_id.strip(), pre_id.strip(), db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=f"La Primitiva compare failed: {e}")
+    return JSONResponse(content=_item_to_json(result))
 
 @app.get("/api/el-gordo/compare/full-wheel")
 def api_el_gordo_compare_full_wheel(
@@ -3941,6 +4542,66 @@ def api_el_gordo_compare_analysis(
                 "pos_3th": int(doc.get("pos_3th") or 0) if doc.get("pos_3th") is not None else None,
                 "pos_4th": int(doc.get("pos_4th") or 0) if doc.get("pos_4th") is not None else None,
                 "categories": norm_cats,
+            }
+        )
+    return JSONResponse(content={"rows": rows})
+
+
+@app.get("/api/la-primitiva/compare/analysis")
+def api_la_primitiva_compare_analysis(
+    limit: int = Query(200, ge=1, le=1000, description="Max rows to return, sorted by date desc"),
+):
+    """
+    Analysis of La Primitiva full-wheel compares.
+
+    Reads la_primitiva_compare_results and returns rows sorted by date desc:
+      - date
+      - current_id
+      - pre_id
+      - jackpot_position (1ª: 6 aciertos)
+      - pos_2th (2ª: 5 + C), pos_3th (3ª: 5), pos_4th (4ª: 4), pos_5th (5ª: 3)
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    coll = db[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION]
+    cursor = coll.find(
+        {},
+        projection={
+            "_id": 0,
+            "date": 1,
+            "current_id": 1,
+            "pre_id": 1,
+            "jackpot_position": 1,
+            "pos_2th": 1,
+            "pos_3th": 1,
+            "pos_4th": 1,
+            "categories": 1,
+        },
+    ).sort("date", -1).limit(limit)
+    rows: List[Dict[str, Any]] = []
+    for doc in cursor:
+        date_str = (doc.get("date") or "")[:10]
+        cats = doc.get("categories") or []
+        pos_5th: Optional[int] = None
+        if isinstance(cats, list):
+            for c in cats:
+                if not isinstance(c, dict):
+                    continue
+                if int(c.get("main_hits") or 0) == 3 and int(c.get("reintegro_hit") or 0) == 0:
+                    fp = int(c.get("first_position") or 0)
+                    if fp > 0:
+                        pos_5th = fp
+                        break
+        rows.append(
+            {
+                "date": date_str,
+                "current_id": str(doc.get("current_id") or ""),
+                "pre_id": str(doc.get("pre_id") or ""),
+                "pos_1th": int(doc.get("jackpot_position") or 0),
+                "pos_2th": int(doc.get("pos_2th") or 0) if doc.get("pos_2th") is not None else None,
+                "pos_3th": int(doc.get("pos_3th") or 0) if doc.get("pos_3th") is not None else None,
+                "pos_4th": int(doc.get("pos_4th") or 0) if doc.get("pos_4th") is not None else None,
+                "pos_5th": pos_5th,
             }
         )
     return JSONResponse(content={"rows": rows})
@@ -4243,6 +4904,99 @@ def api_el_gordo_compare_full_wheel_tickets(
     )
 
 
+@app.get("/api/la-primitiva/compare/full-wheel/tickets")
+def api_la_primitiva_compare_full_wheel_tickets(
+    current_id: str = Query(..., description="id_sorteo of the draw (result)."),
+    pre_id: str = Query(..., description="cutoff_draw_id for the full wheel run."),
+    skip: int = Query(0, ge=0, description="Number of tickets to skip from the start (0‑based)."),
+    limit: int = Query(100, ge=1, le=100, description="Page size (max 100)."),
+):
+    """
+    Paginated view of tickets in the La Primitiva full wheel TXT (after any reorder).
+
+    Returns tickets with:
+      - position (No)
+      - mains (array of 6 numbers)
+    Uses skip/limit on the position number (1‑based). Does not load the whole file into RAM.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    pre_id_clean = pre_id.strip()
+    current_id_clean = current_id.strip()
+
+    # Resolve TXT path from train progress
+    coll_progress = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+    progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+    if progress_doc is None and pre_id_clean.isdigit():
+        progress_doc = coll_progress.find_one({"cutoff_draw_id": int(pre_id_clean)})
+    if not progress_doc:
+        raise HTTPException(404, detail="La Primitiva training progress not found for pre_id")
+    path = (progress_doc.get("full_wheel_file_path") or "").strip()
+    if not path:
+        raise HTTPException(400, detail="Full wheel file not generated for this pre_id")
+    if not os.path.isfile(path):
+        raise HTTPException(404, detail="Full wheel file not found on disk")
+
+    # Total tickets: estimate as last position in file (streaming)
+    total_tickets: Optional[int] = None
+    last_pos = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pos_str, _m = line.split(";")
+                p = int(pos_str)
+                if p > last_pos:
+                    last_pos = p
+            except Exception:
+                continue
+    total_tickets = last_pos
+
+    # Stream TXT and collect only tickets in [skip, skip+limit)
+    items: List[Dict] = []
+    start_pos = skip + 1  # positions are 1‑based
+    end_pos = skip + limit
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pos_str, mains_str = line.split(";")
+                position = int(pos_str)
+            except Exception:
+                continue
+            if position < start_pos:
+                continue
+            if position > end_pos:
+                break
+            mains = [int(x) for x in mains_str.split(",") if x]
+            if len(mains) != 6:
+                continue
+            items.append(
+                {
+                    "position": position,
+                    "mains": mains,
+                }
+            )
+            if len(items) >= limit:
+                break
+
+    return JSONResponse(
+        content={
+            "current_id": current_id_clean,
+            "pre_id": pre_id_clean,
+            "skip": skip,
+            "limit": limit,
+            "total_tickets": total_tickets,
+            "tickets": items,
+        }
+    )
+
+
 @app.post("/api/euromillones/compare/full-wheel/reorder")
 def api_euromillones_compare_full_wheel_reorder(
     current_id: str = Query(..., description="id_sorteo of the draw (result); draw date from this."),
@@ -4368,6 +5122,90 @@ def api_el_gordo_compare_full_wheel_reorder(
         return JSONResponse(content=_item_to_json(result))
     finally:
         _EL_GORDO_REORDER_LOCK.release()
+
+
+@app.post("/api/la-primitiva/compare/full-wheel/reorder")
+def api_la_primitiva_compare_full_wheel_reorder(
+    current_id: str = Query(..., description="id_sorteo of the La Primitiva draw (result); draw date from this."),
+    pre_id: str = Query(..., description="cutoff_draw_id or probs_draw_id for the La Primitiva full wheel TXT."),
+):
+    """
+    Reorder tickets in the La Primitiva full wheel TXT (swap mains only),
+    then run compare. Uses draw date from current_id for first_position via
+    position_generator_la_primitiva. If result already exists with reorder_applied,
+    returns cached result. If another reorder is in progress, returns 503.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    pre_id_clean = pre_id.strip()
+    current_id_clean = current_id.strip()
+    print(f"[la-prim-reorder-api] START current_id={current_id_clean!r} pre_id={pre_id_clean!r}", flush=True)
+    coll_compare = db[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION]
+    existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
+    if existing and existing.get("reorder_applied") is True:
+        print("[la-prim-reorder-api] existing result with reorder_applied=true, returning cached", flush=True)
+        result = {k: v for k, v in existing.items() if k != "_id"}
+        return JSONResponse(content=_item_to_json(result))
+    if not _LA_PRIMITIVA_REORDER_LOCK.acquire(blocking=False):
+        print("[la-prim-reorder-api] reorder lock busy, returning 503", flush=True)
+        raise HTTPException(
+            503,
+            detail="La Primitiva reorder already in progress. Please retry later.",
+        )
+    try:
+        # Resolve draw to get date and main_set
+        coll_draws = db["la_primitiva"]
+        doc = coll_draws.find_one({"id_sorteo": current_id_clean})
+        if doc is None and current_id_clean.isdigit():
+            doc = coll_draws.find_one({"id_sorteo": int(current_id_clean)})
+        if not doc:
+            raise HTTPException(404, detail="La Primitiva draw not found")
+        draw = _build_draw(doc, "LAPR")
+        numbers = draw.get("numbers") or []
+        combinacion_acta = draw.get("combinacion_acta") or ""
+        if len(numbers) >= 6:
+            main_draw = [int(x) for x in numbers[:6]]
+        else:
+            parts = re.findall(r"\b\d{1,2}\b", str(combinacion_acta))
+            nums = [int(p) for p in parts if p.isdigit()]
+            main_draw = nums[:6] if len(nums) >= 6 else []
+        if len(main_draw) != 6:
+            raise HTTPException(400, detail="La Primitiva draw mains missing or invalid for reorder")
+        main_set = set(main_draw)
+        draw_date = (draw.get("fecha_sorteo") or doc.get("fecha_sorteo") or "")[:10]
+
+        # Resolve TXT path from training progress
+        coll_progress = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+        progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+        if progress_doc is None and pre_id_clean.isdigit():
+            progress_doc = coll_progress.find_one({"cutoff_draw_id": int(pre_id_clean)})
+        if not progress_doc:
+            raise HTTPException(404, detail="La Primitiva training progress not found for pre_id")
+        path = (progress_doc.get("full_wheel_file_path") or "").strip()
+        if not path:
+            raise HTTPException(400, detail="La Primitiva full wheel file not generated for this pre_id")
+        if not os.path.isfile(path):
+            raise HTTPException(404, detail="La Primitiva full wheel file not found on disk")
+
+        print(f"[la-prim-reorder-api] calling _la_primitiva_full_wheel_reorder_txt path={path!r}", flush=True)
+        _la_primitiva_full_wheel_reorder_txt(
+            path=path,
+            main_set=main_set,
+            draw_date=draw_date,
+        )
+        print("[la-prim-reorder-api] reorder done, now running compare", flush=True)
+        result = _la_primitiva_full_wheel_compare(current_id_clean, pre_id_clean, db)
+        # Mark that reorder was applied so we don't repeat it.
+        coll_compare.replace_one(
+            {"current_id": current_id_clean, "pre_id": pre_id_clean},
+            {**result, "reorder_applied": True, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
+            upsert=True,
+        )
+        print("[la-prim-reorder-api] saved result with reorder_applied=true", flush=True)
+        return JSONResponse(content=_item_to_json(result))
+    finally:
+        _LA_PRIMITIVA_REORDER_LOCK.release()
+
 
 
 def _api_euromillones_compare_full_wheel_reorder_impl(current_id: str, pre_id: str):
@@ -4598,6 +5436,80 @@ def api_dev_el_gordo_seed_test_bought(
                 "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
         },
+    )
+
+
+@app.post("/api/dev/la-primitiva/betting/seed-test-bought")
+def api_dev_la_primitiva_seed_test_bought(
+    cutoff_draw_id: str = Query(
+        "",
+        description="cutoff_draw_id of la_primitiva_train_progress doc to seed",
+    ),
+):
+    """
+    DEV-ONLY: seed some test bought tickets into la_primitiva_train_progress.bought_tickets.
+    This endpoint is public (no Authorization). Do NOT enable in production.
+
+    Mirrors the Euromillones dev endpoint but uses La Primitiva ticket shape:
+    { mains: [6 numbers], reintegro: number }.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    cutoff = cutoff_draw_id.strip()
+    coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+
+    if not cutoff:
+        # Fallback to last cutoff_draw_id from train progress (by probs_fecha_sorteo desc)
+        doc_last = coll.find_one(
+            projection={"cutoff_draw_id": 1},
+            sort=[("probs_fecha_sorteo", -1), ("_id", -1)],
+        )
+        if not doc_last:
+            raise HTTPException(
+                404, detail="No la_primitiva_train_progress doc found to seed"
+            )
+        cutoff = str(doc_last.get("cutoff_draw_id") or "").strip()
+        if not cutoff and isinstance(doc_last.get("cutoff_draw_id"), int):
+            cutoff = str(doc_last.get("cutoff_draw_id"))
+        if not cutoff:
+            raise HTTPException(
+                400, detail="cutoff_draw_id missing and cannot infer last one"
+            )
+
+    tickets = [
+        {"mains": [1, 5, 12, 23, 34, 45], "reintegro": 0},
+        {"mains": [3, 9, 17, 28, 39, 47], "reintegro": 5},
+        {"mains": [4, 14, 24, 33, 42, 49], "reintegro": 7},
+        {"mains": [2, 8, 16, 25, 36, 44], "reintegro": 2},
+        {"mains": [6, 11, 19, 27, 38, 41], "reintegro": 9},
+    ]
+
+    # Try string cutoff_draw_id then int
+    doc = coll.find_one({"cutoff_draw_id": cutoff})
+    if not doc and cutoff.isdigit():
+        doc = coll.find_one({"cutoff_draw_id": int(cutoff)})
+    if not doc:
+        raise HTTPException(
+            404,
+            detail=f"la_primitiva_train_progress not found for cutoff_draw_id={cutoff}",
+        )
+
+    coll.update_one(
+        {"_id": doc["_id"]},
+        {
+            "$set": {
+                "bought_tickets": tickets,
+                "bought_tickets_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        },
+    )
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "cutoff_draw_id": cutoff,
+            "saved_count": len(tickets),
+        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
     return JSONResponse(
         content={
@@ -5000,6 +5912,113 @@ def api_la_primitiva_betting_pool(
         return _la_primitiva_betting_pool_response(None, None, [], [])
 
 
+@app.get("/api/la-primitiva/betting/pool-from-file")
+def api_la_primitiva_betting_pool_from_file(
+    draw_date: str | None = Query(
+        None,
+        description="Draw date YYYY-MM-DD; use full_wheel_file_path for that date.",
+    ),
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="Optional id_sorteo; used when draw_date not provided.",
+    ),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """
+    Return a paginated slice of the La Primitiva full-wheeling pool from TXT (mirror Euromillones/El Gordo).
+
+    Uses skip/limit on the file lines. Each line: position;m1,...,m6
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+    date_str = (draw_date or "").strip()[:10] or None
+    cutoff = (cutoff_draw_id or "").strip() or None
+
+    # Fallback to last_draw_date if neither provided.
+    if not date_str and not cutoff:
+        last = (_get_last_draw_date("la-primitiva") or "").strip()
+        if last:
+            date_str = last[:10]
+
+    doc = None
+    if cutoff:
+        doc = coll.find_one({"cutoff_draw_id": cutoff})
+        if doc is None and cutoff.isdigit():
+            doc = coll.find_one({"cutoff_draw_id": int(cutoff)})
+    if doc is None and date_str:
+        doc = coll.find_one({"full_wheel_draw_date": date_str}) or coll.find_one(
+            {"probs_fecha_sorteo": date_str}
+        )
+    if doc is None:
+        return JSONResponse(
+            content={
+                "draw_date": date_str,
+                "cutoff_draw_id": cutoff,
+                "total": 0,
+                "skip": skip,
+                "limit": limit,
+                "tickets": [],
+            },
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+
+    path = (doc.get("full_wheel_file_path") or "").strip()
+    total = int(doc.get("full_wheel_total_tickets") or 0)
+
+    if not path or total <= 0:
+        return JSONResponse(
+            content={
+                "draw_date": date_str,
+                "cutoff_draw_id": cutoff,
+                "total": total,
+                "skip": skip,
+                "limit": limit,
+                "tickets": [],
+            },
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+
+    tickets_list: List[Dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            # Skip first `skip` lines
+            for _ in range(skip):
+                if not f.readline():
+                    break
+            # Read up to `limit` lines
+            for _ in range(limit):
+                line = f.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    pos_str, mains_str = line.split(";")
+                    position = int(pos_str)
+                    mains = [int(x) for x in mains_str.split(",") if x]
+                except Exception:
+                    continue
+                tickets_list.append({"position": position, "mains": mains})
+    except FileNotFoundError:
+        raise HTTPException(404, detail="Full wheel file not found on disk")
+
+    return JSONResponse(
+        content={
+            "draw_date": (doc.get("full_wheel_draw_date") or date_str),
+            "cutoff_draw_id": doc.get("cutoff_draw_id") or cutoff,
+            "total": total,
+            "skip": skip,
+            "limit": limit,
+            "tickets": tickets_list,
+        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
 @app.post("/api/la-primitiva/betting/bought")
 async def api_la_primitiva_betting_bought(request: Request):
     """
@@ -5260,6 +6279,24 @@ def api_la_primitiva_train_progress(
             content={"progress": None},
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
+
+    # Full wheel elapsed time (mirror Euromillones/El Gordo).
+    full_status = doc.get("full_wheel_status")
+    started_at = doc.get("full_wheel_started_at")
+    generated_at = doc.get("full_wheel_generated_at")
+    full_elapsed: Optional[int] = None
+    if started_at:
+        try:
+            start_dt = dt.fromisoformat(str(started_at).replace("Z", "+00:00"))
+            if full_status == "done" and generated_at:
+                end_dt = dt.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+            else:
+                end_dt = dt.utcnow()
+            diff = end_dt - start_dt
+            full_elapsed = max(0, int(diff.total_seconds()))
+        except Exception:
+            full_elapsed = None
+
     progress = {
         "cutoff_draw_id": doc.get("cutoff_draw_id"),
         "dataset_prepared": bool(doc.get("dataset_prepared")),
@@ -5285,11 +6322,32 @@ def api_la_primitiva_train_progress(
         "candidate_pool_at": doc.get("candidate_pool_at"),
         "candidate_pool_count": doc.get("candidate_pool_count"),
         "bought_tickets": doc.get("bought_tickets"),
+        "full_wheel_draw_date": doc.get("full_wheel_draw_date"),
+        "full_wheel_file_path": doc.get("full_wheel_file_path"),
+        "full_wheel_total_tickets": doc.get("full_wheel_total_tickets"),
+        "full_wheel_good_tickets": doc.get("full_wheel_good_tickets"),
+        "full_wheel_bad_tickets": doc.get("full_wheel_bad_tickets"),
+        "full_wheel_generated_at": doc.get("full_wheel_generated_at"),
+        "full_wheel_started_at": doc.get("full_wheel_started_at"),
+        "full_wheel_status": full_status,
+        "full_wheel_error": doc.get("full_wheel_error"),
+        "full_wheel_elapsed_seconds": full_elapsed,
     }
     return JSONResponse(
         content={"progress": progress},
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
+
+
+@app.post("/api/la-primitiva/train/progress")
+def api_la_primitiva_train_progress_post(
+    cutoff_draw_id: str | None = Query(None, description="id_sorteo for this training run (La Primitiva)."),
+):
+    """
+    POST variant of la-primitiva/train/progress so the frontend can poll status
+    without relying on GET semantics (used while full wheel generation is running).
+    """
+    return api_la_primitiva_train_progress(cutoff_draw_id=cutoff_draw_id)
 
 
 @app.post("/api/el-gordo/train/prepare-dataset")
@@ -5641,6 +6699,37 @@ def api_el_gordo_candidate_pool(
     if not doc:
         raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
 
+    status = doc.get("full_wheel_status")
+    if status in {"waiting"}:
+        # Another generation is already running; ignore this request.
+        print(
+            f"[la-prim-fullwheel] skip start for cutoff_draw_id={cid!r} because status={status!r}",
+            flush=True,
+        )
+        return JSONResponse(
+            content={
+                "status": "waiting",
+                "cutoff_draw_id": cid,
+                "message": "Full wheel generation already in progress for this cutoff_draw_id.",
+            }
+        )
+    if status == "done" and doc.get("full_wheel_file_path"):
+        print(
+            f"[la-prim-fullwheel] skip regenerate for cutoff_draw_id={cid!r} because file already exists",
+            flush=True,
+        )
+        return JSONResponse(
+            content={
+                "status": "done",
+                "cutoff_draw_id": cid,
+                "draw_date": doc.get("full_wheel_draw_date"),
+                "file_path": doc.get("full_wheel_file_path"),
+                "total_tickets": doc.get("full_wheel_total_tickets"),
+                "good_tickets": doc.get("full_wheel_good_tickets"),
+                "bad_tickets": doc.get("full_wheel_bad_tickets"),
+            }
+        )
+
     filtered_mains = doc.get("filtered_mains_probs") or []
     filtered_clave = doc.get("filtered_clave_probs") or []
     if not filtered_mains or len(filtered_mains) < 5:
@@ -5806,6 +6895,36 @@ def api_la_primitiva_candidate_pool(
     if not doc:
         raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
 
+    status = doc.get("full_wheel_status")
+    if status == "waiting":
+        print(
+            f"[la-prim-fullwheel] skip start for cutoff_draw_id={cid!r} because status={status!r}",
+            flush=True,
+        )
+        return JSONResponse(
+            content={
+                "status": "waiting",
+                "cutoff_draw_id": cid,
+                "message": "Full wheel generation already in progress for this cutoff_draw_id.",
+            }
+        )
+    if status == "done" and doc.get("full_wheel_file_path"):
+        print(
+            f"[la-prim-fullwheel] skip regenerate for cutoff_draw_id={cid!r} because file already exists",
+            flush=True,
+        )
+        return JSONResponse(
+            content={
+                "status": "done",
+                "cutoff_draw_id": cid,
+                "draw_date": doc.get("full_wheel_draw_date"),
+                "file_path": doc.get("full_wheel_file_path"),
+                "total_tickets": doc.get("full_wheel_total_tickets"),
+                "good_tickets": doc.get("full_wheel_good_tickets"),
+                "bad_tickets": doc.get("full_wheel_bad_tickets"),
+            }
+        )
+
     filtered_mains = doc.get("filtered_mains_probs") or []
     filtered_rein = doc.get("filtered_reintegro_probs") or []
     if not filtered_mains or len(filtered_mains) < 6:
@@ -5870,6 +6989,169 @@ def api_la_primitiva_candidate_pool(
         content={"status": "ok", "candidate_pool_count": len(tickets)},
     )
 
+
+@app.post("/api/la-primitiva/train/full-wheel")
+def api_la_primitiva_full_wheel(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="id_sorteo for this La Primitiva training run (uses filtered_mains_probs).",
+    ),
+    draw_date: str | None = Query(
+        None,
+        description="Optional draw date YYYY-MM-DD for the TXT filename; falls back to probs_fecha_sorteo.",
+    ),
+):
+    """
+    Generate full La Primitiva wheeling file from the Step 4 pool (49 mains).
+
+    - Reads filtered_mains_probs from la_primitiva_train_progress.
+    - Builds the ordered mains pool (49 numbers, prioritized first, then the rest).
+    - Generates ALL tickets C(49,6) in a manifold order using the pool order.
+    - Applies structural rules via _la_primitiva_ticket_tier to group tickets
+      into tiers (good → bad) and writes them in that order to TXT.
+    - Saves stats and file path into la_primitiva_train_progress.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        raise HTTPException(400, detail="cutoff_draw_id is required")
+
+    cid = cutoff_draw_id.strip()
+    coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+    # Use atomic reservation: only proceed if no other process is in "waiting".
+    doc = coll.find_one({"cutoff_draw_id": cid})
+    if not doc:
+        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+
+    status = doc.get("full_wheel_status")
+    if status == "waiting":
+        print(
+            f"[la-prim-fullwheel] skip start for cutoff_draw_id={cid!r} because status={status!r}",
+            flush=True,
+        )
+        return JSONResponse(
+            content={
+                "status": "waiting",
+                "cutoff_draw_id": cid,
+                "message": "Full wheel generation already in progress for this cutoff_draw_id.",
+            }
+        )
+    if status == "done" and doc.get("full_wheel_file_path"):
+        print(
+            f"[la-prim-fullwheel] skip regenerate for cutoff_draw_id={cid!r} because file already exists",
+            flush=True,
+        )
+        return JSONResponse(
+            content={
+                "status": "done",
+                "cutoff_draw_id": cid,
+                "draw_date": doc.get("full_wheel_draw_date"),
+                "file_path": doc.get("full_wheel_file_path"),
+                "total_tickets": doc.get("full_wheel_total_tickets"),
+                "good_tickets": doc.get("full_wheel_good_tickets"),
+                "bad_tickets": doc.get("full_wheel_bad_tickets"),
+            }
+        )
+
+    filtered_mains = doc.get("filtered_mains_probs") or []
+    if not filtered_mains or len(filtered_mains) < 6:
+        raise HTTPException(
+            400,
+            detail="Run step 4 (Generar pool) first so filtered_mains_probs has at least 6 numbers.",
+        )
+
+    mains_pool = [int(x.get("number") or 0) for x in filtered_mains if x.get("number") is not None]
+    if len(set(mains_pool)) < 6:
+        raise HTTPException(
+            400,
+            detail="Pool too small to build La Primitiva tickets (need at least 6 distinct mains).",
+        )
+
+    date_str = (draw_date or "").strip()
+    if not date_str:
+        fecha = (doc.get("probs_fecha_sorteo") or "").strip()
+        date_str = fecha.split(" ")[0] or fecha
+    if not date_str:
+        last_draw_date = _get_last_draw_date("la-primitiva") or ""
+        date_str = last_draw_date.strip()[:10]
+    if not date_str:
+        raise HTTPException(400, detail="Cannot determine draw date for filename.")
+
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Reserve generation slot atomically: only transition to waiting if not already waiting.
+    updated = coll.update_one(
+        {"cutoff_draw_id": cid, "full_wheel_status": {"$ne": "waiting"}},
+        {
+            "$set": {
+                "full_wheel_status": "waiting",
+                "full_wheel_error": None,
+                "full_wheel_draw_date": date_str,
+                "full_wheel_file_path": None,
+                "full_wheel_total_tickets": 0,
+                "full_wheel_good_tickets": 0,
+                "full_wheel_bad_tickets": 0,
+                "full_wheel_generated_at": None,
+                "full_wheel_started_at": now,
+            }
+        },
+    )
+    if updated.matched_count == 0:
+        # Someone else set status=waiting between our read and update.
+        print(
+            f"[la-prim-fullwheel] concurrent start detected for cutoff_draw_id={cid!r}; another process already reserved generation.",
+            flush=True,
+        )
+        return JSONResponse(
+            content={
+                "status": "waiting",
+                "cutoff_draw_id": cid,
+                "message": "Full wheel generation already in progress for this cutoff_draw_id.",
+            }
+        )
+
+    def _run_full_wheel() -> None:
+        try:
+            stats = _generate_la_primitiva_full_wheel_file(
+                mains_pool=mains_pool,
+                draw_date=date_str,
+            )
+            finished_at = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {
+                    "$set": {
+                        "full_wheel_status": "done",
+                        "full_wheel_draw_date": stats["draw_date"],
+                        "full_wheel_file_path": stats["file_path"],
+                        "full_wheel_total_tickets": stats["total_tickets"],
+                        "full_wheel_good_tickets": stats["good_tickets"],
+                        "full_wheel_bad_tickets": stats["bad_tickets"],
+                        "full_wheel_generated_at": finished_at,
+                    }
+                },
+            )
+        except Exception as e:
+            logging.exception("Error generating La Primitiva full wheel: %s", e)
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {
+                    "$set": {
+                        "full_wheel_status": "error",
+                        "full_wheel_error": str(e),
+                    }
+                },
+            )
+
+    thread = threading.Thread(target=_run_full_wheel, name=f"la_prim_full_wheel_{cid}", daemon=True)
+    thread.start()
+
+    return JSONResponse(
+        content={
+            "status": "started",
+            "cutoff_draw_id": cid,
+            "draw_date": date_str,
+        }
+    )
 
 @app.post("/api/euromillones/train/models")
 def api_euromillones_train_models(
@@ -6470,6 +7752,57 @@ def api_euromillones_candidate_pool(
                 "candidate_pool_count": len(tickets),
             }
         },
+    )
+
+
+@app.get("/api/la-primitiva/train/full-wheel-preview")
+def api_la_primitiva_full_wheel_preview(
+    cutoff_draw_id: str = Query(..., description="id_sorteo for this training run."),
+    limit: int = Query(20, ge=1, le=200),
+):
+    """
+    Return a small preview of the full-wheeling ticket file for La Primitiva.
+
+    - Reads full_wheel_file_path from la_primitiva_train_progress.
+    - Streams the first `limit` lines from the TXT file.
+    - Each line is parsed into { position, mains }.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one({"cutoff_draw_id": cutoff_draw_id.strip()})
+    if not doc:
+        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+    path = (doc.get("full_wheel_file_path") or "").strip()
+    if not path:
+        raise HTTPException(400, detail="Full wheel file not generated for this cutoff_draw_id")
+    if not os.path.isfile(path):
+        raise HTTPException(404, detail="Full wheel file not found on disk")
+
+    tickets: List[Dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    pos_str, mains_str = line.split(";")
+                    position = int(pos_str)
+                    mains = [int(x) for x in mains_str.split(",") if x]
+                except Exception:
+                    continue
+                tickets.append({"position": position, "mains": mains})
+                if len(tickets) >= limit:
+                    break
+    except FileNotFoundError:
+        raise HTTPException(404, detail="Full wheel file not found on disk")
+
+    return JSONResponse(
+        content={
+            "cutoff_draw_id": cutoff_draw_id.strip(),
+            "tickets": tickets,
+        }
     )
     return JSONResponse(
         content={"status": "ok", "candidate_pool_count": len(tickets)},

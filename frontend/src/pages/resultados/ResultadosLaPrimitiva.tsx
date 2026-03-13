@@ -5,16 +5,19 @@ import { LaPrimitivaApuestasPanel } from './LaPrimitivaApuestasPanel';
 import { LaPrimitivaFeatureModelPanel } from './LaPrimitivaFeatureModelPanel';
 import { LaPrimitivaPredictionPage } from './LaPrimitivaPredictionPage';
 import { LaPrimitivaBettingPanel } from './LaPrimitivaBettingPanel';
+import { LaPrimitivaAnalysisPage } from './LaPrimitivaAnalysisPage';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
-type LaPrimitivaTab = 'results' | 'prediction' | 'grafico' | 'apuestas';
+type LaPrimitivaTab = 'results' | 'prediction' | 'grafico' | 'apuestas' | 'analisis';
 
 export function ResultadosLaPrimitiva() {
   const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = (searchParams.get('tab') as LaPrimitivaTab | null) ?? 'results';
   const activeTab: LaPrimitivaTab =
-    tabParam === 'prediction' || tabParam === 'grafico' || tabParam === 'apuestas' ? tabParam : 'results';
+    tabParam === 'prediction' || tabParam === 'grafico' || tabParam === 'apuestas' || tabParam === 'analisis'
+      ? tabParam
+      : 'results';
 
   const setActiveTab = useCallback(
     (tab: LaPrimitivaTab) => {
@@ -81,6 +84,15 @@ export function ResultadosLaPrimitiva() {
         >
           Apuestas
         </button>
+        <button
+          type="button"
+          className={`resultados-tab ${activeTab === 'analisis' ? 'resultados-tab--active' : ''}`}
+          role="tab"
+          aria-selected={activeTab === 'analisis'}
+          onClick={() => setActiveTab('analisis')}
+        >
+          Análisis
+        </button>
       </div>
 
       <div className="resultados-tab-content">
@@ -102,6 +114,11 @@ export function ResultadosLaPrimitiva() {
         {activeTab === 'apuestas' && (
           <div className="resultados-euromillones-features">
             <LaPrimitivaBettingPanel />
+          </div>
+        )}
+        {activeTab === 'analisis' && (
+          <div className="resultados-euromillones-features">
+            <LaPrimitivaAnalysisPage />
           </div>
         )}
       </div>
