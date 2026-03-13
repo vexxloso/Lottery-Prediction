@@ -2291,6 +2291,9 @@ def api_euromillones_train_progress(
         "full_wheel_status": full_status,
         "full_wheel_error": doc.get("full_wheel_error"),
         "full_wheel_elapsed_seconds": full_elapsed,
+        "pipeline_status": doc.get("pipeline_status"),
+        "pipeline_error": doc.get("pipeline_error"),
+        "pipeline_started_at": doc.get("pipeline_started_at"),
     }
     return JSONResponse(
         content={"progress": progress},
@@ -2410,6 +2413,9 @@ def api_el_gordo_train_progress(
         "full_wheel_status": full_status,
         "full_wheel_error": doc.get("full_wheel_error"),
         "full_wheel_elapsed_seconds": full_elapsed,
+        "pipeline_status": doc.get("pipeline_status"),
+        "pipeline_error": doc.get("pipeline_error"),
+        "pipeline_started_at": doc.get("pipeline_started_at"),
     }
     return JSONResponse(
         content={"progress": progress},
@@ -6332,6 +6338,9 @@ def api_la_primitiva_train_progress(
         "full_wheel_status": full_status,
         "full_wheel_error": doc.get("full_wheel_error"),
         "full_wheel_elapsed_seconds": full_elapsed,
+        "pipeline_status": doc.get("pipeline_status"),
+        "pipeline_error": doc.get("pipeline_error"),
+        "pipeline_started_at": doc.get("pipeline_started_at"),
     }
     return JSONResponse(
         content={"progress": progress},
@@ -6617,7 +6626,6 @@ def api_el_gordo_rule_filters(
         raise HTTPException(400, detail="cutoff_draw_id is required")
     cid = cutoff_draw_id.strip()
     progress_coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
-    feature_coll = db["el_gordo_feature"]
     doc = progress_coll.find_one({"cutoff_draw_id": cid})
     if not doc:
         raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
@@ -6633,8 +6641,33 @@ def api_el_gordo_rule_filters(
     claves = doc.get("clave_probs") or []
     if not mains and not claves:
         raise HTTPException(400, detail="Run step 3 (compute probabilities) first.")
+    _apply_el_gordo_rule_filters_impl(cid)
+    doc = progress_coll.find_one({"cutoff_draw_id": cid})
+    rule_flags = (doc or {}).get("rule_flags") or {}
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "filtered_mains": (doc or {}).get("filtered_mains_probs") or [],
+            "filtered_clave": (doc or {}).get("filtered_clave_probs") or [],
+            "rules_used": rule_flags.get("rules_used", []),
+            "excluded": rule_flags.get("excluded", {}),
+        }
+    )
 
-    # Previous draw (row where pre_id_sorteo == current id_sorteo) for snapshot
+
+def _apply_el_gordo_rule_filters_impl(cid: str) -> None:
+    """Step 4: apply rule filters and update progress (no HTTP, no rules_applied check)."""
+    if db is None:
+        return
+    progress_coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    feature_coll = db["el_gordo_feature"]
+    doc = progress_coll.find_one({"cutoff_draw_id": cid})
+    if not doc:
+        return
+    mains = doc.get("mains_probs") or []
+    claves = doc.get("clave_probs") or []
+    if not mains and not claves:
+        return
     prev_main_numbers: Optional[List[int]] = None
     prev_clave: Optional[int] = None
     prev_row = feature_coll.find_one({"pre_id_sorteo": cid})
@@ -6644,7 +6677,6 @@ def api_el_gordo_rule_filters(
         pc = prev_row.get("clave")
         if isinstance(pc, int):
             prev_clave = pc
-
     result = build_el_gordo_step4_pool(
         mains_probs=mains,
         clave_probs=claves,
@@ -6671,15 +6703,56 @@ def api_el_gordo_rule_filters(
             }
         },
     )
-    return JSONResponse(
-        content={
-            "status": "ok",
-            "filtered_mains": result["filtered_mains"],
-            "filtered_clave": result["filtered_clave"],
-            "rules_used": result["rules_used"],
-            "excluded": result["excluded"],
-        }
+
+
+@app.post("/api/el-gordo/train/run-pipeline")
+def api_el_gordo_run_pipeline(
+    cutoff_draw_id: str | None = Query(None, description="id_sorteo for this El Gordo training run."),
+):
+    """Run steps 1–4 in the backend. Frontend only starts and polls progress."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        raise HTTPException(400, detail="cutoff_draw_id is required")
+    cid = cutoff_draw_id.strip()
+    coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one({"cutoff_draw_id": cid})
+    if doc and doc.get("pipeline_status") == "running":
+        return JSONResponse(content={"status": "running", "cutoff_draw_id": cid})
+    if doc and doc.get("rules_applied"):
+        return JSONResponse(content={"status": "done", "cutoff_draw_id": cid, "message": "Pool already generated for this cutoff."})
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    coll.update_one(
+        {"cutoff_draw_id": cid},
+        {"$set": {"cutoff_draw_id": cid, "pipeline_status": "running", "pipeline_error": None, "pipeline_started_at": now}},
+        upsert=True,
     )
+
+    def _run() -> None:
+        try:
+            info = prepare_el_gordo_dataset(cutoff_draw_id=cid, out_dir=None)
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {"$set": {"dataset_prepared": True, "dataset_prepared_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "main_rows": info.get("main_rows"), "clave_rows": info.get("clave_rows")}},
+            )
+            info = train_el_gordo_models(cutoff_draw_id=cid)
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {"$set": {"models_trained": True, "trained_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "main_accuracy": info.get("main_accuracy"), "clave_accuracy": info.get("clave_accuracy")}},
+            )
+            info = compute_el_gordo_probabilities(cutoff_draw_id=cid)
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {"$set": {"probs_computed": True, "probs_computed_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "mains_probs": info.get("mains"), "clave_probs": info.get("claves"), "probs_draw_id": info.get("draw_id"), "probs_fecha_sorteo": info.get("fecha_sorteo")}},
+            )
+            _apply_el_gordo_rule_filters_impl(cid)
+            coll.update_one({"cutoff_draw_id": cid}, {"$set": {"pipeline_status": "done"}})
+        except Exception as e:
+            logging.exception("El Gordo pipeline error: %s", e)
+            coll.update_one({"cutoff_draw_id": cid}, {"$set": {"pipeline_status": "error", "pipeline_error": str(e)}})
+
+    threading.Thread(target=_run, daemon=True).start()
+    return JSONResponse(content={"status": "started", "cutoff_draw_id": cid})
 
 
 @app.post("/api/el-gordo/train/candidate-pool")
@@ -6800,43 +6873,19 @@ def api_el_gordo_candidate_pool(
     )
 
 
-@app.post("/api/la-primitiva/train/rule-filters")
-def api_la_primitiva_rule_filters(
-    cutoff_draw_id: str | None = Query(
-        None,
-        description="id_sorteo for this La Primitiva training run (uses saved mains_probs/reintegro_probs).",
-    ),
-):
-    """
-    Step 4 (new_flow): build pool of main numbers + reintegro numbers for La Primitiva.
-    - 4–5 mains + 1 reintegro from row where pre_id_sorteo == current id_sorteo, or random if not found.
-    - Remaining mains from Step 3 ranking bands (1–20: 6–8, 21–35: 4, 36–49: 4); pool capped at 20.
-    - Reintegro pool: snapshot reintegro + up to 5 additional candidates from Step 3 ranking, no duplicate.
-    """
+def _apply_la_primitiva_rule_filters_impl(cid: str) -> None:
+    """Step 4: apply rule filters and update progress (no HTTP, no rules_applied check)."""
     if db is None:
-        raise HTTPException(500, detail="Database not connected")
-    if not cutoff_draw_id:
-        raise HTTPException(400, detail="cutoff_draw_id is required")
-    cid = cutoff_draw_id.strip()
+        return
     progress_coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
     feature_coll = db["la_primitiva_feature"]
     doc = progress_coll.find_one({"cutoff_draw_id": cid})
     if not doc:
-        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
-    if doc.get("rules_applied"):
-        raise HTTPException(
-            400,
-            detail=(
-                "Step 4 (rule filters) has already been applied for this cutoff_draw_id; "
-                "pool generation cannot be regenerated once started."
-            ),
-        )
+        return
     mains = doc.get("mains_probs") or []
     reintegros = doc.get("reintegro_probs") or []
     if not mains and not reintegros:
-        raise HTTPException(400, detail="Run step 3 (compute probabilities) first.")
-
-    # Row where pre_id_sorteo == current id_sorteo
+        return
     prev_main_numbers: Optional[List[int]] = None
     prev_reintegro: Optional[int] = None
     prev_row = feature_coll.find_one({"pre_id_sorteo": cid})
@@ -6846,7 +6895,6 @@ def api_la_primitiva_rule_filters(
         rein_val = prev_row.get("reintegro")
         if isinstance(rein_val, (int, float)):
             prev_reintegro = int(rein_val)
-
     result = build_la_primitiva_step4_pool(
         mains_probs=mains,
         reintegro_probs=reintegros,
@@ -6873,13 +6921,102 @@ def api_la_primitiva_rule_filters(
             }
         },
     )
+
+
+@app.post("/api/la-primitiva/train/run-pipeline")
+def api_la_primitiva_run_pipeline(
+    cutoff_draw_id: str | None = Query(None, description="id_sorteo for this La Primitiva training run."),
+):
+    """Run steps 1–4 in the backend. Frontend only starts and polls progress."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        raise HTTPException(400, detail="cutoff_draw_id is required")
+    cid = cutoff_draw_id.strip()
+    coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one({"cutoff_draw_id": cid})
+    if doc and doc.get("pipeline_status") == "running":
+        return JSONResponse(content={"status": "running", "cutoff_draw_id": cid})
+    if doc and doc.get("rules_applied"):
+        return JSONResponse(content={"status": "done", "cutoff_draw_id": cid, "message": "Pool already generated for this cutoff."})
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    coll.update_one(
+        {"cutoff_draw_id": cid},
+        {"$set": {"cutoff_draw_id": cid, "pipeline_status": "running", "pipeline_error": None, "pipeline_started_at": now}},
+        upsert=True,
+    )
+
+    def _run() -> None:
+        try:
+            info = prepare_la_primitiva_dataset(cutoff_draw_id=cid, out_dir=None)
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {"$set": {"dataset_prepared": True, "dataset_prepared_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "main_rows": info.get("main_rows"), "reintegro_rows": info.get("reintegro_rows")}},
+            )
+            info = train_la_primitiva_models(cutoff_draw_id=cid)
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {"$set": {"models_trained": True, "trained_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "main_accuracy": info.get("main_accuracy"), "reintegro_accuracy": info.get("reintegro_accuracy")}},
+            )
+            info = compute_la_primitiva_probabilities(cutoff_draw_id=cid)
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {"$set": {"probs_computed": True, "probs_computed_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "mains_probs": info.get("mains"), "reintegro_probs": info.get("reintegros"), "probs_draw_id": info.get("draw_id"), "probs_fecha_sorteo": info.get("fecha_sorteo")}},
+            )
+            _apply_la_primitiva_rule_filters_impl(cid)
+            coll.update_one({"cutoff_draw_id": cid}, {"$set": {"pipeline_status": "done"}})
+        except Exception as e:
+            logging.exception("La Primitiva pipeline error: %s", e)
+            coll.update_one({"cutoff_draw_id": cid}, {"$set": {"pipeline_status": "error", "pipeline_error": str(e)}})
+
+    threading.Thread(target=_run, daemon=True).start()
+    return JSONResponse(content={"status": "started", "cutoff_draw_id": cid})
+
+
+@app.post("/api/la-primitiva/train/rule-filters")
+def api_la_primitiva_rule_filters(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="id_sorteo for this La Primitiva training run (uses saved mains_probs/reintegro_probs).",
+    ),
+):
+    """
+    Step 4 (new_flow): build pool of main numbers + reintegro numbers for La Primitiva.
+    - 4–5 mains + 1 reintegro from row where pre_id_sorteo == current id_sorteo, or random if not found.
+    - Remaining mains from Step 3 ranking bands (1–20: 6–8, 21–35: 4, 36–49: 4); pool capped at 20.
+    - Reintegro pool: snapshot reintegro + up to 5 additional candidates from Step 3 ranking, no duplicate.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        raise HTTPException(400, detail="cutoff_draw_id is required")
+    cid = cutoff_draw_id.strip()
+    progress_coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+    doc = progress_coll.find_one({"cutoff_draw_id": cid})
+    if not doc:
+        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+    if doc.get("rules_applied"):
+        raise HTTPException(
+            400,
+            detail=(
+                "Step 4 (rule filters) has already been applied for this cutoff_draw_id; "
+                "pool generation cannot be regenerated once started."
+            ),
+        )
+    mains = doc.get("mains_probs") or []
+    reintegros = doc.get("reintegro_probs") or []
+    if not mains and not reintegros:
+        raise HTTPException(400, detail="Run step 3 (compute probabilities) first.")
+    _apply_la_primitiva_rule_filters_impl(cid)
+    doc = progress_coll.find_one({"cutoff_draw_id": cid})
+    rule_flags = (doc or {}).get("rule_flags") or {}
     return JSONResponse(
         content={
             "status": "ok",
-            "filtered_mains": result["filtered_mains"],
-            "filtered_reintegro": result["filtered_reintegro"],
-            "rules_used": result["rules_used"],
-            "excluded": result["excluded"],
+            "filtered_mains": (doc or {}).get("filtered_mains_probs") or [],
+            "filtered_reintegro": (doc or {}).get("filtered_reintegro_probs") or [],
+            "rules_used": rule_flags.get("rules_used", []),
+            "excluded": rule_flags.get("excluded", {}),
         }
     )
 
@@ -7251,43 +7388,19 @@ def api_euromillones_prediction_ml(
     return JSONResponse(content={"status": "ok", "info": info})
 
 
-@app.post("/api/euromillones/train/rule-filters")
-def api_euromillones_rule_filters(
-    cutoff_draw_id: str | None = Query(
-        None,
-        description="id_sorteo for this training run (uses saved mains_probs/stars_probs).",
-    ),
-):
-    """
-    Step 4 (new_flow): build pool of 20 main numbers + 4 star numbers.
-    - 3 mains + 1 star from row where pre_id_sorteo == current id_sorteo, or random if not found.
-    - 17 mains from Step 3 ranking bands (1–20: 8, 21–30: 3, 31–40: 3, 41–50: 3), no duplicate.
-    - 3 stars from Step 3 star ranking (1–6: 2, 7–12: 1), no duplicate.
-    """
+def _apply_euromillones_rule_filters_impl(cid: str) -> None:
+    """Step 4: apply rule filters and update progress (no HTTP, no rules_applied check). Caller ensures db and doc exist."""
     if db is None:
-        raise HTTPException(500, detail="Database not connected")
-    if not cutoff_draw_id:
-        raise HTTPException(400, detail="cutoff_draw_id is required")
-    cid = cutoff_draw_id.strip()
+        return
     progress_coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
     feature_coll = db["euromillones_feature"]
     doc = progress_coll.find_one({"cutoff_draw_id": cid})
     if not doc:
-        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
-    if doc.get("rules_applied"):
-        raise HTTPException(
-            400,
-            detail=(
-                "Step 4 (rule filters) has already been applied for this cutoff_draw_id; "
-                "pool generation cannot be regenerated once started."
-            ),
-        )
+        return
     mains = doc.get("mains_probs") or []
     stars = doc.get("stars_probs") or []
     if not mains and not stars:
-        raise HTTPException(400, detail="Run step 3 (compute probabilities) first.")
-
-    # Row where pre_id_sorteo == current id_sorteo (current id_sorteo == row.pre_id_sorteo)
+        return
     prev_main_numbers: Optional[List[int]] = None
     prev_star_numbers: Optional[List[int]] = None
     prev_row = feature_coll.find_one({"pre_id_sorteo": cid})
@@ -7296,7 +7409,6 @@ def api_euromillones_rule_filters(
         ps = prev_row.get("star_number") or []
         prev_main_numbers = [int(x) for x in pm if isinstance(x, (int, float))]
         prev_star_numbers = [int(x) for x in ps if isinstance(x, (int, float))]
-
     result = build_step4_pool(
         mains_probs=mains,
         stars_probs=stars,
@@ -7323,13 +7435,146 @@ def api_euromillones_rule_filters(
             }
         },
     )
+
+
+@app.post("/api/euromillones/train/run-pipeline")
+def api_euromillones_run_pipeline(
+    cutoff_draw_id: str | None = Query(None, description="id_sorteo for this training run."),
+):
+    """
+    Run steps 1–4 (prepare dataset, train models, compute probs, rule filters) in the backend.
+    Frontend only starts this and polls GET /api/euromillones/train/progress. No per-step requests.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        raise HTTPException(400, detail="cutoff_draw_id is required")
+    cid = cutoff_draw_id.strip()
+    coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    doc = coll.find_one({"cutoff_draw_id": cid})
+    if doc and doc.get("pipeline_status") == "running":
+        return JSONResponse(content={"status": "running", "cutoff_draw_id": cid})
+    if doc and doc.get("rules_applied"):
+        return JSONResponse(
+            content={"status": "done", "cutoff_draw_id": cid, "message": "Pool already generated for this cutoff."}
+        )
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    coll.update_one(
+        {"cutoff_draw_id": cid},
+        {
+            "$set": {
+                "cutoff_draw_id": cid,
+                "pipeline_status": "running",
+                "pipeline_error": None,
+                "pipeline_started_at": now,
+            }
+        },
+        upsert=True,
+    )
+
+    def _run() -> None:
+        try:
+            info = prepare_euromillones_dataset(cutoff_draw_id=cid, out_dir=None)
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {
+                    "$set": {
+                        "dataset_prepared": True,
+                        "dataset_prepared_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "main_rows": info.get("main_rows"),
+                        "star_rows": info.get("star_rows"),
+                    }
+                },
+            )
+            info = train_euromillones_models(cutoff_draw_id=cid)
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {
+                    "$set": {
+                        "models_trained": True,
+                        "trained_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "main_accuracy": info.get("main_accuracy"),
+                        "star_accuracy": info.get("star_accuracy"),
+                    }
+                },
+            )
+            info = compute_euromillones_probabilities(cutoff_draw_id=cid)
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {
+                    "$set": {
+                        "probs_computed": True,
+                        "probs_computed_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "mains_probs": info.get("mains"),
+                        "stars_probs": info.get("stars"),
+                        "probs_draw_id": info.get("draw_id"),
+                        "probs_fecha_sorteo": info.get("fecha_sorteo"),
+                    }
+                },
+            )
+            _apply_euromillones_rule_filters_impl(cid)
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {"$set": {"pipeline_status": "done"}},
+            )
+        except Exception as e:
+            logging.exception("Euromillones pipeline error: %s", e)
+            coll.update_one(
+                {"cutoff_draw_id": cid},
+                {"$set": {"pipeline_status": "error", "pipeline_error": str(e)}},
+            )
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return JSONResponse(content={"status": "started", "cutoff_draw_id": cid})
+
+
+@app.post("/api/euromillones/train/rule-filters")
+def api_euromillones_rule_filters(
+    cutoff_draw_id: str | None = Query(
+        None,
+        description="id_sorteo for this training run (uses saved mains_probs/stars_probs).",
+    ),
+):
+    """
+    Step 4 (new_flow): build pool of 20 main numbers + 4 star numbers.
+    - 3 mains + 1 star from row where pre_id_sorteo == current id_sorteo, or random if not found.
+    - 17 mains from Step 3 ranking bands (1–20: 8, 21–30: 3, 31–40: 3, 41–50: 3), no duplicate.
+    - 3 stars from Step 3 star ranking (1–6: 2, 7–12: 1), no duplicate.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if not cutoff_draw_id:
+        raise HTTPException(400, detail="cutoff_draw_id is required")
+    cid = cutoff_draw_id.strip()
+    progress_coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    doc = progress_coll.find_one({"cutoff_draw_id": cid})
+    if not doc:
+        raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+    if doc.get("rules_applied"):
+        raise HTTPException(
+            400,
+            detail=(
+                "Step 4 (rule filters) has already been applied for this cutoff_draw_id; "
+                "pool generation cannot be regenerated once started."
+            ),
+        )
+    mains = doc.get("mains_probs") or []
+    stars = doc.get("stars_probs") or []
+    if not mains and not stars:
+        raise HTTPException(400, detail="Run step 3 (compute probabilities) first.")
+    _apply_euromillones_rule_filters_impl(cid)
+    doc = progress_coll.find_one({"cutoff_draw_id": cid})
+    result_fm = (doc or {}).get("filtered_mains_probs") or []
+    result_fs = (doc or {}).get("filtered_stars_probs") or []
+    rule_flags = (doc or {}).get("rule_flags") or {}
     return JSONResponse(
         content={
             "status": "ok",
-            "filtered_mains": result["filtered_mains"],
-            "filtered_stars": result["filtered_stars"],
-            "rules_used": result["rules_used"],
-            "excluded": result["excluded"],
+            "filtered_mains": result_fm,
+            "filtered_stars": result_fs,
+            "rules_used": rule_flags.get("rules_used", []),
+            "excluded": rule_flags.get("excluded", {}),
         }
     )
 

@@ -1,32 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Card, Descriptions, Drawer, notification, Spin, Steps, Table, Tag } from 'antd';
 import { useSearchParams } from 'react-router-dom';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
-
-/** Fetch with long timeout for pipeline steps (VPS can be slow). 5 minutes. */
-const PIPELINE_FETCH_MS = 5 * 60 * 1000;
-async function fetchWithTimeout(
-  url: string,
-  options: RequestInit & { timeoutMs?: number } = {},
-): Promise<Response> {
-  const { timeoutMs = PIPELINE_FETCH_MS, ...fetchOpts } = options;
-  const ctrl = new AbortController();
-  const id = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { ...fetchOpts, signal: ctrl.signal });
-    clearTimeout(id);
-    return res;
-  } catch (e) {
-    clearTimeout(id);
-    if (e instanceof Error && e.name === 'AbortError') {
-      throw new Error(
-        'La petición tardó demasiado (timeout). En un VPS, aumenta el timeout del proxy (nginx) o ejecuta el backend sin proxy.',
-      );
-    }
-    throw e;
-  }
-}
 
 interface ProbRow {
   number: number;
@@ -71,6 +47,9 @@ interface TrainProgressLaPrimitiva {
   full_wheel_status?: 'waiting' | 'done' | 'error';
   full_wheel_error?: string | null;
   full_wheel_elapsed_seconds?: number;
+  pipeline_status?: 'idle' | 'running' | 'done' | 'error';
+  pipeline_error?: string | null;
+  pipeline_started_at?: string;
 }
 
 export function LaPrimitivaPredictionPage() {
@@ -79,7 +58,6 @@ export function LaPrimitivaPredictionPage() {
   const [progress, setProgress] = useState<TrainProgressLaPrimitiva | null>(null);
   const [progressLoading, setProgressLoading] = useState(false);
   const [runAllLoading, setRunAllLoading] = useState(false);
-  const [runningStep, setRunningStep] = useState<number>(0);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerWidth, setDrawerWidth] = useState(420);
   const [currentDraw, setCurrentDraw] = useState<{
@@ -94,6 +72,7 @@ export function LaPrimitivaPredictionPage() {
   >(null);
   // Local flag so the step 5 button is disabled immediately after click.
   const [startingFullWheel, setStartingFullWheel] = useState(false);
+  const pipelineNotifiedRef = useRef<'done' | 'error' | null>(null);
 
   // Load feature-model row for the selected cutoff draw
   useEffect(() => {
@@ -210,21 +189,49 @@ export function LaPrimitivaPredictionPage() {
     void loadPreview();
   }, [cutoffDrawId, progress?.full_wheel_total_tickets]);
 
-  // While full wheel generation is running (status === 'waiting'), poll backend
-  // for updated progress so the UI refreshes automatically when it finishes.
+  // Poll when full wheel is running or when steps 1–4 pipeline is running (backend-run).
   useEffect(() => {
     if (!cutoffDrawId) return;
-    if (progress?.full_wheel_status !== 'waiting') return;
+    const needPoll =
+      progress?.full_wheel_status === 'waiting' || progress?.pipeline_status === 'running';
+    if (!needPoll) return;
     let cancelled = false;
     const interval = window.setInterval(() => {
       if (cancelled) return;
       void fetchProgress(true, true);
-    }, 5000);
+    }, 4000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [cutoffDrawId, progress?.full_wheel_status, fetchProgress]);
+  }, [cutoffDrawId, progress?.full_wheel_status, progress?.pipeline_status, fetchProgress]);
+
+  // When pipeline finishes (done/error), stop loading and show notification once.
+  useEffect(() => {
+    if (!progress) return;
+    if (progress.pipeline_status === 'running') {
+      pipelineNotifiedRef.current = null;
+    }
+    if (progress.pipeline_status === 'done' && pipelineNotifiedRef.current !== 'done') {
+      pipelineNotifiedRef.current = 'done';
+      setRunAllLoading(false);
+      notification.success({
+        message: 'Pipeline La Primitiva completado',
+        description: 'Pasos 1 a 4 ejecutados. Pool de números generado y guardado en la base de datos.',
+        placement: 'topRight',
+        duration: 5,
+      });
+    } else if (progress.pipeline_status === 'error' && pipelineNotifiedRef.current !== 'error') {
+      pipelineNotifiedRef.current = 'error';
+      setRunAllLoading(false);
+      notification.error({
+        message: 'Error en el pipeline',
+        description: progress.pipeline_error ?? 'Error desconocido',
+        placement: 'topRight',
+        duration: 6,
+      });
+    }
+  }, [progress?.pipeline_status, progress?.pipeline_error]);
 
   // Steps 1‑4: generate number pool (dataset, models, probs, rule filters).
   const currentStep =
@@ -246,128 +253,48 @@ export function LaPrimitivaPredictionPage() {
     setSearchParams(params, { replace: true });
   };
 
-  const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
   const runAllPipeline = async () => {
     if (!cutoffDrawId) return;
     setRunAllLoading(true);
-    setRunningStep(0);
     try {
-      const qs = `?cutoff_draw_id=${encodeURIComponent(cutoffDrawId)}`;
-      // Step 1: prepare dataset
-      let res = await fetchWithTimeout(
-        `${API_URL}/api/la-primitiva/train/prepare-dataset${qs}`,
+      const res = await fetch(
+        `${API_URL}/api/la-primitiva/train/run-pipeline?cutoff_draw_id=${encodeURIComponent(cutoffDrawId)}`,
         { method: 'POST' },
       );
-      let data = await res.json();
-      if (!res.ok || data.status !== 'ok')
-        throw new Error((data as any).detail ?? 'Error preparando dataset');
+      const data = await res.json();
+      if (!res.ok) {
+        setRunAllLoading(false);
+        throw new Error((data as { detail?: string }).detail ?? 'Error iniciando pipeline');
+      }
+      if (data.status === 'done') {
+        setRunAllLoading(false);
+      }
       await fetchProgress(true);
-      await delay(3000);
-      setRunningStep(1);
-
-      // Step 2: train models
-      res = await fetchWithTimeout(`${API_URL}/api/la-primitiva/train/models${qs}`, {
-        method: 'POST',
-      });
-      data = await res.json();
-      if (!res.ok || data.status !== 'ok')
-        throw new Error((data as any).detail ?? 'Error entrenando modelos');
-      await fetchProgress(true);
-      await delay(3000);
-      setRunningStep(2);
-
-      // Step 3: compute probabilities (can be slow on VPS; long timeout)
-      res = await fetchWithTimeout(`${API_URL}/api/la-primitiva/prediction/ml${qs}`, {
-        method: 'GET',
-      });
-      data = await res.json();
-      if (!res.ok || data.status !== 'ok')
-        throw new Error(
-          (data as any).detail ?? 'Error calculando probabilidades',
-        );
-      await fetchProgress(true);
-      await delay(3000);
-      setRunningStep(3);
-
-      // Step 4: rule filters (number pool)
-      res = await fetchWithTimeout(
-        `${API_URL}/api/la-primitiva/train/rule-filters?cutoff_draw_id=${encodeURIComponent(
-          cutoffDrawId,
-        )}`,
-        { method: 'POST' },
-      );
-      data = await res.json();
-      if (!res.ok)
-        throw new Error(
-          (data as { detail?: string }).detail ??
-            'Error generando pool de números',
-        );
-      await fetchProgress(true);
-      await delay(3000);
-      setRunningStep(4);
-      notification.success({
-        message: 'Pipeline La Primitiva completado',
-        description:
-          'Pasos 1 a 4 ejecutados. Pool de números generado y guardado en la base de datos.',
-        placement: 'topRight',
-        duration: 5,
-      });
     } catch (e) {
-      const msg =
-        e instanceof Error ? e.message : 'Error en el pipeline de La Primitiva';
-      notification.error({
-        message: 'Error',
-        description: msg,
-        placement: 'topRight',
-        duration: 5,
-      });
-    } finally {
       setRunAllLoading(false);
+      const msg = e instanceof Error ? e.message : 'Error en el pipeline de La Primitiva';
+      notification.error({ message: 'Error', description: msg, placement: 'topRight', duration: 5 });
     }
   };
 
-  const displayStep = runAllLoading ? runningStep : currentStep;
+  const pipelineRunning = progress?.pipeline_status === 'running' || runAllLoading;
+  const displayStep = currentStep;
   const stepItems = [
     {
       title: 'Preparar dataset',
-      status: runAllLoading
-        ? (runningStep > 0 ? ('finish' as const) : ('process' as const))
-        : progress?.dataset_prepared
-          ? ('finish' as const)
-          : currentStep === 0
-            ? ('process' as const)
-            : ('wait' as const),
+      status: progress?.dataset_prepared ? ('finish' as const) : currentStep === 0 ? ('process' as const) : ('wait' as const),
     },
     {
       title: 'Entrenar modelos',
-      status: runAllLoading
-        ? (runningStep > 1 ? ('finish' as const) : runningStep === 1 ? ('process' as const) : ('wait' as const))
-        : progress?.models_trained
-          ? ('finish' as const)
-          : currentStep === 1
-            ? ('process' as const)
-            : ('wait' as const),
+      status: progress?.models_trained ? ('finish' as const) : currentStep === 1 ? ('process' as const) : ('wait' as const),
     },
     {
       title: 'Probabilidades',
-      status: runAllLoading
-        ? (runningStep > 2 ? ('finish' as const) : runningStep === 2 ? ('process' as const) : ('wait' as const))
-        : progress?.probs_computed
-          ? ('finish' as const)
-          : currentStep === 2
-            ? ('process' as const)
-            : ('wait' as const),
+      status: progress?.probs_computed ? ('finish' as const) : currentStep === 2 ? ('process' as const) : ('wait' as const),
     },
     {
       title: 'Generar pool',
-      status: runAllLoading
-        ? (runningStep > 3 ? ('finish' as const) : runningStep === 3 ? ('process' as const) : ('wait' as const))
-        : progress?.rules_applied
-          ? ('finish' as const)
-          : currentStep === 3
-            ? ('process' as const)
-            : ('wait' as const),
+      status: progress?.rules_applied ? ('finish' as const) : currentStep === 3 ? ('process' as const) : ('wait' as const),
     },
   ];
 
@@ -525,7 +452,7 @@ export function LaPrimitivaPredictionPage() {
                 <button
                   type="button"
                   className="resultados-features-iconbtn"
-                  disabled={runAllLoading || !cutoffDrawId}
+                  disabled={pipelineRunning || !cutoffDrawId}
                   onClick={runAllPipeline}
                   style={{
                     padding: '10px 18px',
@@ -538,7 +465,7 @@ export function LaPrimitivaPredictionPage() {
                     boxShadow: '0 4px 10px rgba(0,0,0,0.18)',
                   }}
                 >
-                  {runAllLoading ? (
+                  {pipelineRunning ? (
                     <>
                       <Spin size="small" style={{ marginRight: 8 }} />
                       Ejecutando… (paso {displayStep + 1}/4)
@@ -551,7 +478,7 @@ export function LaPrimitivaPredictionPage() {
                   type="button"
                   className="resultados-features-iconbtn"
                   disabled={
-                    runAllLoading ||
+                    pipelineRunning ||
                     !cutoffDrawId ||
                     startingFullWheel ||
                     progress?.full_wheel_status === 'waiting' ||

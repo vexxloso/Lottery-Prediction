@@ -1,31 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Card, Descriptions, Drawer, notification, Spin, Steps, Table, Tag } from 'antd';
 import { useSearchParams } from 'react-router-dom';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
-
-const PIPELINE_FETCH_MS = 5 * 60 * 1000;
-async function fetchWithTimeout(
-  url: string,
-  options: RequestInit & { timeoutMs?: number } = {},
-): Promise<Response> {
-  const { timeoutMs = PIPELINE_FETCH_MS, ...fetchOpts } = options;
-  const ctrl = new AbortController();
-  const id = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { ...fetchOpts, signal: ctrl.signal });
-    clearTimeout(id);
-    return res;
-  } catch (e) {
-    clearTimeout(id);
-    if (e instanceof Error && e.name === 'AbortError') {
-      throw new Error(
-        'La petición tardó demasiado (timeout). En un VPS, aumenta el timeout del proxy (nginx) o ejecuta el backend sin proxy.',
-      );
-    }
-    throw e;
-  }
-}
 
 interface ProbRow {
   number: number;
@@ -75,6 +52,9 @@ interface TrainProgress {
   full_wheel_status?: 'waiting' | 'done' | 'error';
   full_wheel_error?: string;
   full_wheel_elapsed_seconds?: number;
+  pipeline_status?: 'idle' | 'running' | 'done' | 'error';
+  pipeline_error?: string | null;
+  pipeline_started_at?: string;
 }
 
 interface FullWheelPreviewTicket {
@@ -89,7 +69,7 @@ export function EuromillonesPredictionPage() {
   const [progress, setProgress] = useState<TrainProgress | null>(null);
   const [progressLoading, setProgressLoading] = useState(false);
   const [runAllLoading, setRunAllLoading] = useState(false);
-  const [runningStep, setRunningStep] = useState<number>(0);
+  const pipelineNotifiedRef = useRef<'done' | 'error' | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerWidth, setDrawerWidth] = useState(420);
   const [currentDraw, setCurrentDraw] = useState<{ date: string; mains: number[]; stars: number[] } | null>(null);
@@ -154,15 +134,37 @@ export function EuromillonesPredictionPage() {
     fetchProgress();
   }, [fetchProgress]);
 
-  // Poll backend every 5 minutes while full wheel is running.
+  const needPoll =
+    progress?.full_wheel_status === 'waiting' || progress?.pipeline_status === 'running';
   useEffect(() => {
-    if (!cutoffDrawId) return undefined;
-    if (progress?.full_wheel_status !== 'waiting') return undefined;
-    const id = window.setInterval(() => {
-      fetchProgress(true);
-    }, 5 * 60 * 1000);
+    if (!cutoffDrawId || !needPoll) return undefined;
+    const id = window.setInterval(() => fetchProgress(true), 4000);
     return () => window.clearInterval(id);
-  }, [cutoffDrawId, progress?.full_wheel_status, fetchProgress]);
+  }, [cutoffDrawId, needPoll, fetchProgress]);
+
+  useEffect(() => {
+    if (!progress) return;
+    if (progress.pipeline_status === 'running') pipelineNotifiedRef.current = null;
+    if (progress.pipeline_status === 'done' && pipelineNotifiedRef.current !== 'done') {
+      pipelineNotifiedRef.current = 'done';
+      setRunAllLoading(false);
+      notification.success({
+        message: 'Pipeline completado',
+        description: 'Pasos 1 a 4 ejecutados. Pool de números generado y guardado en la base de datos.',
+        placement: 'topRight',
+        duration: 4,
+      });
+    } else if (progress.pipeline_status === 'error' && pipelineNotifiedRef.current !== 'error') {
+      pipelineNotifiedRef.current = 'error';
+      setRunAllLoading(false);
+      notification.error({
+        message: 'Error en el pipeline',
+        description: progress.pipeline_error ?? 'Error desconocido',
+        placement: 'topRight',
+        duration: 6,
+      });
+    }
+  }, [progress?.pipeline_status, progress?.pipeline_error]);
 
   // Load a small preview of the full-wheel tickets when available
   useEffect(() => {
@@ -190,16 +192,18 @@ export function EuromillonesPredictionPage() {
     loadPreview();
   }, [cutoffDrawId, progress?.full_wheel_total_tickets]);
 
-  // Current step from progress (so user sees "now I am in step 3") — only 4 steps for "Generar todo"
-  const currentStep = progress == null
-    ? 0
-    : !progress.dataset_prepared
+  const currentStep =
+    progress == null
       ? 0
-      : !progress.models_trained
-        ? 1
-        : !progress.probs_computed
-          ? 2
-          : 3;
+      : !progress.dataset_prepared
+        ? 0
+        : !progress.models_trained
+          ? 1
+          : !progress.probs_computed
+            ? 2
+            : !progress.rules_applied
+              ? 3
+              : 4;
 
   const handleBackToTable = () => {
     const params = new URLSearchParams(searchParams);
@@ -207,53 +211,25 @@ export function EuromillonesPredictionPage() {
     setSearchParams(params, { replace: true });
   };
 
-  const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
   const runAllPipeline = async () => {
     if (!cutoffDrawId) return;
     setRunAllLoading(true);
-    setRunningStep(0);
     try {
-      const qs = `?cutoff_draw_id=${encodeURIComponent(cutoffDrawId)}`;
-      // Step 1: prepare dataset
-      let res = await fetchWithTimeout(`${API_URL}/api/euromillones/train/prepare-dataset${qs}`, { method: 'POST' });
-      let data = await res.json();
-      if (!res.ok || data.status !== 'ok') throw new Error((data as any).detail ?? 'Error preparando dataset');
+      const res = await fetch(
+        `${API_URL}/api/euromillones/train/run-pipeline?cutoff_draw_id=${encodeURIComponent(cutoffDrawId)}`,
+        { method: 'POST' },
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setRunAllLoading(false);
+        throw new Error((data as { detail?: string }).detail ?? 'Error iniciando pipeline');
+      }
+      if (data.status === 'done') setRunAllLoading(false);
       await fetchProgress(true);
-      await delay(3000);
-      setRunningStep(1);
-      // Step 2: train models
-      res = await fetchWithTimeout(`${API_URL}/api/euromillones/train/models${qs}`, { method: 'POST' });
-      data = await res.json();
-      if (!res.ok || data.status !== 'ok') throw new Error((data as any).detail ?? 'Error entrenando modelos');
-      await fetchProgress(true);
-      await delay(3000);
-      setRunningStep(2);
-      // Step 3: compute probs (can be slow on VPS; long timeout)
-      res = await fetchWithTimeout(`${API_URL}/api/euromillones/prediction/ml${qs}`, { method: 'GET' });
-      data = await res.json();
-      if (!res.ok || data.status !== 'ok') throw new Error((data as any).detail ?? 'Error calculando probabilidades');
-      await fetchProgress(true);
-      await delay(3000);
-      setRunningStep(3);
-      // Step 4: rule filters
-      res = await fetchWithTimeout(`${API_URL}/api/euromillones/train/rule-filters?cutoff_draw_id=${encodeURIComponent(cutoffDrawId)}`, { method: 'POST' });
-      data = await res.json();
-      if (!res.ok) throw new Error((data as { detail?: string }).detail ?? 'Error aplicando filtros');
-      await fetchProgress(true);
-      await delay(3000);
-      setRunningStep(4);
-      notification.success({
-        message: 'Pipeline completado',
-        description: 'Pasos 1 a 4 ejecutados. Pool de números generado y guardado en la base de datos.',
-        placement: 'topRight',
-        duration: 4,
-      });
     } catch (e) {
+      setRunAllLoading(false);
       const msg = e instanceof Error ? e.message : 'Error en el pipeline';
       notification.error({ message: 'Error', description: msg, placement: 'topRight', duration: 5 });
-    } finally {
-      setRunAllLoading(false);
     }
   };
 
@@ -284,47 +260,24 @@ export function EuromillonesPredictionPage() {
     }
   };
 
-  const displayStep = runAllLoading ? runningStep : currentStep;
+  const pipelineRunning = progress?.pipeline_status === 'running' || runAllLoading;
+  const displayStep = currentStep;
   const stepItems = [
     {
       title: 'Preparar dataset',
-      status: runAllLoading
-        ? (runningStep > 0 ? ('finish' as const) : ('process' as const))
-        : progress?.dataset_prepared
-          ? ('finish' as const)
-          : currentStep === 0
-            ? ('process' as const)
-            : ('wait' as const),
+      status: progress?.dataset_prepared ? ('finish' as const) : currentStep === 0 ? ('process' as const) : ('wait' as const),
     },
     {
       title: 'Entrenar modelos',
-      status: runAllLoading
-        ? (runningStep > 1 ? ('finish' as const) : runningStep === 1 ? ('process' as const) : ('wait' as const))
-        : progress?.models_trained
-          ? ('finish' as const)
-          : currentStep === 1
-            ? ('process' as const)
-            : ('wait' as const),
+      status: progress?.models_trained ? ('finish' as const) : currentStep === 1 ? ('process' as const) : ('wait' as const),
     },
     {
       title: 'Probabilidades',
-      status: runAllLoading
-        ? (runningStep > 2 ? ('finish' as const) : runningStep === 2 ? ('process' as const) : ('wait' as const))
-        : progress?.probs_computed
-          ? ('finish' as const)
-          : currentStep === 2
-            ? ('process' as const)
-            : ('wait' as const),
+      status: progress?.probs_computed ? ('finish' as const) : currentStep === 2 ? ('process' as const) : ('wait' as const),
     },
     {
       title: 'Generar pool',
-      status: runAllLoading
-        ? (runningStep > 3 ? ('finish' as const) : runningStep === 3 ? ('process' as const) : ('wait' as const))
-        : progress?.rules_applied
-          ? ('finish' as const)
-          : currentStep === 3
-            ? ('process' as const)
-            : ('wait' as const),
+      status: progress?.rules_applied ? ('finish' as const) : currentStep === 3 ? ('process' as const) : ('wait' as const),
     },
   ];
 
@@ -404,7 +357,7 @@ export function EuromillonesPredictionPage() {
                 <button
                   type="button"
                   className="resultados-features-iconbtn"
-                  disabled={runAllLoading || !cutoffDrawId || progress?.full_wheel_status === 'waiting'}
+                  disabled={pipelineRunning || !cutoffDrawId || progress?.full_wheel_status === 'waiting'}
                   onClick={runAllPipeline}
                   style={{
                     padding: '10px 18px',
@@ -417,7 +370,7 @@ export function EuromillonesPredictionPage() {
                     boxShadow: '0 4px 10px rgba(0,0,0,0.18)',
                   }}
                 >
-                  {runAllLoading ? (
+                  {pipelineRunning ? (
                     <>
                       <Spin size="small" style={{ marginRight: 8 }} />
                       Ejecutando… (paso {displayStep + 1}/4)
