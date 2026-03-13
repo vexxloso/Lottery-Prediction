@@ -4,6 +4,30 @@ import { useSearchParams } from 'react-router-dom';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
+/** Fetch with long timeout for pipeline steps (VPS can be slow). 5 minutes. */
+const PIPELINE_FETCH_MS = 5 * 60 * 1000;
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit & { timeoutMs?: number } = {},
+): Promise<Response> {
+  const { timeoutMs = PIPELINE_FETCH_MS, ...fetchOpts } = options;
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...fetchOpts, signal: ctrl.signal });
+    clearTimeout(id);
+    return res;
+  } catch (e) {
+    clearTimeout(id);
+    if (e instanceof Error && e.name === 'AbortError') {
+      throw new Error(
+        'La petición tardó demasiado (timeout). En un VPS, aumenta el timeout del proxy (nginx) o ejecuta el backend sin proxy.',
+      );
+    }
+    throw e;
+  }
+}
+
 interface ProbRow {
   number: number;
   p: number;
@@ -231,7 +255,7 @@ export function LaPrimitivaPredictionPage() {
     try {
       const qs = `?cutoff_draw_id=${encodeURIComponent(cutoffDrawId)}`;
       // Step 1: prepare dataset
-      let res = await fetch(
+      let res = await fetchWithTimeout(
         `${API_URL}/api/la-primitiva/train/prepare-dataset${qs}`,
         { method: 'POST' },
       );
@@ -243,7 +267,7 @@ export function LaPrimitivaPredictionPage() {
       setRunningStep(1);
 
       // Step 2: train models
-      res = await fetch(`${API_URL}/api/la-primitiva/train/models${qs}`, {
+      res = await fetchWithTimeout(`${API_URL}/api/la-primitiva/train/models${qs}`, {
         method: 'POST',
       });
       data = await res.json();
@@ -253,8 +277,8 @@ export function LaPrimitivaPredictionPage() {
       await delay(3000);
       setRunningStep(2);
 
-      // Step 3: compute probabilities
-      res = await fetch(`${API_URL}/api/la-primitiva/prediction/ml${qs}`, {
+      // Step 3: compute probabilities (can be slow on VPS; long timeout)
+      res = await fetchWithTimeout(`${API_URL}/api/la-primitiva/prediction/ml${qs}`, {
         method: 'GET',
       });
       data = await res.json();
@@ -267,7 +291,7 @@ export function LaPrimitivaPredictionPage() {
       setRunningStep(3);
 
       // Step 4: rule filters (number pool)
-      res = await fetch(
+      res = await fetchWithTimeout(
         `${API_URL}/api/la-primitiva/train/rule-filters?cutoff_draw_id=${encodeURIComponent(
           cutoffDrawId,
         )}`,

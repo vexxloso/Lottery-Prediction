@@ -4,6 +4,29 @@ import { useSearchParams } from 'react-router-dom';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
+const PIPELINE_FETCH_MS = 5 * 60 * 1000;
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit & { timeoutMs?: number } = {},
+): Promise<Response> {
+  const { timeoutMs = PIPELINE_FETCH_MS, ...fetchOpts } = options;
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...fetchOpts, signal: ctrl.signal });
+    clearTimeout(id);
+    return res;
+  } catch (e) {
+    clearTimeout(id);
+    if (e instanceof Error && e.name === 'AbortError') {
+      throw new Error(
+        'La petición tardó demasiado (timeout). En un VPS, aumenta el timeout del proxy (nginx) o ejecuta el backend sin proxy.',
+      );
+    }
+    throw e;
+  }
+}
+
 interface ProbRow {
   number: number;
   p: number;
@@ -171,33 +194,33 @@ export function ElGordoPredictionPage() {
     try {
       const qs = `?cutoff_draw_id=${encodeURIComponent(cutoffDrawId)}`;
       // These endpoints will be implemented for El Gordo; for now we still wire the flow
-      let res = await fetch(`${API_URL}/api/el-gordo/train/prepare-dataset${qs}`, { method: 'POST' });
+      let res = await fetchWithTimeout(`${API_URL}/api/el-gordo/train/prepare-dataset${qs}`, { method: 'POST' });
       let data = await res.json();
       if (!res.ok || data.status !== 'ok') throw new Error((data as any).detail ?? 'Error preparando dataset');
       await fetchProgress(true);
       await delay(3000);
       setRunningStep(1);
 
-      res = await fetch(`${API_URL}/api/el-gordo/train/models${qs}`, { method: 'POST' });
+      res = await fetchWithTimeout(`${API_URL}/api/el-gordo/train/models${qs}`, { method: 'POST' });
       data = await res.json();
       if (!res.ok || data.status !== 'ok') throw new Error((data as any).detail ?? 'Error entrenando modelos');
       await fetchProgress(true);
       await delay(3000);
       setRunningStep(2);
 
-      res = await fetch(`${API_URL}/api/el-gordo/prediction/ml${qs}`, { method: 'GET' });
+      res = await fetchWithTimeout(`${API_URL}/api/el-gordo/prediction/ml${qs}`, { method: 'GET' });
       data = await res.json();
       if (!res.ok || data.status !== 'ok') throw new Error((data as any).detail ?? 'Error calculando probabilidades');
       await fetchProgress(true);
       await delay(3000);
       setRunningStep(3);
 
-      res = await fetch(`${API_URL}/api/el-gordo/train/rule-filters?cutoff_draw_id=${encodeURIComponent(cutoffDrawId)}`, { method: 'POST' });
+      res = await fetchWithTimeout(`${API_URL}/api/el-gordo/train/rule-filters?cutoff_draw_id=${encodeURIComponent(cutoffDrawId)}`, { method: 'POST' });
       data = await res.json();
       if (!res.ok) throw new Error((data as { detail?: string }).detail ?? 'Error generando pool de números');
       await fetchProgress(true);
       await delay(3000);
-      setRunningStep(3);
+      setRunningStep(4);
 
       notification.success({
         message: 'Pipeline El Gordo completado',

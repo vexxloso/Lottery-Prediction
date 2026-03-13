@@ -6621,6 +6621,14 @@ def api_el_gordo_rule_filters(
     doc = progress_coll.find_one({"cutoff_draw_id": cid})
     if not doc:
         raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+    if doc.get("rules_applied"):
+        raise HTTPException(
+            400,
+            detail=(
+                "Step 4 (rule filters) has already been applied for this cutoff_draw_id; "
+                "pool generation cannot be regenerated once started."
+            ),
+        )
     mains = doc.get("mains_probs") or []
     claves = doc.get("clave_probs") or []
     if not mains and not claves:
@@ -6815,6 +6823,14 @@ def api_la_primitiva_rule_filters(
     doc = progress_coll.find_one({"cutoff_draw_id": cid})
     if not doc:
         raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+    if doc.get("rules_applied"):
+        raise HTTPException(
+            400,
+            detail=(
+                "Step 4 (rule filters) has already been applied for this cutoff_draw_id; "
+                "pool generation cannot be regenerated once started."
+            ),
+        )
     mains = doc.get("mains_probs") or []
     reintegros = doc.get("reintegro_probs") or []
     if not mains and not reintegros:
@@ -7258,6 +7274,14 @@ def api_euromillones_rule_filters(
     doc = progress_coll.find_one({"cutoff_draw_id": cid})
     if not doc:
         raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
+    if doc.get("rules_applied"):
+        raise HTTPException(
+            400,
+            detail=(
+                "Step 4 (rule filters) has already been applied for this cutoff_draw_id; "
+                "pool generation cannot be regenerated once started."
+            ),
+        )
     mains = doc.get("mains_probs") or []
     stars = doc.get("stars_probs") or []
     if not mains and not stars:
