@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Card, Descriptions, Drawer, notification, Select, Spin, Steps, Table, Tag } from 'antd';
+import { Card, Descriptions, Drawer, notification, Spin, Steps, Table, Tag } from 'antd';
 import { useSearchParams } from 'react-router-dom';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';

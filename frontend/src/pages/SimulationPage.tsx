@@ -2449,64 +2449,13 @@ export function SimulationPage() {
                         )}
                       </div>
 
-                      {compareProgress && !(
-                        slug === 'euromillones' && compareEuromillonesSource === 'fullwheel'
-                      ) && (
-                        (() => {
-                          const pool =
-                            slug === 'la-primitiva'
-                              ? (compareLaPrimitivaSource === 'bought'
-                                  ? (compareProgress.bought_tickets ?? [])
-                                  : (compareProgress.candidate_pool ?? []))
-                              : slug === 'euromillones'
-                                ? (compareEuromillonesSource === 'bought'
-                                    ? (compareProgress.bought_tickets ?? [])
-                                    : (compareProgress.candidate_pool ?? []))
-                                : slug === 'el-gordo'
-                                  ? (compareElGordoSource === 'bought'
-                                      ? (compareProgress.bought_tickets ?? [])
-                                      : (compareProgress.candidate_pool ?? []))
-                                  : (compareProgress.candidate_pool ?? []);
-                          const limit =
-                            (slug === 'la-primitiva' && compareLaPrimitivaSource === 'bought') ||
-                            (slug === 'euromillones' && compareEuromillonesSource === 'bought') ||
-                            (slug === 'el-gordo' && compareElGordoSource === 'bought')
-                              ? pool.length
-                              : Math.min(comparePoolLimit, pool.length);
-                          const mainSet = new Set(compareDraw.main.map(Number));
-                          const starSet = new Set(compareDraw.stars.map(Number));
-                          const escrutinio = Array.isArray(compareDraw.escrutinio)
-                            ? (compareDraw.escrutinio as any[])
-                            : [];
-                          const prizeLookup =
-                            slug === 'la-primitiva'
-                              ? buildLaPrimitivaPrizeLookup(escrutinio)
-                              : (() => {
-                                  const m = new Map<string, number>();
-                                  escrutinio.forEach((row: any) => {
-                                    const aciertos = String(
-                                      row.tipo ?? row.aciertos ?? row.categoria ?? '',
-                                    ).trim();
-                                    const match = aciertos.match(/(\d+)\s*\+\s*(\d+)/);
-                                    if (!match) return;
-                                    const hm = Number(match[1]);
-                                    const hs = Number(match[2]);
-                                    if (!Number.isFinite(hm) || !Number.isFinite(hs)) return;
-                                    const key = `${hm}-${hs}`;
-                                    const premio = parseEuroPremio(row.premio);
-                                    if (premio > 0) m.set(key, premio);
-                                  });
-                                  return m;
-                                })();
-                          const complementario =
-                            slug === 'la-primitiva'
-                              ? (compareDraw as { complementario?: number | null }).complementario
-                              : undefined;
+                      {compareProgress &&
+                        !(
+                          slug === 'euromillones' && compareEuromillonesSource === 'fullwheel'
+                        ) &&
                         // We don't show the generic summary card (Boletos seleccionados / Coste / Premio / Ganancia)
                         // because the user requested to hide it.
-                        return null;
-                        })()
-                      )}
+                        null}
 
                       {/* Full-wheel summary card on the right column */}
                       {slug === 'euromillones' &&
