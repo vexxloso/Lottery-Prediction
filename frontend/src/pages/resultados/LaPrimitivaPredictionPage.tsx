@@ -253,8 +253,10 @@ export function LaPrimitivaPredictionPage() {
     setSearchParams(params, { replace: true });
   };
 
+  const pipelineRunning = progress?.pipeline_status === 'running' || runAllLoading;
   const runAllPipeline = async () => {
     if (!cutoffDrawId) return;
+    if (pipelineRunning) return;
     setRunAllLoading(true);
     try {
       const res = await fetch(
@@ -277,7 +279,6 @@ export function LaPrimitivaPredictionPage() {
     }
   };
 
-  const pipelineRunning = progress?.pipeline_status === 'running' || runAllLoading;
   const displayStep = currentStep;
   const stepItems = [
     {

@@ -30,7 +30,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pymongo import MongoClient
-from pymongo.errors import PyMongoError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -2301,6 +2301,14 @@ def api_euromillones_train_progress(
     )
 
 
+@app.post("/api/euromillones/train/progress")
+def api_euromillones_train_progress_post(
+    cutoff_draw_id: str | None = Query(None, description="id_sorteo for this training run."),
+):
+    """POST variant of euromillones/train/progress (same as GET, for polling status)."""
+    return api_euromillones_train_progress(cutoff_draw_id=cutoff_draw_id)
+
+
 @app.post("/api/euromillones/train/prepare-dataset")
 def api_euromillones_prepare_dataset(
     cutoff_draw_id: str | None = Query(
@@ -2421,6 +2429,14 @@ def api_el_gordo_train_progress(
         content={"progress": progress},
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
+
+
+@app.post("/api/el-gordo/train/progress")
+def api_el_gordo_train_progress_post(
+    cutoff_draw_id: str | None = Query(None, description="id_sorteo for this training run (El Gordo)."),
+):
+    """POST variant of el-gordo/train/progress (same as GET, for polling status)."""
+    return api_el_gordo_train_progress(cutoff_draw_id=cutoff_draw_id)
 
 
 @app.get("/api/el-gordo/betting/last-id")
@@ -6709,24 +6725,35 @@ def _apply_el_gordo_rule_filters_impl(cid: str) -> None:
 def api_el_gordo_run_pipeline(
     cutoff_draw_id: str | None = Query(None, description="id_sorteo for this El Gordo training run."),
 ):
-    """Run steps 1–4 in the backend. Frontend only starts and polls progress."""
+    """Run steps 1–4 in the backend. Frontend only starts and polls progress. Atomic: only one run per cutoff."""
     if db is None:
         raise HTTPException(500, detail="Database not connected")
     if not cutoff_draw_id:
         raise HTTPException(400, detail="cutoff_draw_id is required")
     cid = cutoff_draw_id.strip()
     coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
-    doc = coll.find_one({"cutoff_draw_id": cid})
+    doc = coll.find_one({"cutoff_draw_id": cid}, projection={"pipeline_status": 1, "rules_applied": 1})
     if doc and doc.get("pipeline_status") == "running":
         return JSONResponse(content={"status": "running", "cutoff_draw_id": cid})
     if doc and doc.get("rules_applied"):
         return JSONResponse(content={"status": "done", "cutoff_draw_id": cid, "message": "Pool already generated for this cutoff."})
     now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    coll.update_one(
-        {"cutoff_draw_id": cid},
+    # Atomic claim: only one request can set running (prevents rerun from starting a second thread)
+    res = coll.update_one(
+        {"cutoff_draw_id": cid, "$or": [{"pipeline_status": {"$exists": False}}, {"pipeline_status": {"$ne": "running"}}]},
         {"$set": {"cutoff_draw_id": cid, "pipeline_status": "running", "pipeline_error": None, "pipeline_started_at": now}},
-        upsert=True,
     )
+    if res.modified_count >= 1:
+        pass
+    else:
+        doc2 = coll.find_one({"cutoff_draw_id": cid}, projection={"pipeline_status": 1})
+        if doc2 and doc2.get("pipeline_status") == "running":
+            return JSONResponse(content={"status": "running", "cutoff_draw_id": cid})
+        if not doc2:
+            try:
+                coll.insert_one({"cutoff_draw_id": cid, "pipeline_status": "running", "pipeline_error": None, "pipeline_started_at": now})
+            except DuplicateKeyError:
+                return JSONResponse(content={"status": "running", "cutoff_draw_id": cid})
 
     def _run() -> None:
         try:
@@ -6927,24 +6954,35 @@ def _apply_la_primitiva_rule_filters_impl(cid: str) -> None:
 def api_la_primitiva_run_pipeline(
     cutoff_draw_id: str | None = Query(None, description="id_sorteo for this La Primitiva training run."),
 ):
-    """Run steps 1–4 in the backend. Frontend only starts and polls progress."""
+    """Run steps 1–4 in the backend. Frontend only starts and polls progress. Atomic: only one run per cutoff."""
     if db is None:
         raise HTTPException(500, detail="Database not connected")
     if not cutoff_draw_id:
         raise HTTPException(400, detail="cutoff_draw_id is required")
     cid = cutoff_draw_id.strip()
     coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
-    doc = coll.find_one({"cutoff_draw_id": cid})
+    doc = coll.find_one({"cutoff_draw_id": cid}, projection={"pipeline_status": 1, "rules_applied": 1})
     if doc and doc.get("pipeline_status") == "running":
         return JSONResponse(content={"status": "running", "cutoff_draw_id": cid})
     if doc and doc.get("rules_applied"):
         return JSONResponse(content={"status": "done", "cutoff_draw_id": cid, "message": "Pool already generated for this cutoff."})
     now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    coll.update_one(
-        {"cutoff_draw_id": cid},
+    # Atomic claim: only one request can set running (prevents rerun from starting a second thread)
+    res = coll.update_one(
+        {"cutoff_draw_id": cid, "$or": [{"pipeline_status": {"$exists": False}}, {"pipeline_status": {"$ne": "running"}}]},
         {"$set": {"cutoff_draw_id": cid, "pipeline_status": "running", "pipeline_error": None, "pipeline_started_at": now}},
-        upsert=True,
     )
+    if res.modified_count >= 1:
+        pass
+    else:
+        doc2 = coll.find_one({"cutoff_draw_id": cid}, projection={"pipeline_status": 1})
+        if doc2 and doc2.get("pipeline_status") == "running":
+            return JSONResponse(content={"status": "running", "cutoff_draw_id": cid})
+        if not doc2:
+            try:
+                coll.insert_one({"cutoff_draw_id": cid, "pipeline_status": "running", "pipeline_error": None, "pipeline_started_at": now})
+            except DuplicateKeyError:
+                return JSONResponse(content={"status": "running", "cutoff_draw_id": cid})
 
     def _run() -> None:
         try:
@@ -7443,7 +7481,7 @@ def api_euromillones_run_pipeline(
 ):
     """
     Run steps 1–4 (prepare dataset, train models, compute probs, rule filters) in the backend.
-    Frontend only starts this and polls GET /api/euromillones/train/progress. No per-step requests.
+    Frontend only starts this and polls GET /api/euromillones/train/progress. Atomic: only one run per cutoff.
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
@@ -7451,7 +7489,7 @@ def api_euromillones_run_pipeline(
         raise HTTPException(400, detail="cutoff_draw_id is required")
     cid = cutoff_draw_id.strip()
     coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
-    doc = coll.find_one({"cutoff_draw_id": cid})
+    doc = coll.find_one({"cutoff_draw_id": cid}, projection={"pipeline_status": 1, "rules_applied": 1})
     if doc and doc.get("pipeline_status") == "running":
         return JSONResponse(content={"status": "running", "cutoff_draw_id": cid})
     if doc and doc.get("rules_applied"):
@@ -7459,8 +7497,9 @@ def api_euromillones_run_pipeline(
             content={"status": "done", "cutoff_draw_id": cid, "message": "Pool already generated for this cutoff."}
         )
     now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    coll.update_one(
-        {"cutoff_draw_id": cid},
+    # Atomic claim: only one request can set running (prevents rerun from starting a second thread)
+    res = coll.update_one(
+        {"cutoff_draw_id": cid, "$or": [{"pipeline_status": {"$exists": False}}, {"pipeline_status": {"$ne": "running"}}]},
         {
             "$set": {
                 "cutoff_draw_id": cid,
@@ -7469,8 +7508,18 @@ def api_euromillones_run_pipeline(
                 "pipeline_started_at": now,
             }
         },
-        upsert=True,
     )
+    if res.modified_count >= 1:
+        pass
+    else:
+        doc2 = coll.find_one({"cutoff_draw_id": cid}, projection={"pipeline_status": 1})
+        if doc2 and doc2.get("pipeline_status") == "running":
+            return JSONResponse(content={"status": "running", "cutoff_draw_id": cid})
+        if not doc2:
+            try:
+                coll.insert_one({"cutoff_draw_id": cid, "pipeline_status": "running", "pipeline_error": None, "pipeline_started_at": now})
+            except DuplicateKeyError:
+                return JSONResponse(content={"status": "running", "cutoff_draw_id": cid})
 
     def _run() -> None:
         try:

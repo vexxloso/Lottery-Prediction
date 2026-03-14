@@ -366,8 +366,9 @@ def train_euromillones_models(
 
     X_train_m, X_val_m, y_train_m, y_val_m = time_split(df_main, main_features)
     sw_m = compute_sample_weight("balanced", y_train_m)
+    # Lighter params for VPS: n_estimators=100 (La Primitiva default) to avoid OOM/timeout
     clf_main = GradientBoostingClassifier(
-        n_estimators=200,
+        n_estimators=100,
         max_depth=5,
         learning_rate=0.08,
         random_state=42,
@@ -380,7 +381,7 @@ def train_euromillones_models(
     X_train_s, X_val_s, y_train_s, y_val_s = time_split(df_star, star_features)
     sw_s = compute_sample_weight("balanced", y_train_s)
     clf_star = GradientBoostingClassifier(
-        n_estimators=200,
+        n_estimators=100,
         max_depth=5,
         learning_rate=0.08,
         random_state=42,

@@ -109,7 +109,7 @@ export function ElGordoPredictionPage() {
     setProgressLoading(true);
     try {
       const url = `${API_URL}/api/el-gordo/train/progress?cutoff_draw_id=${encodeURIComponent(cutoffDrawId)}${cacheBust ? `&_t=${Date.now()}` : ''}`;
-      const res = await fetch(url, { cache: 'no-store' });
+      const res = await fetch(url, { cache: 'no-store', method: 'POST' });
       const data = await res.json();
       setProgress((data.progress as TrainProgressElGordo) ?? null);
     } catch {
@@ -200,8 +200,10 @@ export function ElGordoPredictionPage() {
     setSearchParams(params, { replace: true });
   };
 
+  const pipelineRunning = progress?.pipeline_status === 'running' || runAllLoading;
   const runAllPipeline = async () => {
     if (!cutoffDrawId) return;
+    if (pipelineRunning) return;
     setRunAllLoading(true);
     try {
       const res = await fetch(
@@ -247,7 +249,6 @@ export function ElGordoPredictionPage() {
     }
   };
 
-  const pipelineRunning = progress?.pipeline_status === 'running' || runAllLoading;
   const displayStep = currentStep;
   const stepItems = [
     {

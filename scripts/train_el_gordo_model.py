@@ -388,8 +388,9 @@ def train_el_gordo_models(
 
     X_train_m, X_val_m, y_train_m, y_val_m = time_split(df_main, main_features)
     sw_m = compute_sample_weight("balanced", y_train_m)
+    # Lighter params for VPS: n_estimators=100 to avoid OOM/timeout (match La Primitiva load)
     clf_main = GradientBoostingClassifier(
-        n_estimators=200,
+        n_estimators=100,
         max_depth=5,
         learning_rate=0.08,
         random_state=42,
@@ -402,7 +403,7 @@ def train_el_gordo_models(
     X_train_c, X_val_c, y_train_c, y_val_c = time_split(df_clave, clave_features)
     sw_c = compute_sample_weight("balanced", y_train_c)
     clf_clave = GradientBoostingClassifier(
-        n_estimators=200,
+        n_estimators=100,
         max_depth=5,
         learning_rate=0.08,
         random_state=42,
