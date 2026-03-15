@@ -100,7 +100,7 @@ function ElGordoFeaturesTableRow({
 }
 
 export function ElGordoFeaturesPanel() {
-  const { rows, loading, error, currentPage, totalPages, total, pageSize, setPage } =
+  const { rows, loading, error, currentPage, total, pageSize, setPage } =
     useElGordoFeatures();
 
   const [selectedRow, setSelectedRow] = useState<ElGordoFeatureRow | null>(null);

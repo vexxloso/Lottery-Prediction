@@ -129,7 +129,6 @@ export function ResultadosPage({ lottery }: ResultadosPageProps) {
     setToInput,
     search,
     currentPage,
-    totalPages,
     setPage,
   } = useDraws(lottery);
 

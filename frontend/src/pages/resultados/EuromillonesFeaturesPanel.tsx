@@ -261,7 +261,6 @@ export function EuromillonesFeaturesPanel() {
     loading,
     error,
     currentPage,
-    totalPages,
     total,
     pageSize,
     setPage,

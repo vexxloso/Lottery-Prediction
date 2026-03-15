@@ -270,7 +270,6 @@ export function ElGordoFeatureModelPanel() {
     loading,
     error,
     currentPage,
-    totalPages,
     total,
     pageSize,
     setPage,

@@ -119,7 +119,6 @@ export function LaPrimitivaFeaturesPanel() {
     loading,
     error,
     currentPage,
-    totalPages,
     total,
     pageSize,
     setPage,
