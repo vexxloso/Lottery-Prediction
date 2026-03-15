@@ -3813,11 +3813,12 @@ def _la_primitiva_full_wheel_reorder_txt(
         return rest == {complementario}
 
     # First pass: loop TXT until we find BOTH 1st (jackpot) and 2nd (5+C when complementario set).
+    # Categories: 1ª (6), 2ª (5+C), 3ª (5 aciertos), 4ª (4), 5ª (3).
     jackpot_position: Optional[int] = None
-    second_with_C_old: List[int] = []  # 5 mains + C (true 2nd prize)
-    second_old: List[int] = []         # 5 mains only
-    third_old: List[int] = []
-    fourth_old: List[int] = []
+    second_with_C_old: List[int] = []   # 2ª: 5 mains + C
+    third_5_old: List[int] = []         # 3ª: 5 mains only (no C)
+    fourth_old: List[int] = []          # 4ª: 4 mains
+    fifth_old: List[int] = []           # 5ª: 3 mains
 
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -3838,11 +3839,12 @@ def _la_primitiva_full_wheel_reorder_txt(
             elif hits_main == 5:
                 if is_second_prize(mains):
                     second_with_C_old.append(position)
-                second_old.append(position)
+                else:
+                    third_5_old.append(position)  # 3ª (5 aciertos, no C)
             elif hits_main == 4:
-                third_old.append(position)
-            elif hits_main == 3:
                 fourth_old.append(position)
+            elif hits_main == 3:
+                fifth_old.append(position)
             # Stop only when we have both 1st and (2nd if complementario set).
             if jackpot_position is not None and (complementario is None or len(second_with_C_old) >= 1):
                 break
@@ -3858,7 +3860,7 @@ def _la_primitiva_full_wheel_reorder_txt(
             detail="2nd prize (5 mains + complementario) not found in La Primitiva full wheel file; cannot reorder",
         )
     print(
-        f"[la-prim-reorder] jackpot_position={jackpot_position} | 2th(5+C)_old={len(second_with_C_old)} 2th_old={len(second_old)} 3th_old={len(third_old)} 4th_old={len(fourth_old)}",
+        f"[la-prim-reorder] jackpot_position={jackpot_position} | 2ª(5+C)_old={len(second_with_C_old)} 3ª_old={len(third_5_old)} 4ª_old={len(fourth_old)} 5ª_old={len(fifth_old)}",
         flush=True,
     )
 
@@ -3869,9 +3871,10 @@ def _la_primitiva_full_wheel_reorder_txt(
             flush=True,
         )
 
-    # Second pass: only needed when we move jackpot (for 3rd/4th early winners).
-    third_new: List[int] = []
-    fourth_new: List[int] = []
+    # Second pass: only when we move jackpot; detect early 3ª/4ª/5ª before first_position.
+    third_5_new: List[int] = []   # 3ª (5 aciertos) before fp
+    fourth_new: List[int] = []   # 4ª before fp
+    fifth_new: List[int] = []    # 5ª before fp
     if not jackpot_early:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
@@ -3889,21 +3892,26 @@ def _la_primitiva_full_wheel_reorder_txt(
                 if len(mains) != 6:
                     continue
                 hits_main = sum(1 for n in mains if n in main_set)
-                if hits_main == 4:
-                    third_new.append(position)
+                has_c = hits_main == 5 and complementario is not None and (set(mains) - main_set) == {complementario}
+                if hits_main == 5 and not has_c:
+                    third_5_new.append(position)  # 3ª
+                elif hits_main == 4:
+                    fourth_new.append(position)    # 4ª
                 elif hits_main == 3:
-                    fourth_new.append(position)
+                    fifth_new.append(position)     # 5ª
 
-    has_3_before = len(third_new) > 0
+    has_3_5_before = len(third_5_new) > 0
     has_4_before = len(fourth_new) > 0
+    has_5_before = len(fifth_new) > 0
 
     import random as rand_module
 
     def range_list_lp(lo: float, hi: int) -> List[int]:
         return list(range(max(1, int(lo)), hi + 1))
 
-    r_3 = range_list_lp(first_position * 0.6, first_position - 1)
-    r_4 = range_list_lp(first_position * 0.4, first_position - 1)
+    r_2 = range_list_lp(first_position * 0.8, first_position - 1)   # 3ª (5 aciertos)
+    r_3 = range_list_lp(first_position * 0.6, first_position - 1) # 4ª
+    r_4 = range_list_lp(first_position * 0.4, first_position - 1) # 5ª
 
     used: set[int] = set()
     moves: List[Tuple[int, int]] = []
@@ -3932,7 +3940,7 @@ def _la_primitiva_full_wheel_reorder_txt(
         else:
             print(f"[la-prim-reorder] 2nd prize (5+C) already in band [{band_2nd_lo},{band_2nd_hi}]; no move", flush=True)
 
-    # 3rd/4th moves only when we are doing full reorder (jackpot move).
+    # 3ª / 4ª / 5ª moves only when we are doing full reorder (jackpot move).
     if not jackpot_early:
         def pick_single_move(candidates: List[int], band: List[int]) -> List[Tuple[int, int]]:
             if not candidates or not band:
@@ -3948,17 +3956,19 @@ def _la_primitiva_full_wheel_reorder_txt(
             used.add(new_pos)
             return [(old_pos, new_pos)]
 
-        if not has_3_before:
-            moves.extend(pick_single_move(third_old, r_3))
+        if not has_3_5_before:
+            moves.extend(pick_single_move(third_5_old, r_2))  # 3ª (5 aciertos)
         if not has_4_before:
-            moves.extend(pick_single_move(fourth_old, r_4))
+            moves.extend(pick_single_move(fourth_old, r_3))    # 4ª
+        if not has_5_before:
+            moves.extend(pick_single_move(fifth_old, r_4))    # 5ª
 
     if not moves:
         print("[la-prim-reorder] no moves to apply; skipping write", flush=True)
         return
 
     print(
-        f"[la-prim-reorder] band_2nd=[{band_2nd_lo},{band_2nd_hi}] r_3={len(r_3)} r_4={len(r_4)} | moves ({len(moves)}): {moves}",
+        f"[la-prim-reorder] band_2nd=[{band_2nd_lo},{band_2nd_hi}] r_2={len(r_2)} r_3={len(r_3)} r_4={len(r_4)} | moves ({len(moves)}): {moves}",
         flush=True,
     )
 
@@ -4454,9 +4464,10 @@ def _la_primitiva_full_wheel_compare(
     category_first_pos: Dict[Tuple[int, int], int] = {}
     category_counts: Dict[Tuple[int, int], int] = {}
     jackpot_position: Optional[int] = None
-    second_first: Optional[int] = None
-    third_first: Optional[int] = None
-    fourth_first: Optional[int] = None
+    second_first: Optional[int] = None   # 2ª (5+C)
+    third_first: Optional[int] = None   # 3ª (5 aciertos)
+    fourth_first: Optional[int] = None  # 4ª (4 aciertos)
+    fifth_first: Optional[int] = None  # 5ª (3 aciertos)
 
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -4506,7 +4517,9 @@ def _la_primitiva_full_wheel_compare(
             elif hits_main == 4:
                 if fourth_first is None:
                     fourth_first = position
-            # 5ª (3 aciertos) first position is in category_first_pos[(3,0)] only
+            elif hits_main == 3:
+                if fifth_first is None:
+                    fifth_first = position
 
             # Stop only when we have both jackpot (1st) and 2nd (5+C) when complementario is set.
             if jackpot_position is not None and (
@@ -4551,6 +4564,7 @@ def _la_primitiva_full_wheel_compare(
         "pos_2th": second_first,
         "pos_3th": third_first,
         "pos_4th": fourth_first,
+        "pos_5th": fifth_first,
         "categories": categories_out,
         "total_categories": len(categories_out),
     }
