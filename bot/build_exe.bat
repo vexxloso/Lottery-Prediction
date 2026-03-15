@@ -9,7 +9,7 @@ echo Installing PyInstaller if needed...
 pip install pyinstaller --quiet
 
 echo Building bot.exe ...
-pyinstaller --noconfirm bot.spec
+python -m PyInstaller --noconfirm bot.spec
 
 if exist "dist\bot.exe" (
     echo.

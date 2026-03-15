@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { Pagination } from 'antd';
 import type { LotterySlug } from './types';
 import { LOTTERY_CONFIG } from './types';
-import { useDraws } from './useDraws';
+import { useDraws, PAGE_SIZE } from './useDraws';
 import type { Draw } from './types';
 import './resultados.css';
 
@@ -129,8 +130,6 @@ export function ResultadosPage({ lottery }: ResultadosPageProps) {
     search,
     currentPage,
     totalPages,
-    nextPage: _nextPage,
-    prevPage: _prevPage,
     setPage,
   } = useDraws(lottery);
 
@@ -148,18 +147,9 @@ export function ResultadosPage({ lottery }: ResultadosPageProps) {
     setSearchParams(params, { replace: true });
   };
 
-  const handlePrevPage = () => {
-    if (currentPage <= 1) return;
-    const newPage = currentPage - 1;
-    setPage(newPage);
-    updatePageInUrl(newPage);
-  };
-
-  const handleNextPage = () => {
-    if (currentPage >= totalPages) return;
-    const newPage = currentPage + 1;
-    setPage(newPage);
-    updatePageInUrl(newPage);
+  const handlePageChange = (page: number) => {
+    setPage(page);
+    updatePageInUrl(page);
   };
 
   return (
@@ -208,19 +198,14 @@ export function ResultadosPage({ lottery }: ResultadosPageProps) {
 
         {total > 0 && (
           <div className="resultados-pagination">
-            <button type="button" disabled={currentPage <= 1} onClick={handlePrevPage}>
-              Anterior
-            </button>
-            <span>
-              Página {currentPage} de {totalPages} ({total} sorteos)
-            </span>
-            <button
-              type="button"
-              disabled={currentPage >= totalPages}
-              onClick={handleNextPage}
-            >
-              Siguiente
-            </button>
+            <Pagination
+              current={currentPage}
+              total={total}
+              pageSize={PAGE_SIZE}
+              showSizeChanger={false}
+              onChange={handlePageChange}
+              showTotal={(t) => `${t} sorteos`}
+            />
           </div>
         )}
       </div>

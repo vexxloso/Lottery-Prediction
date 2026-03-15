@@ -1920,3 +1920,8 @@
   transform: scale(1.08);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
 }
+
+.el-gordo-betting-reintegro-btn--active {
+  box-shadow: 0 0 0 2px var(--color-primary, #1890ff);
+  font-weight: 700;
+}

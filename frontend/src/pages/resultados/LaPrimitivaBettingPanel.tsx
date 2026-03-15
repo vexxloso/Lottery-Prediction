@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Spin, Tooltip, Pagination } from 'antd';
+import { InputNumber, Modal, Spin, Tooltip, Pagination } from 'antd';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
@@ -98,12 +98,14 @@ function TicketCardMains({
   onRemove,
   disabled,
   styleAnimationDelay,
+  title: titleProp,
 }: {
   ticket: LaPrimitivaMains;
   onClick?: () => void;
   onRemove?: () => void;
   disabled?: boolean;
   styleAnimationDelay?: number;
+  title?: string;
 }) {
   const mains = ticket.mains ?? [];
   return (
@@ -125,6 +127,7 @@ function TicketCardMains({
         style={styleAnimationDelay != null ? { animationDelay: `${styleAnimationDelay}ms` } : undefined}
         onClick={onClick && !disabled ? onClick : undefined}
         onKeyDown={onClick && !disabled ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } } : undefined}
+        title={titleProp}
       >
         <div className="resultados-balls">
           {mains.map((n, i) => (
@@ -291,10 +294,15 @@ export function LaPrimitivaBettingPanel() {
   const [enqueueLoading, setEnqueueLoading] = useState(false);
   const [reintegroModalOpen, setReintegroModalOpen] = useState(false);
   const [buyQueue, setBuyQueue] = useState<{ id: string; status: string; tickets_count: number; tickets?: { mains?: number[]; reintegro?: number }[]; error?: string }[]>([]);
+  const [countModalOpen, setCountModalOpen] = useState(false);
+  const [countInput, setCountInput] = useState<number>(100);
+  const [enqueueByCountLoading, setEnqueueByCountLoading] = useState(false);
 
   const fetchBuyQueue = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/api/la-primitiva/betting/buy-queue?limit=10`, { cache: 'no-store' });
+      // Backend validates limit <= 100 (see api_la_primitiva_betting_buy_queue),
+      // so we request the max allowed to see as many queued tickets as possible.
+      const res = await fetch(`${API_URL}/api/la-primitiva/betting/buy-queue?limit=100`, { cache: 'no-store' });
       const data = await res.json();
       setBuyQueue(Array.isArray(data.items) ? data.items : []);
     } catch {
@@ -319,9 +327,10 @@ export function LaPrimitivaBettingPanel() {
     saveBoughtFromQueue();
     const intervalMs = 8000;
     const t = setInterval(() => {
+      // Just refresh queue status periodically so the user sees progress.
+      // Saving bought tickets and refreshing the bought pool is done on demand
+      // (on mount and after an explicit save) to avoid constant background writes.
       fetchBuyQueue();
-      saveBoughtFromQueue();
-      fetchBettingPool(false);
     }, intervalMs);
     return () => clearInterval(t);
   }, [fetchBuyQueue, fetchBettingPool, saveBoughtFromQueue]);
@@ -362,6 +371,35 @@ export function LaPrimitivaBettingPanel() {
     setReintegroModalOpen(true);
   };
 
+  const enqueueByCount = async () => {
+    const count = Number(countInput);
+    if (!Number.isInteger(count) || count < 1) return;
+    setEnqueueByCountLoading(true);
+    setError('');
+    try {
+      const body: { count: number; draw_date?: string; cutoff_draw_id?: string } = { count };
+      if (drawDate) body.draw_date = drawDate;
+      if (cutoffDrawId) body.cutoff_draw_id = cutoffDrawId;
+      const res = await fetch(`${API_URL}/api/la-primitiva/betting/enqueue-by-count`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.detail ?? res.statusText ?? 'Error al encolar por cantidad');
+        return;
+      }
+      setCountModalOpen(false);
+      await fetchBuyQueue();
+      setError('');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error al encolar por cantidad');
+    } finally {
+      setEnqueueByCountLoading(false);
+    }
+  };
+
   const bucketFull = bucket.length >= BUCKET_MAX;
   const savedMainsKeys = new Set(realPool.map((t) => mainsKey(t)));
   const bucketMainsKeys = new Set(bucket.map(mainsKey));
@@ -378,7 +416,14 @@ export function LaPrimitivaBettingPanel() {
     const picked = shuffleArray(availableCandidates).slice(0, need).map((t) => ({ mains: [...(t.mains ?? [])] }));
     setBucket((prev) => [...prev, ...picked]);
   };
-  const displayedCandidates = availableCandidates;
+  const disabledReason = (t: LaPrimitivaMains): string => {
+    const key = mainsKey(t);
+    if (bucketMainsKeys.has(key)) return 'En cesta';
+    if (savedMainsKeys.has(key)) return 'Guardado';
+    if (inQueue.has(key)) return 'En cola';
+    return '';
+  };
+  const displayedCandidates = candidatePool;
 
   if (loading) {
     return (
@@ -396,6 +441,29 @@ export function LaPrimitivaBettingPanel() {
       {error && (
         <p style={{ color: 'var(--color-error)', marginBottom: 'var(--space-md)' }}>{error}</p>
       )}
+
+      <Modal
+        title="Comprar por cantidad"
+        open={countModalOpen}
+        onCancel={() => !enqueueByCountLoading && setCountModalOpen(false)}
+        onOk={() => enqueueByCount()}
+        okText="Confirmar"
+        cancelText="Cancelar"
+        confirmLoading={enqueueByCountLoading}
+        destroyOnClose
+      >
+        <p style={{ marginBottom: 8 }}>Número de boletos a encolar (se crearán colas de {BUCKET_MAX} boletos cada una):</p>
+        <InputNumber
+          min={1}
+          max={1000000}
+          value={countInput}
+          onChange={(v) => setCountInput(v ?? 1)}
+          style={{ width: '100%' }}
+        />
+        <p style={{ marginTop: 12, fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+          Se crearán {Math.ceil((countInput ?? 0) / BUCKET_MAX)} colas de compra (máx. {BUCKET_MAX} boletos por cola). Cada cola tendrá un reintegro aleatorio (0–9).
+        </p>
+      </Modal>
 
       {reintegroModalOpen && (
         <div className="el-gordo-betting-reintegro-overlay" role="dialog" aria-modal="true" aria-label="Elegir reintegro">
@@ -439,6 +507,14 @@ export function LaPrimitivaBettingPanel() {
                 <button
                   type="button"
                   className="el-gordo-betting-random-btn"
+                  onClick={() => setCountModalOpen(true)}
+                  title="Crear colas por número de boletos (se dividen en colas de 8)"
+                >
+                  Comprar por cantidad
+                </button>
+                <button
+                  type="button"
+                  className="el-gordo-betting-random-btn"
                   onClick={addRandomToBucket}
                   disabled={bucketFull || availableCandidates.length === 0}
                   title="Add random tickets from full candidate pool (no duplicates)"
@@ -464,7 +540,7 @@ export function LaPrimitivaBettingPanel() {
               </div>
             </div>
             <p style={{ margin: '0 0 var(--space-sm)', fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
-              {totalTickets} boletos en full wheel · página {page} · mostrando {displayedCandidates.length} · máx. {BUCKET_MAX} en la cesta
+              {totalTickets} boletos en full wheel · página {page} · {availableCandidates.length} disponibles (clic para añadir) · máx. {BUCKET_MAX} en la cesta
             </p>
             <Pagination
               size="small"
@@ -478,22 +554,25 @@ export function LaPrimitivaBettingPanel() {
             <div className="el-gordo-betting-gallery">
               {displayedCandidates.length === 0 ? (
                 <p style={{ margin: 'auto', fontSize: '0.85rem', color: 'var(--color-text-muted)', gridColumn: '1 / -1' }}>
-                  {candidatePool.length === 0
-                    ? (!drawDate && !cutoffDrawId
-                        ? 'Se abre con la fecha del último sorteo (draw_date). Si no hay datos, ejecuta en Predicción el paso de pool de candidatos.'
-                        : 'No hay pool. En Predicción ejecuta todos los pasos hasta generar el pool de candidatos para este sorteo.')
-                    : 'No hay más candidatos disponibles (todos están en la cesta, en la cola o en boletos guardados).'}
+                  {!drawDate && !cutoffDrawId
+                    ? 'Se abre con la fecha del último sorteo (draw_date). Si no hay datos, ejecuta en Predicción el paso de pool de candidatos.'
+                    : 'No hay pool. En Predicción ejecuta todos los pasos hasta generar el pool de candidatos para este sorteo.'}
                 </p>
               ) : (
-                displayedCandidates.map((t, i) => (
-                  <TicketCardMains
-                    key={`c-${i}-${mainsKey(t)}`}
-                    ticket={t}
-                    onClick={() => addToBucket(t)}
-                    disabled={bucketFull}
-                    styleAnimationDelay={i < 40 ? i * 25 : undefined}
-                  />
-                ))
+                displayedCandidates.map((t, i) => {
+                  const reason = disabledReason(t);
+                  const disabled = bucketFull || !!reason;
+                  return (
+                    <TicketCardMains
+                      key={`c-${i}-${mainsKey(t)}`}
+                      ticket={t}
+                      onClick={() => addToBucket(t)}
+                      disabled={disabled}
+                      styleAnimationDelay={i < 40 ? i * 25 : undefined}
+                      title={reason || undefined}
+                    />
+                  );
+                })
               )}
             </div>
           </div>
@@ -501,10 +580,10 @@ export function LaPrimitivaBettingPanel() {
 
         <div className="el-gordo-betting-right">
           {buyQueue.length > 0 && (
-            <div style={{ marginBottom: 'var(--space-sm)', fontSize: '0.8rem' }}>
+            <div style={{ marginBottom: 'var(--space-sm)', fontSize: '0.8rem', maxHeight: 220, overflowY: 'auto' }}>
               <strong>Cola de compra</strong>
               <ul style={{ margin: '4px 0 0', paddingLeft: '1.2rem', listStyle: 'none' }}>
-                {buyQueue.filter((q) => q != null).slice(0, 5).map((q, idx) => (
+                {buyQueue.filter((q) => q != null).map((q, idx) => (
                   <li key={q?.id ?? `q-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
                     <Tooltip
                       title={

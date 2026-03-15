@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Drawer } from 'antd';
+import { Drawer, Pagination } from 'antd';
 import {
   ResponsiveContainer,
   BarChart,
@@ -121,8 +121,8 @@ export function LaPrimitivaFeaturesPanel() {
     currentPage,
     totalPages,
     total,
-    nextPage,
-    prevPage,
+    pageSize,
+    setPage,
   } = useLaPrimitivaFeatures();
 
   const [selectedRow, setSelectedRow] = useState<LaPrimitivaFeatureRow | null>(null);
@@ -300,19 +300,14 @@ export function LaPrimitivaFeaturesPanel() {
           </table>
 
           <div className="resultados-features-pagination">
-            <button type="button" disabled={currentPage <= 1} onClick={prevPage}>
-              Anterior
-            </button>
-            <span>
-              Página {currentPage} de {totalPages} ({total} sorteos)
-            </span>
-            <button
-              type="button"
-              disabled={currentPage >= totalPages}
-              onClick={nextPage}
-            >
-              Siguiente
-            </button>
+            <Pagination
+              current={currentPage}
+              total={total}
+              pageSize={pageSize}
+              showSizeChanger={false}
+              onChange={(page) => setPage(page)}
+              showTotal={(t) => `${t} sorteos`}
+            />
           </div>
         </div>
       )}

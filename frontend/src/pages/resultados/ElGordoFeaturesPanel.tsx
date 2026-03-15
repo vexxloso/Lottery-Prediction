@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Drawer } from 'antd';
+import { Drawer, Pagination } from 'antd';
 import {
   ResponsiveContainer,
   BarChart,
@@ -100,7 +100,7 @@ function ElGordoFeaturesTableRow({
 }
 
 export function ElGordoFeaturesPanel() {
-  const { rows, loading, error, currentPage, totalPages, total, nextPage, prevPage } =
+  const { rows, loading, error, currentPage, totalPages, total, pageSize, setPage } =
     useElGordoFeatures();
 
   const [selectedRow, setSelectedRow] = useState<ElGordoFeatureRow | null>(null);
@@ -253,15 +253,14 @@ export function ElGordoFeaturesPanel() {
             </tbody>
           </table>
           <div className="resultados-features-pagination">
-            <button type="button" disabled={currentPage <= 1} onClick={prevPage}>
-              Anterior
-            </button>
-            <span>
-              Página {currentPage} de {totalPages} ({total} sorteos)
-            </span>
-            <button type="button" disabled={currentPage >= totalPages} onClick={nextPage}>
-              Siguiente
-            </button>
+            <Pagination
+              current={currentPage}
+              total={total}
+              pageSize={pageSize}
+              showSizeChanger={false}
+              onChange={(page) => setPage(page)}
+              showTotal={(t) => `${t} sorteos`}
+            />
           </div>
         </div>
       )}

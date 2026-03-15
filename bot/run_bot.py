@@ -6,7 +6,12 @@ Combined bot: run one or all three lotteries (El Gordo, Euromillones, La Primiti
   python run_bot.py --lottery euromillones
   python run_bot.py --lottery la_primitiva
 
-Same .env as single bots. On Ctrl+C or crash the current job is marked failed.
+- On first run a browser opens (visible). Log in manually with your username and password
+  in that browser, then press Enter in the terminal. The bot keeps the same browser and
+  never quits it between jobs; no sign-in form is used after the first login.
+- After each job (success or failed) the next job loads the buy page (juegos.loteriasyapuestas.es/jugar/*/apuesta)
+  and continues; no username/password input needed.
+- Browser is closed only on Ctrl+C or exit. Same .env as single bots.
 """
 import argparse
 import logging
@@ -47,10 +52,17 @@ _JOBS: List[Tuple[str, Callable, Callable[[str, bool, Optional[str]], None], Cal
 ]
 
 _current: Optional[Tuple[Callable[[str, bool, Optional[str]], None], str]] = None
+_driver = None  # one browser reused for all jobs; quit on exit
 
 
 def _on_stop(*_args: Any) -> None:
-    global _current
+    global _current, _driver
+    if _driver:
+        try:
+            _driver.quit()
+        except Exception:
+            pass
+        _driver = None
     if _current:
         complete_fn, queue_id = _current
         logger.info("Stopping: marking job %s as failed", queue_id)
@@ -60,7 +72,7 @@ def _on_stop(*_args: Any) -> None:
 
 
 def main() -> None:
-    global _current
+    global _current, _driver
     parser = argparse.ArgumentParser(description="Run lottery buy-queue bot (one or all)")
     parser.add_argument(
         "--lottery",
@@ -95,6 +107,24 @@ def main() -> None:
     except Exception as e:
         logger.warning("Cannot reach backend at %s: %s (check API_URL in .env if bot runs on another PC)", api_url, e)
 
+    # Create shared visible browser up front and navigate to main site.
+    # User can log in manually; the same browser is reused for all jobs.
+    try:
+        logger.info("Creating shared browser (visible) at start; you can log in manually.")
+        _driver = el_gordo._create_chrome_driver(force_visible=True)
+        try:
+            _driver.get("https://www.loteriasyapuestas.es/en")
+            print()
+            print("  >>> Browser opened at https://www.loteriasyapuestas.es/en")
+            print("  >>> Log in with your username and password in the browser.")
+            print("  >>> The bot will monitor the queue and start buying when there are waiting jobs.")
+            print()
+        except Exception as e:
+            logger.warning("Could not navigate shared browser to main site: %s", e)
+    except Exception as e:
+        logger.exception("Failed to create shared browser at start: %s", e)
+        _driver = None
+
     signal.signal(signal.SIGINT, _on_stop)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, _on_stop)
@@ -113,24 +143,32 @@ def main() -> None:
                     tickets = data.get("tickets") or []
                     _current = (complete_fn, queue_id)
                     logger.info("[%s] Claimed job %s, tickets=%s", name, queue_id, len(tickets))
-                    # Get credentials from backend first; print them; do not run job if missing
+                    # Optional: credentials from backend (lottery modules only use them when they create
+                    # their own browser; with the shared driver they rely on the manual login session).
                     username, password = el_gordo._get_login_credentials()
-                    print("--- Credentials from backend ---")
-                    print("Username:", username if username else "(EMPTY)")
-                    print("Password:", password if password else "(EMPTY)")
-                    print("-------------------------------")
-                    logger.info("Username from backend: %s", username or "(none)")
-                    logger.info("Password from backend: %s", "***" if password else "(none)")
-                    if not username or not password:
-                        print("ERROR: No username or password from backend. Job NOT started.")
-                        logger.warning("No username/password from backend — job not started (failed)")
-                        complete_fn(queue_id, success=False, error="No credentials from backend")
-                        _current = None
-                        claimed = True
-                        poll_cycles = 0
-                        break
+                    if _driver is None:
+                        logger.info("Recreating shared browser (previous one was closed or invalid)")
+                        try:
+                            _driver = el_gordo._create_chrome_driver(force_visible=True)
+                            try:
+                                _driver.get("https://www.loteriasyapuestas.es/en")
+                            except Exception as nav_err:
+                                logger.warning("Could not navigate recreated browser to main site: %s", nav_err)
+                        except Exception as drv_err:
+                            logger.exception("Failed to recreate shared browser: %s", drv_err)
+                            complete_fn(queue_id, success=False, error="No browser available for bot")
+                            _current = None
+                            claimed = True
+                            poll_cycles = 0
+                            break
                     try:
-                        result = run_fn(tickets, progress_callback=lambda s: logger.info("bot: %s", s), username=username, password=password)
+                        result = run_fn(
+                            tickets,
+                            progress_callback=lambda s: logger.info("bot: %s", s),
+                            username=username,
+                            password=password,
+                            driver=_driver,
+                        )
                         success = result.get("bought") is True
                         err_msg = result.get("error") if not success else None
                         if not err_msg:
@@ -139,6 +177,15 @@ def main() -> None:
                     except Exception as e:
                         logger.exception("bot run failed: %s", e)
                         complete_fn(queue_id, success=False, error=str(e))
+                        err_lower = str(e).lower()
+                        if "invalid session" in err_lower or "target window already closed" in err_lower or "no such window" in err_lower:
+                            if _driver:
+                                try:
+                                    _driver.quit()
+                                except Exception:
+                                    pass
+                                _driver = None
+                                logger.info("Browser closed or invalid; next job will open a new one")
                     finally:
                         _current = None
                     claimed = True

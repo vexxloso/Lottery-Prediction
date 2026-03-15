@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Spin, Tooltip, Pagination } from 'antd';
+import { InputNumber, Modal, Spin, Tooltip, Pagination } from 'antd';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
@@ -94,12 +94,14 @@ function TicketCard({
   onRemove,
   disabled,
   styleAnimationDelay,
+  title: titleProp,
 }: {
   ticket: EuromillonesTicket;
   onClick?: () => void;
   onRemove?: () => void;
   disabled?: boolean;
   styleAnimationDelay?: number;
+  title?: string;
 }) {
   const mains = ticket.mains ?? [];
   const stars = ticket.stars ?? [];
@@ -134,6 +136,7 @@ function TicketCard({
               }
             : undefined
         }
+        title={titleProp}
       >
         <div className="resultados-balls">
           {mains.map((n, i) => (
@@ -254,6 +257,9 @@ export function EuromillonesBettingPanel() {
 
   const [enqueueLoading, setEnqueueLoading] = useState(false);
   const [buyQueue, setBuyQueue] = useState<{ id: string; status: string; tickets_count: number; tickets?: EuromillonesTicket[]; error?: string }[]>([]);
+  const [countModalOpen, setCountModalOpen] = useState(false);
+  const [countInput, setCountInput] = useState<number>(100);
+  const [enqueueByCountLoading, setEnqueueByCountLoading] = useState(false);
 
   const fetchBuyQueue = useCallback(async () => {
     try {
@@ -317,6 +323,36 @@ export function EuromillonesBettingPanel() {
     }
   };
 
+  const enqueueByCount = async () => {
+    const count = Number(countInput);
+    if (!Number.isInteger(count) || count < 1) return;
+    setEnqueueByCountLoading(true);
+    setError('');
+    try {
+      const body: { count: number; draw_date?: string; cutoff_draw_id?: string } = { count };
+      if (drawDate) body.draw_date = drawDate;
+      if (cutoffDrawId) body.cutoff_draw_id = cutoffDrawId;
+      const res = await fetch(`${API_URL}/api/euromillones/betting/enqueue-by-count`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.detail ?? res.statusText ?? 'Error al encolar por cantidad');
+        return;
+      }
+      setCountModalOpen(false);
+      await fetchBuyQueue();
+      fetchBettingPool(false);
+      setError('');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error al encolar por cantidad');
+    } finally {
+      setEnqueueByCountLoading(false);
+    }
+  };
+
   const bucketFull = bucket.length >= BUCKET_MAX;
   const addRandomToBucket = () => {
     const need = Math.min(BUCKET_MAX - bucket.length, availableCandidates.length);
@@ -331,7 +367,14 @@ export function EuromillonesBettingPanel() {
     if (Array.isArray(tickets)) for (const t of tickets) inQueue.add(ticketKey(t));
   }
   const availableCandidates = candidatePool.filter((t) => !inBucketOrReal.has(ticketKey(t)) && !inQueue.has(ticketKey(t)));
-  const displayedCandidates = availableCandidates.slice(0, candidateCount);
+  const disabledReason = (t: EuromillonesTicket): string => {
+    const key = ticketKey(t);
+    if (bucket.some((b) => ticketKey(b) === key)) return 'En cesta';
+    if (realPool.some((r) => ticketKey(r) === key)) return 'Guardado';
+    if (inQueue.has(key)) return 'En cola';
+    return '';
+  };
+  const displayedCandidates = candidatePool;
 
   if (loading) {
     return (
@@ -350,12 +393,43 @@ export function EuromillonesBettingPanel() {
         <p style={{ color: 'var(--color-error)', marginBottom: 'var(--space-md)' }}>{error}</p>
       )}
 
+      <Modal
+        title="Comprar por cantidad"
+        open={countModalOpen}
+        onCancel={() => !enqueueByCountLoading && setCountModalOpen(false)}
+        onOk={() => enqueueByCount()}
+        okText="Confirmar"
+        cancelText="Cancelar"
+        confirmLoading={enqueueByCountLoading}
+        destroyOnClose
+      >
+        <p style={{ marginBottom: 8 }}>Número de boletos a encolar (se crearán colas de {BUCKET_MAX} boletos cada una):</p>
+        <InputNumber
+          min={1}
+          max={1000000}
+          value={countInput}
+          onChange={(v) => setCountInput(v ?? 1)}
+          style={{ width: '100%' }}
+        />
+        <p style={{ marginTop: 12, fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+          Se crearán {Math.ceil((countInput ?? 0) / BUCKET_MAX)} colas de compra (máx. {BUCKET_MAX} boletos por cola).
+        </p>
+      </Modal>
+
       <div className="el-gordo-betting-split">
         <div className="el-gordo-betting-left">
           <div className="el-gordo-betting-panel-card" style={{ flex: 1, minHeight: 280 }}>
             <div className="el-gordo-betting-candidate-header">
               <h3>Candidatos — clic para añadir a la cesta</h3>
               <div className="el-gordo-betting-candidate-actions">
+                <button
+                  type="button"
+                  className="el-gordo-betting-random-btn"
+                  onClick={() => setCountModalOpen(true)}
+                  title="Crear colas por número de boletos (se dividen en colas de 5)"
+                >
+                  Comprar por cantidad
+                </button>
                 <button
                   type="button"
                   className="el-gordo-betting-random-btn"
@@ -386,7 +460,7 @@ export function EuromillonesBettingPanel() {
               </div>
             </div>
             <p style={{ margin: '0 0 var(--space-sm)', fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
-              {totalTickets} boletos en full wheel · página {page} · mostrando {displayedCandidates.length} · máx. {BUCKET_MAX} en la cesta
+              {totalTickets} boletos en full wheel · página {page} · {availableCandidates.length} disponibles (clic para añadir) · máx. {BUCKET_MAX} en la cesta
             </p>
             <Pagination
               size="small"
@@ -400,20 +474,23 @@ export function EuromillonesBettingPanel() {
             <div className="el-gordo-betting-gallery">
               {displayedCandidates.length === 0 ? (
                 <p style={{ margin: 'auto', fontSize: '0.85rem', color: 'var(--color-text-muted)', gridColumn: '1 / -1' }}>
-                  {candidatePool.length === 0
-                    ? 'No hay pool. Ejecuta el pipeline de predicción para el sorteo.'
-                    : 'No hay más candidatos disponibles (todos están en la cesta, en la cola o en boletos guardados).'}
+                  No hay pool. Ejecuta el pipeline de predicción para el sorteo.
                 </p>
               ) : (
-                displayedCandidates.map((t, i) => (
-                  <TicketCard
-                    key={`c-${i}-${(t.mains ?? []).join('-')}-${(t.stars ?? []).join('-')}`}
-                    ticket={t}
-                    onClick={() => addToBucket(t)}
-                    disabled={bucketFull}
-                    styleAnimationDelay={i < 40 ? i * 25 : undefined}
-                  />
-                ))
+                displayedCandidates.map((t, i) => {
+                  const reason = disabledReason(t);
+                  const disabled = bucketFull || !!reason;
+                  return (
+                    <TicketCard
+                      key={`c-${i}-${(t.mains ?? []).join('-')}-${(t.stars ?? []).join('-')}`}
+                      ticket={t}
+                      onClick={() => addToBucket(t)}
+                      disabled={disabled}
+                      styleAnimationDelay={i < 40 ? i * 25 : undefined}
+                      title={reason || undefined}
+                    />
+                  );
+                })
               )}
             </div>
           </div>
@@ -421,10 +498,10 @@ export function EuromillonesBettingPanel() {
 
         <div className="el-gordo-betting-right">
           {buyQueue.length > 0 && (
-            <div style={{ marginBottom: 'var(--space-sm)', fontSize: '0.8rem' }}>
+            <div style={{ marginBottom: 'var(--space-sm)', fontSize: '0.8rem', maxHeight: 220, overflowY: 'auto' }}>
               <strong>Cola de compra</strong>
               <ul style={{ margin: '4px 0 0', paddingLeft: '1.2rem', listStyle: 'none' }}>
-                {buyQueue.filter((q) => q != null).slice(0, 5).map((q, idx) => (
+                {buyQueue.filter((q) => q != null).map((q, idx) => (
                   <li key={q?.id ?? `q-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
                     <Tooltip
                       title={

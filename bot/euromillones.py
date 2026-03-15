@@ -151,6 +151,17 @@ def _click_cookiebot_allow_all(driver: webdriver.Chrome) -> bool:
         return False
 
 
+def _is_login_page_visible(driver: webdriver.Chrome, timeout: float = 3.0) -> bool:
+    """Return True if the sign-in form (#username) is visible. False if already logged in."""
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.visibility_of_element_located((By.CSS_SELECTOR, "#username"))
+        )
+        return True
+    except Exception:
+        return False
+
+
 def _do_login(driver: webdriver.Chrome, username: str, password: str) -> bool:
     if not username or not password:
         logger.warning("No username/password passed to login; abort")
@@ -319,6 +330,7 @@ def _run_selenium_buy(
     progress_callback: Optional[Callable[[str], None]] = None,
     username: Optional[str] = None,
     password: Optional[str] = None,
+    driver: Optional[webdriver.Chrome] = None,
 ) -> dict:
     def _progress(msg: str) -> None:
         if progress_callback:
@@ -331,17 +343,18 @@ def _run_selenium_buy(
         logger.warning("Euromillones: need 1–5 tickets, got %s", len(tickets or []))
         return {"bought": False}
 
-    if not username or not password:
-        username, password = _get_login_credentials()
-    if not username or not password:
-        logger.warning("No credentials: stop. Set active account in app (Cuentas bot) or LOTTERY_LOGIN_USERNAME and LOTTERY_LOGIN_PASSWORD in .env")
-        return {"bought": False, "error": "No credentials configured"}
-    logger.info("Using credentials for username: %s", username)
-
-    driver = None
-    try:
+    own_driver = driver is None
+    if own_driver:
+        if not username or not password:
+            username, password = _get_login_credentials()
+        if not username or not password:
+            logger.warning("No credentials: stop. Set active account in app (Cuentas bot) or LOTTERY_LOGIN_USERNAME and LOTTERY_LOGIN_PASSWORD in .env")
+            return {"bought": False, "error": "No credentials configured"}
+        logger.info("Using credentials for username: %s", username)
+    if own_driver:
         _progress("Abriendo navegador")
         driver = _create_chrome_driver()
+    try:
         _progress("Cargando página Euromillones")
         driver.get(EUROMILLONES_APUESTA_URL)
         wait = WebDriverWait(driver, WAIT_TIMEOUT)
@@ -458,12 +471,19 @@ def _run_selenium_buy(
         _click_cookiebot_allow_all(driver)
         _human_delay(0.5, 1.2)
 
-        _progress("Iniciando sesión")
-        login_done = _do_login(driver, username, password)
-        _human_delay(*MANUAL_LOGIN_WAIT)
-        if not login_done:
-            logger.warning("Login failed: could not fill or submit username/password; stopping")
-            return {"bought": False, "error": "Login failed: could not fill username/password on page"}
+        if _is_login_page_visible(driver):
+            if own_driver:
+                _progress("Iniciando sesión")
+                login_done = _do_login(driver, username, password)
+                _human_delay(*MANUAL_LOGIN_WAIT)
+                if not login_done:
+                    logger.warning("Login failed: could not fill or submit username/password; stopping")
+                    return {"bought": False, "error": "Login failed: could not fill username/password on page"}
+            else:
+                logger.warning("Login page shown but browser is reused (manual login mode). Session may have expired.")
+                return {"bought": False, "error": "Sesión expirada. Reinicia el bot (python run_bot.py) e inicia sesión en el navegador cuando se abra."}
+        else:
+            _progress("Sesión activa, omitiendo login")
         _progress("Comprobando sesión")
         try:
             WebDriverWait(driver, 12).until(
@@ -487,16 +507,17 @@ def _run_selenium_buy(
         bought, step_msg = _detect_purchase_success(driver)
         _progress("Finalizado. " + step_msg)
 
-        headless = os.environ.get("LOTTERY_BOT_HEADLESS", "true").strip().lower() not in ("0", "false", "no")
-        if headless:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+        if own_driver:
+            headless = os.environ.get("LOTTERY_BOT_HEADLESS", "true").strip().lower() not in ("0", "false", "no")
+            if headless:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
         return {"bought": bought}
     except Exception as e:
         logger.exception("Euromillones Selenium failed: %s", e)
-        if driver:
+        if own_driver and driver:
             try:
                 driver.quit()
             except Exception:
@@ -509,9 +530,10 @@ def run_buy(
     progress_callback: Optional[Callable[[str], None]] = None,
     username: Optional[str] = None,
     password: Optional[str] = None,
+    driver: Optional[webdriver.Chrome] = None,
 ) -> dict:
-    """Public entry for combined runner. Runs Selenium buy flow; returns {bought: bool}. Optional username/password from runner."""
-    return _run_selenium_buy(tickets, progress_callback, username=username, password=password)
+    """Public entry for combined runner. Runs Selenium buy flow; returns {bought: bool}. Optional driver to reuse one browser."""
+    return _run_selenium_buy(tickets, progress_callback, username=username, password=password, driver=driver)
 
 
 def _on_stop(*_args):

@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { Drawer, Row, Col } from 'antd';
+import { Drawer, Pagination, Row, Col } from 'antd';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ResponsiveContainer,
@@ -308,8 +308,8 @@ export function LaPrimitivaFeatureModelPanel() {
     currentPage,
     totalPages,
     total,
-    nextPage,
-    prevPage,
+    pageSize,
+    setPage,
   } = useLaPrimitivaFeatureModel();
 
   const [selectedRow, setSelectedRow] = useState<LaPrimitivaFeatureModelRow | null>(null);
@@ -445,38 +445,15 @@ export function LaPrimitivaFeatureModelPanel() {
             </table>
           </div>
 
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              marginTop: 'var(--space-sm)',
-              gap: 'var(--space-sm)',
-            }}
-          >
-            <button
-              type="button"
-              className="resultados-features-iconbtn"
-              onClick={prevPage}
-              disabled={currentPage <= 1}
-              aria-label="Página anterior"
-              title="Página anterior"
-            >
-              ←
-            </button>
-            <span style={{ fontSize: '0.85rem' }}>
-              Página {currentPage} / {totalPages} · {total} filas
-            </span>
-            <button
-              type="button"
-              className="resultados-features-iconbtn"
-              onClick={nextPage}
-              disabled={currentPage >= totalPages}
-              aria-label="Página siguiente"
-              title="Página siguiente"
-            >
-              →
-            </button>
+          <div style={{ marginTop: 'var(--space-sm)' }}>
+            <Pagination
+              current={currentPage}
+              total={total}
+              pageSize={pageSize}
+              showSizeChanger={false}
+              onChange={(page) => setPage(page)}
+              showTotal={(t) => `${t} filas`}
+            />
           </div>
         </>
       )}

@@ -70,6 +70,14 @@ export function useEuromillonesFeatures() {
     setSkip((s) => Math.max(0, s - PAGE_SIZE));
   }, []);
 
+  const setPage = useCallback((page: number) => {
+    if (!Number.isFinite(page) || page < 1) {
+      setSkip(0);
+      return;
+    }
+    setSkip((page - 1) * PAGE_SIZE);
+  }, []);
+
   const reload = useCallback(() => {
     setSkip(0);
   }, []);
@@ -81,8 +89,10 @@ export function useEuromillonesFeatures() {
     error,
     currentPage,
     totalPages,
+    pageSize: PAGE_SIZE,
     nextPage,
     prevPage,
+    setPage,
     reload,
   };
 }
