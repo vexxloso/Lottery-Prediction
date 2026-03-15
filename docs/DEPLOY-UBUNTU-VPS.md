@@ -418,6 +418,16 @@ After you push from your PC, the backend will update and restart within about 5 
 
 ## 12. Troubleshooting
 
+- **Backend exits with code 3 (activating/auto-restart)**: The real error is in the logs. Run:
+  ```bash
+  journalctl -u lottery-backend -n 80 --no-pager
+  ```
+  Or run the app by hand to see the traceback:
+  ```bash
+  cd /root/Lottery-Prediction/backend   # or your backend path
+  .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+  ```
+  Common causes: (1) **MongoDB not running** — start with `sudo systemctl start mongod` and ensure `MONGO_URI` in `.env` is correct (e.g. `mongodb://localhost:27017`). (2) **Missing .env** — create `backend/.env` with at least `MONGO_URI` and `MONGO_DB=lottery`. (3) **Import error** — ensure you installed deps with `pip install -r requirements.txt` inside the backend venv.
 - **502 from /api/**: Backend not running or wrong port. Check `systemctl status lottery-backend` and `curl http://127.0.0.1:8000/api/health`.
 - **CORS errors in browser**: Add the exact frontend origin (scheme + host) to `allow_origins` in `main.py`.
 - **Scrape fails (Chrome/Selenium)**: Ensure Chrome is installed and the app runs with a user that can start Chrome; check logs for "Chrome" or "webdriver" errors.

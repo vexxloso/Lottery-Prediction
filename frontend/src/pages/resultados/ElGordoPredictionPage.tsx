@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Card, Descriptions, Drawer, notification, Spin, Steps, Table, Tag } from 'antd';
+import { Card, notification, Spin, Steps, Table, Tag } from 'antd';
 import { useSearchParams } from 'react-router-dom';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
@@ -59,8 +59,6 @@ export function ElGordoPredictionPage() {
   const [progressLoading, setProgressLoading] = useState(false);
   const [runAllLoading, setRunAllLoading] = useState(false);
   const pipelineNotifiedRef = useRef<'done' | 'error' | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [drawerWidth, setDrawerWidth] = useState(420);
   const [currentDraw, setCurrentDraw] = useState<{ date: string; mains: number[]; clave: number | null } | null>(null);
   const [fullWheelPreview, setFullWheelPreview] = useState<FullWheelPreviewTicketElGordo[] | null>(null);
 
@@ -93,20 +91,14 @@ export function ElGordoPredictionPage() {
     return () => { cancelled = true; };
   }, [cutoffDrawId]);
 
-  useEffect(() => {
-    const mq = window.matchMedia('(max-width: 768px)');
-    const update = () => setDrawerWidth(mq.matches ? window.innerWidth : 420);
-    update();
-    mq.addEventListener('change', update);
-    return () => mq.removeEventListener('change', update);
-  }, []);
-
-  const fetchProgress = useCallback(async (cacheBust = false) => {
+  const fetchProgress = useCallback(async (cacheBust = false, silent = false) => {
     if (!cutoffDrawId) {
       setProgress(null);
       return;
     }
-    setProgressLoading(true);
+    if (!silent) {
+      setProgressLoading(true);
+    }
     try {
       const url = `${API_URL}/api/el-gordo/train/progress?cutoff_draw_id=${encodeURIComponent(cutoffDrawId)}${cacheBust ? `&_t=${Date.now()}` : ''}`;
       const res = await fetch(url, { cache: 'no-store', method: 'POST' });
@@ -115,7 +107,9 @@ export function ElGordoPredictionPage() {
     } catch {
       setProgress(null);
     } finally {
-      setProgressLoading(false);
+      if (!silent) {
+        setProgressLoading(false);
+      }
     }
   }, [cutoffDrawId]);
 
@@ -149,13 +143,22 @@ export function ElGordoPredictionPage() {
     loadPreview();
   }, [cutoffDrawId, progress?.full_wheel_total_tickets]);
 
-  const needPoll =
-    progress?.full_wheel_status === 'waiting' || progress?.pipeline_status === 'running';
+  // Poll when full wheel or pipeline is running — silent so the card does not refresh/flash
   useEffect(() => {
-    if (!cutoffDrawId || !needPoll) return undefined;
-    const id = window.setInterval(() => fetchProgress(true), 4000);
-    return () => window.clearInterval(id);
-  }, [cutoffDrawId, needPoll, fetchProgress]);
+    if (!cutoffDrawId) return;
+    const needPoll =
+      progress?.full_wheel_status === 'waiting' || progress?.pipeline_status === 'running';
+    if (!needPoll) return;
+    let cancelled = false;
+    const interval = window.setInterval(() => {
+      if (cancelled) return;
+      void fetchProgress(true, true);
+    }, 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [cutoffDrawId, progress?.full_wheel_status, progress?.pipeline_status, fetchProgress]);
 
   useEffect(() => {
     if (!progress) return;
@@ -384,21 +387,6 @@ export function ElGordoPredictionPage() {
                     ? 'Generando boletos…'
                     : 'Generar boletos (full wheel)'}
                 </button>
-                <button
-                  type="button"
-                  className="resultados-features-iconbtn"
-                  onClick={() => { fetchProgress(true); setDrawerOpen(true); }}
-                  style={{
-                    padding: '8px 16px',
-                    borderRadius: 999,
-                    border: '1px solid var(--color-border)',
-                    background: 'transparent',
-                    color: 'var(--color-text)',
-                    fontSize: '0.9rem',
-                  }}
-                >
-                  Ver progreso
-                </button>
               </div>
             </Card>
           )}
@@ -426,69 +414,6 @@ export function ElGordoPredictionPage() {
           )}
         </div>
       </div>
-
-      <Drawer
-        className="euromillones-progress-drawer"
-        title="Progreso del pipeline El Gordo"
-        placement="right"
-        width={drawerWidth}
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-      >
-        {progress ? (
-          <>
-            <Descriptions column={1} size="small" bordered>
-              <Descriptions.Item label="Sorteo (cutoff)">{progress.cutoff_draw_id}</Descriptions.Item>
-              <Descriptions.Item label="1. Preparar dataset">
-                {progress.dataset_prepared ? <Tag color="success">Hecho</Tag> : <Tag>Pendiente</Tag>}
-                {progress.main_rows != null && ` · Mains: ${progress.main_rows} filas`}
-                {progress.clave_rows != null && ` · Clave: ${progress.clave_rows} filas`}
-              </Descriptions.Item>
-              <Descriptions.Item label="2. Entrenar modelos">
-                {progress.models_trained ? <Tag color="success">Hecho</Tag> : <Tag>Pendiente</Tag>}
-                {progress.main_accuracy != null && ` · Accuracy mains: ${(progress.main_accuracy * 100).toFixed(2)}%`}
-                {progress.clave_accuracy != null && ` · clave: ${(progress.clave_accuracy * 100).toFixed(2)}%`}
-              </Descriptions.Item>
-              <Descriptions.Item label="3. Probabilidades">
-                {progress.probs_computed ? <Tag color="success">Hecho</Tag> : <Tag>Pendiente</Tag>}
-                {progress.probs_fecha_sorteo && ` · ${progress.probs_fecha_sorteo}`}
-              </Descriptions.Item>
-              <Descriptions.Item label="4. Generar pool">
-                {progress.rules_applied ? <Tag color="success">Hecho</Tag> : <Tag>Pendiente</Tag>}
-                {progress.rule_flags?.rules_used?.length ? ` · ${progress.rule_flags.rules_used.join(', ')}` : ''}
-              </Descriptions.Item>
-              <Descriptions.Item label="5. Full wheel (boletos)">
-                {progress.full_wheel_status === 'waiting' ? (
-                  <Tag color="processing">En curso</Tag>
-                ) : (progress.full_wheel_total_tickets ?? 0) > 0 ? (
-                  <Tag color="success">Hecho</Tag>
-                ) : progress.full_wheel_status === 'error' ? (
-                  <Tag color="error">Error</Tag>
-                ) : (
-                  <Tag>Pendiente</Tag>
-                )}
-                {progress.full_wheel_total_tickets != null &&
-                  ` · ${progress.full_wheel_total_tickets.toLocaleString()} boletos`}
-              </Descriptions.Item>
-            </Descriptions>
-            {(progress.filtered_mains_probs?.length || progress.filtered_clave_probs?.length) ? (
-              <div style={{ marginTop: 16 }}>
-                <div style={{ marginBottom: 8, fontWeight: 600 }}>Pool filtrado</div>
-                <p style={{ margin: 0, fontSize: '0.9rem' }}>
-                  Mains ({progress.filtered_mains_probs?.length ?? 0}):{' '}
-                  {progress.filtered_mains_probs?.map((x) => x.number).join(' ') || '—'}
-                </p>
-                <p style={{ margin: '4px 0 0', fontSize: '0.9rem' }}>
-                  Clave ({progress.filtered_clave_probs?.length ?? 0}):{' '}
-                  {progress.filtered_clave_probs?.map((x) => x.number).join(' ') || '—'}
-                </p>
-              </div>
-            ) : null}
-          </>
-        ) : (
-          <Spin size="small" />
-        )}
-      </Drawer>
     </section>
   );
 }

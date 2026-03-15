@@ -7,6 +7,7 @@ import { Dashboard } from './pages/Dashboard';
 import { ResultadosLaPrimitiva, ResultadosEuromillones, ResultadosElGordo } from './pages/resultados';
 import { SimulationPage } from './pages/SimulationPage';
 import { BotCredentialsPage } from './pages/BotCredentialsPage';
+import { DevPoolsPage } from './pages/DevPoolsPage';
 
 function App() {
   return (
@@ -20,6 +21,8 @@ function App() {
         <Route path="resultados/el-gordo" element={<ResultadosElGordo />} />
         <Route path="simulacion/:lottery/:drawId" element={<SimulationPage />} />
         <Route path="bot-cuentas" element={<BotCredentialsPage />} />
+        {/* Dev only: not linked anywhere — only if you know the URL */}
+        <Route path="dev/pools" element={<DevPoolsPage />} />
       </Route>
     </Routes>
     </ThemeProvider>

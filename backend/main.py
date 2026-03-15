@@ -6,7 +6,7 @@ Stores combinacion (main), parsed numbers/C/R, and joker combinacion.
 """
 import json
 import logging
-import os
+import os 
 import random
 import re
 import secrets
@@ -16,12 +16,15 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from statistics import mean
-from typing import Optional, List, Dict, Iterable, Sequence, Tuple
+from typing import Any, Optional, List, Dict, Iterable, Sequence, Tuple
 from itertools import combinations
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from backend dir, then from project root (for systemd when cwd is backend)
+_load_env_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_load_env_dir, ".env"))
+load_dotenv(os.path.join(os.path.dirname(_load_env_dir), ".env"))
 
 from datetime import datetime as dt, timedelta
 
@@ -1409,6 +1412,39 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/api/health/db")
+def health_db():
+    """Check MongoDB connectivity. Use this to debug 'can't access VPS DB' issues."""
+    if db is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unavailable",
+                "database": "not_initialized",
+                "message": "App not started or lifespan not run yet.",
+            },
+        )
+    try:
+        # ping forces a round-trip to the server
+        db.client.admin.command("ping")
+        return {
+            "status": "ok",
+            "database": "connected",
+            "db_name": MONGO_DB,
+            "host_configured": "***" if MONGO_URI != "mongodb://localhost:27017" else "localhost",
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "database": "error",
+                "message": str(e),
+                "hint": "Check MONGO_URI in .env, VPS firewall (port 27017), and that MongoDB is running and bound to 0.0.0.0 if connecting remotely.",
+            },
+        )
+
+
 @app.post("/api/auth/verify")
 async def api_auth_verify(request: Request):
     """
@@ -1597,6 +1633,8 @@ def _get_last_draw_date(lottery: str) -> str | None:
     if db is None:
         return None
     doc = db[METADATA_COLLECTION].find_one({"lottery": lottery}, projection=["last_draw_date"])
+    if doc is None:
+        return None
     return (doc.get("last_draw_date") or "").strip() or None
 
 
@@ -4569,6 +4607,10 @@ def api_el_gordo_compare_analysis(
     return JSONResponse(content={"rows": rows})
 
 
+# Canonical (main_hits, reintegro_hit) keys for La Primitiva analysis: 1ª=6-0, 2ª=5+C, 3ª=5-0, 4ª=4-0, 5ª=3-0
+_LA_PRIMITIVA_ANALYSIS_KEYS = [(6, 0), (5, 1), (5, 0), (4, 0), (3, 0)]
+
+
 @app.get("/api/la-primitiva/compare/analysis")
 def api_la_primitiva_compare_analysis(
     limit: int = Query(200, ge=1, le=1000, description="Max rows to return, sorted by date desc"),
@@ -4576,12 +4618,9 @@ def api_la_primitiva_compare_analysis(
     """
     Analysis of La Primitiva full-wheel compares.
 
-    Reads la_primitiva_compare_results and returns rows sorted by date desc:
-      - date
-      - current_id
-      - pre_id
-      - jackpot_position (1ª: 6 aciertos)
-      - pos_2th (2ª: 5 + C), pos_3th (3ª: 5), pos_4th (4ª: 4), pos_5th (5ª: 3)
+    Reads la_primitiva_compare_results and returns rows sorted by date desc.
+    All five positions (pos_1th–pos_5th) are taken from the categories array by matching
+    (main_hits, reintegro_hit): 1ª=6-0, 2ª=5+C, 3ª=5-0, 4ª=4-0, 5ª=3-0.
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
@@ -4593,10 +4632,6 @@ def api_la_primitiva_compare_analysis(
             "date": 1,
             "current_id": 1,
             "pre_id": 1,
-            "jackpot_position": 1,
-            "pos_2th": 1,
-            "pos_3th": 1,
-            "pos_4th": 1,
             "categories": 1,
         },
     ).sort("date", -1).limit(limit)
@@ -4604,26 +4639,28 @@ def api_la_primitiva_compare_analysis(
     for doc in cursor:
         date_str = (doc.get("date") or "")[:10]
         cats = doc.get("categories") or []
-        pos_5th: Optional[int] = None
+        # Build lookup (main_hits, reintegro_hit) -> first_position from categories items
+        cat_by_key: Dict[Tuple[int, int], int] = {}
         if isinstance(cats, list):
             for c in cats:
                 if not isinstance(c, dict):
                     continue
-                if int(c.get("main_hits") or 0) == 3 and int(c.get("reintegro_hit") or 0) == 0:
-                    fp = int(c.get("first_position") or 0)
-                    if fp > 0:
-                        pos_5th = fp
-                        break
+                hm = int(c.get("main_hits") or 0)
+                rh = int(c.get("reintegro_hit") or 0)
+                fp = int(c.get("first_position") or 0)
+                cat_by_key[(hm, rh)] = fp
+        # Derive pos_1th..pos_5th from categories (1ª=6-0, 2ª=5-1, 3ª=5-0, 4ª=4-0, 5ª=3-0)
+        positions = [cat_by_key.get(key) for key in _LA_PRIMITIVA_ANALYSIS_KEYS]
         rows.append(
             {
                 "date": date_str,
                 "current_id": str(doc.get("current_id") or ""),
                 "pre_id": str(doc.get("pre_id") or ""),
-                "pos_1th": int(doc.get("jackpot_position") or 0),
-                "pos_2th": int(doc.get("pos_2th") or 0) if doc.get("pos_2th") is not None else None,
-                "pos_3th": int(doc.get("pos_3th") or 0) if doc.get("pos_3th") is not None else None,
-                "pos_4th": int(doc.get("pos_4th") or 0) if doc.get("pos_4th") is not None else None,
-                "pos_5th": pos_5th,
+                "pos_1th": positions[0] if positions[0] is not None and positions[0] > 0 else 0,
+                "pos_2th": positions[1] if positions[1] and positions[1] > 0 else None,
+                "pos_3th": positions[2] if positions[2] and positions[2] > 0 else None,
+                "pos_4th": positions[3] if positions[3] and positions[3] > 0 else None,
+                "pos_5th": positions[4] if positions[4] and positions[4] > 0 else None,
             }
         )
     return JSONResponse(content={"rows": rows})
@@ -9655,3 +9692,93 @@ async def scrape_import(body: list):
         "message": f"Saved {saved} draws to MongoDB.",
         "errors": errors[:5] if errors else None,
     }
+
+
+# Dev-only: pool TXT folders (el_gordo_pools, euromillones_pools, la_primitiva_pools) — list and delete.
+_POOL_FOLDERS = {
+    "el_gordo": "el_gordo_pools",
+    "euromillones": "euromillones_pools",
+    "la_primitiva": "la_primitiva_pools",
+}
+
+
+def _get_pool_folder_path(lottery: str) -> Path:
+    if lottery not in _POOL_FOLDERS:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+    return Path(_ROOT_DIR) / _POOL_FOLDERS[lottery]
+
+
+@app.get("/api/dev/pools")
+def api_dev_pools_list():
+    """
+    List .txt files in each pool folder (el_gordo_pools, euromillones_pools, la_primitiva_pools).
+    Public endpoint for dev UI; no link in main app.
+    """
+    result: Dict[str, List[Dict[str, Any]]] = {}
+    for lottery, folder_name in _POOL_FOLDERS.items():
+        folder = Path(_ROOT_DIR) / folder_name
+        files: List[Dict[str, Any]] = []
+        if folder.is_dir():
+            for p in sorted(folder.iterdir()):
+                if p.is_file() and p.suffix.lower() == ".txt":
+                    try:
+                        stat = p.stat()
+                        files.append({
+                            "name": p.name,
+                            "size": stat.st_size,
+                            "modified": dt.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        })
+                    except OSError:
+                        files.append({"name": p.name, "size": None, "modified": None})
+        result[lottery] = files
+    return result
+
+
+@app.delete("/api/dev/pools")
+def api_dev_pools_delete(
+    lottery: Optional[str] = Query(None, description="el_gordo | euromillones | la_primitiva; if omitted, delete all three."),
+    file: Optional[str] = Query(None, description="If set with lottery, delete only this .txt filename (no path)."),
+):
+    """
+    Delete .txt files in pool folder(s). If lottery+file are given, delete only that file; if lottery only, that folder; else all three.
+    Public endpoint for dev UI; no link in main app.
+    """
+    if file is not None and file.strip():
+        # Single file delete: require lottery, and filename must be safe (no path, .txt)
+        if not lottery:
+            raise HTTPException(400, detail="lottery is required when file is specified")
+        if lottery not in _POOL_FOLDERS:
+            raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+        name = file.strip()
+        if "/" in name or "\\" in name or name != os.path.basename(name):
+            raise HTTPException(400, detail="Invalid file name")
+        if not name.lower().endswith(".txt"):
+            raise HTTPException(400, detail="Only .txt files can be deleted")
+        folder = _get_pool_folder_path(lottery)
+        path = folder / name
+        if not path.is_file():
+            raise HTTPException(404, detail=f"File not found: {name}")
+        try:
+            path.unlink()
+        except OSError as e:
+            raise HTTPException(500, detail=str(e))
+        return {"deleted": {lottery: 1}, "errors": None}
+
+    to_process = [lottery] if lottery else list(_POOL_FOLDERS.keys())
+    if lottery and lottery not in _POOL_FOLDERS:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+    deleted: Dict[str, int] = {}
+    errors: List[str] = []
+    for lot in to_process:
+        folder = _get_pool_folder_path(lot)
+        count = 0
+        if folder.is_dir():
+            for p in folder.iterdir():
+                if p.is_file() and p.suffix.lower() == ".txt":
+                    try:
+                        p.unlink()
+                        count += 1
+                    except OSError as e:
+                        errors.append(f"{lot}/{p.name}: {e}")
+        deleted[lot] = count
+    return {"deleted": deleted, "errors": errors[:20] if errors else None}

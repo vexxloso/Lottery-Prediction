@@ -1978,14 +1978,19 @@ export function SimulationPage() {
                                         <tbody>
                                           {laPrimitivaFullWheelTickets.map((t) => {
                                             const hitsMain = t.mains.filter((n) => mainSetFullWheel.has(n)).length;
-                                            // Winning ticket = any of 1ª–5ª categories: 6,5,4,3,2 aciertos.
-                                            const isWinning = hitsMain >= 2;
+                                            const complementario =
+                                              (compareDraw as { complementario?: number | null }).complementario;
+                                            const hitsComplementario =
+                                              complementario != null && t.mains.includes(complementario) ? 1 : 0;
+                                            // 1ª=6-0, 2ª=5+C, 3ª=5-0, 4ª=4-0, 5ª=3-0 (per update3)
                                             let categoryLabel = '';
                                             if (hitsMain === 6) categoryLabel = '1ª (6 aciertos)';
-                                            else if (hitsMain === 5) categoryLabel = '2ª (5 aciertos)';
-                                            else if (hitsMain === 4) categoryLabel = '3ª (4 aciertos)';
-                                            else if (hitsMain === 3) categoryLabel = '4ª (3 aciertos)';
-                                            else if (hitsMain === 2) categoryLabel = '5ª (2 aciertos)';
+                                            else if (hitsMain === 5 && hitsComplementario === 1)
+                                              categoryLabel = '2ª (5 + C)';
+                                            else if (hitsMain === 5) categoryLabel = '3ª (5 aciertos)';
+                                            else if (hitsMain === 4) categoryLabel = '4ª (4 aciertos)';
+                                            else if (hitsMain === 3) categoryLabel = '5ª (3 aciertos)';
+                                            const isWinning = hitsMain >= 3;
                                             return (
                                               <tr
                                                 key={t.position}

@@ -29,6 +29,22 @@ from typing import List, Tuple, Optional
 
 from pymongo import ASCENDING, MongoClient
 
+# Load .env from backend or project root (same as backfill_common.py)
+_scripts_dir = os.path.dirname(os.path.abspath(__file__))
+for _path in [
+    os.path.join(_scripts_dir, "..", "backend", ".env"),
+    os.path.join(_scripts_dir, "..", ".env"),
+]:
+    if os.path.isfile(_path):
+        with open(_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    if k.strip() and k.strip() not in os.environ:
+                        os.environ[k.strip()] = v.strip()
+        break
+
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB = os.getenv("MONGO_DB", "lottery")
 

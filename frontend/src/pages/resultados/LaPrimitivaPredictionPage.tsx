@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Card, Descriptions, Drawer, notification, Spin, Steps, Table, Tag } from 'antd';
+import { Card, notification, Spin, Steps, Table, Tag } from 'antd';
 import { useSearchParams } from 'react-router-dom';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
@@ -58,8 +58,6 @@ export function LaPrimitivaPredictionPage() {
   const [progress, setProgress] = useState<TrainProgressLaPrimitiva | null>(null);
   const [progressLoading, setProgressLoading] = useState(false);
   const [runAllLoading, setRunAllLoading] = useState(false);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [drawerWidth, setDrawerWidth] = useState(420);
   const [currentDraw, setCurrentDraw] = useState<{
     date: string;
     mains: number[];
@@ -111,15 +109,6 @@ export function LaPrimitivaPredictionPage() {
       cancelled = true;
     };
   }, [cutoffDrawId]);
-
-  // Responsive drawer width
-  useEffect(() => {
-    const mq = window.matchMedia('(max-width: 768px)');
-    const update = () => setDrawerWidth(mq.matches ? window.innerWidth : 420);
-    update();
-    mq.addEventListener('change', update);
-    return () => mq.removeEventListener('change', update);
-  }, []);
 
   const fetchProgress = useCallback(
     async (cacheBust = false, silent = false) => {
@@ -504,21 +493,6 @@ export function LaPrimitivaPredictionPage() {
                     <span>Generando boletos (full wheel)…</span>
                   </div>
                 )}
-                <button
-                  type="button"
-                  className="resultados-features-iconbtn"
-                  onClick={() => { fetchProgress(true); setDrawerOpen(true); }}
-                  style={{
-                    padding: '8px 16px',
-                    borderRadius: 999,
-                    border: '1px solid var(--color-border)',
-                    background: 'transparent',
-                    color: 'var(--color-text)',
-                    fontSize: '0.9rem',
-                  }}
-                >
-                  Ver progreso
-                </button>
               </div>
             </Card>
           )}
@@ -614,117 +588,6 @@ export function LaPrimitivaPredictionPage() {
           </Card>
         </div>
       </div>
-
-      <Drawer
-        className="euromillones-progress-drawer"
-        title="Progreso del pipeline"
-        placement="right"
-        width={drawerWidth}
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-        bodyStyle={{ padding: 'var(--space-md)' }}
-        rootClassName="resultados-features-drawer"
-      >
-        {progress ? (
-          <>
-            <Descriptions column={1} size="small" bordered>
-              <Descriptions.Item label="Cutoff id_sorteo">
-                <Tag color="blue">{progress.cutoff_draw_id}</Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label="1. Dataset">
-                {progress.dataset_prepared ? <Tag color="success">Hecho</Tag> : <Tag>Pendiente</Tag>}
-                {progress.dataset_prepared_at && ` · ${progress.dataset_prepared_at}`}
-                {progress.main_rows != null && ` · mains: ${progress.main_rows}`}
-                {progress.reintegro_rows != null &&
-                  ` · reintegro: ${progress.reintegro_rows}`}
-              </Descriptions.Item>
-              <Descriptions.Item label="2. Modelos">
-                {progress.models_trained ? (
-                  <Tag color="success">Hecho</Tag>
-                ) : (
-                  <Tag>Pendiente</Tag>
-                )}
-                {progress.trained_at && ` · ${progress.trained_at}`}
-                {progress.main_accuracy != null &&
-                  ` · mains: ${(progress.main_accuracy * 100).toFixed(2)}%`}
-                {progress.reintegro_accuracy != null &&
-                  ` · reintegro: ${(progress.reintegro_accuracy * 100).toFixed(2)}%`}
-              </Descriptions.Item>
-              <Descriptions.Item label="3. Probabilidades">
-                {progress.probs_computed ? (
-                  <Tag color="success">Hecho</Tag>
-                ) : (
-                  <Tag>Pendiente</Tag>
-                )}
-                {progress.probs_fecha_sorteo && ` · ${progress.probs_fecha_sorteo}`}
-              </Descriptions.Item>
-              <Descriptions.Item label="4. Generar pool">
-                {progress.rules_applied ? (
-                  <Tag color="success">Hecho</Tag>
-                ) : (
-                  <Tag>Pendiente</Tag>
-                )}
-                {(progress.filtered_mains_probs?.length ?? 0) > 0 ||
-                (progress.filtered_reintegro_probs?.length ?? 0) > 0
-                  ? ` · main: ${progress.filtered_mains_probs?.length ?? 0} pool, reintegro: ${progress.filtered_reintegro_probs?.length ?? 0} pool`
-                  : ''}
-              </Descriptions.Item>
-              <Descriptions.Item label="5. Pool de candidatos">
-                {(progress.candidate_pool_count ?? 0) > 0 ? (
-                  <Tag color="success">Hecho</Tag>
-                ) : (
-                  <Tag>Pendiente</Tag>
-                )}
-                {progress.candidate_pool_count != null &&
-                  ` · ${progress.candidate_pool_count} boletos`}
-              </Descriptions.Item>
-            </Descriptions>
-            {(progress.filtered_mains_probs?.length ||
-              progress.filtered_reintegro_probs?.length) && (
-              <div style={{ marginTop: 16 }}>
-                <div style={{ marginBottom: 8, fontWeight: 600 }}>Pool filtrado</div>
-                <p style={{ margin: 0, fontSize: '0.9rem' }}>
-                  Mains ({progress.filtered_mains_probs?.length ?? 0}):{' '}
-                  {progress.filtered_mains_probs
-                    ?.map((x) => x.number)
-                    .join(' ') || '—'}
-                </p>
-                <p style={{ margin: '4px 0 0', fontSize: '0.9rem' }}>
-                  Reintegro ({progress.filtered_reintegro_probs?.length ?? 0}):{' '}
-                  {progress.filtered_reintegro_probs
-                    ?.map((x) => x.number)
-                    .join(' ') || '—'}
-                </p>
-              </div>
-            )}
-            {(progress.candidate_pool?.length ?? 0) > 0 && (
-              <div style={{ marginTop: 16 }}>
-                <div style={{ marginBottom: 8, fontWeight: 600 }}>
-                  Muestra del pool (
-                  {Math.min(10, progress.candidate_pool!.length)} primeros)
-                </div>
-                <Table
-                  size="small"
-                  dataSource={progress.candidate_pool!
-                    .slice(0, 10)
-                    .map((t, i) => ({
-                      key: i,
-                      mains: (t.mains ?? []).join(' '),
-                      reintegro: t.reintegro,
-                    }))}
-                  columns={[
-                    { title: 'Mains', dataIndex: 'mains' },
-                    { title: 'Reintegro', dataIndex: 'reintegro', width: 80 },
-                  ]}
-                  pagination={false}
-                />
-              </div>
-            )}
-          </>
-        ) : (
-          <Spin size="small" />
-        )}
-      </Drawer>
     </section>
   );
 }
