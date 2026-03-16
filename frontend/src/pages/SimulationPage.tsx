@@ -1619,7 +1619,6 @@ export function SimulationPage() {
                                       <th>Categoría</th>
                                       <th>Count</th>
                                       <th>First position</th>
-                                      <th>Earning</th>
                                     </tr>
                                   </thead>
                                   <tbody>
@@ -1646,13 +1645,6 @@ export function SimulationPage() {
                                             <td>{row.category}</td>
                                             <td>{row.count}</td>
                                             <td>{firstPos != null ? firstPos.toLocaleString() : '—'}</td>
-                                            <td>
-                                              {row.earning.toLocaleString('es-ES', {
-                                                minimumFractionDigits: 2,
-                                                maximumFractionDigits: 2,
-                                              })}{' '}
-                                              €
-                                            </td>
                                           </tr>
                                         );
                                       })}
@@ -2462,72 +2454,7 @@ export function SimulationPage() {
                         // because the user requested to hide it.
                         null}
 
-                      {/* Full-wheel summary card on the right column */}
-                      {slug === 'euromillones' &&
-                        compareEuromillonesSource === 'fullwheel' &&
-                        euromillonesFullWheelResult && (
-                          <div
-                            className="euromillones-train-current-draw-card"
-                            style={{ marginTop: 'var(--space-md)', padding: 'var(--space-md)' }}
-                          >
-                            <div
-                              style={{
-                                fontSize: '0.75rem',
-                                color: 'var(--color-text-muted)',
-                                marginBottom: 'var(--space-xs)',
-                                textTransform: 'uppercase',
-                                letterSpacing: '0.04em',
-                              }}
-                            >
-                              Resumen full wheel
-                            </div>
-                            <div style={{ fontSize: '0.9rem', display: 'grid', rowGap: 4 }}>
-                              <div>
-                                <strong>Total boletos</strong>{' '}
-                                {euromillonesFullWheelResult.total_tickets.toLocaleString()}
-                              </div>
-                              <div>
-                                <strong>Coste total</strong>{' '}
-                                {euromillonesFullWheelResult.ticket_cost.toLocaleString('es-ES', {
-                                  minimumFractionDigits: 2,
-                                })}{' '}
-                                €
-                              </div>
-                              <div>
-                                <strong>Premio total</strong>{' '}
-                                {euromillonesFullWheelResult.earning.toLocaleString('es-ES', {
-                                  minimumFractionDigits: 2,
-                                })}{' '}
-                                €
-                              </div>
-                              <div>
-                                <strong>Ganancia</strong>{' '}
-                                <span
-                                  style={{
-                                    color:
-                                      euromillonesFullWheelResult.earning -
-                                        euromillonesFullWheelResult.ticket_cost >
-                                      0
-                                        ? 'var(--color-success, green)'
-                                        : euromillonesFullWheelResult.earning -
-                                            euromillonesFullWheelResult.ticket_cost <
-                                          0
-                                          ? 'var(--color-error, #c00)'
-                                          : 'inherit',
-                                  }}
-                                >
-                                  {(
-                                    euromillonesFullWheelResult.earning -
-                                    euromillonesFullWheelResult.ticket_cost
-                                  ).toLocaleString('es-ES', {
-                                    minimumFractionDigits: 2,
-                                  })}{' '}
-                                  €
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-                        )}
+                      {/* Full-wheel summary card on the right column removed per user request */}
                     </>
                   )}
                 </section>
