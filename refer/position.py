@@ -9,7 +9,7 @@ def position_generator(year: int, month: int) -> int:
     divide_number = 6
 
     unit = 70000 // 12
-    month_start = (month - 12 // divide_number) * unit
+    month_start = (month - 1) * unit
     month_end = month * unit
 
     month_number = random.randint(month_start, month_end)
@@ -25,7 +25,7 @@ def position_generator_el_gordo(year: int, month: int) -> int:
     divide_number = 6
 
     unit = 30000 // 12
-    month_start = (month - 12 // divide_number) * unit
+    month_start = (month - 1) * unit
     month_end = month * unit
 
     month_number = random.randint(month_start, month_end)
