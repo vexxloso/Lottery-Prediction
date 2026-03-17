@@ -4042,15 +4042,12 @@ def _euromillones_full_wheel_compare(
     """
     Compare full wheel TXT against draw result: stream TXT until jackpot (5+2), then
     aggregate prize counts and earnings per category using escrutinio premio per category.
-    Save to euromillones_compare_results. If result already exists in DB, return it (calculate only once).
-    """
-    pre_id_clean = pre_id.strip()
-    coll_compare = db_instance[EUROMILLONES_COMPARE_RESULTS_COLLECTION]
-    existing = coll_compare.find_one({"current_id": current_id, "pre_id": pre_id_clean})
-    if existing:
-        out = {k: v for k, v in existing.items() if k != "_id"}
-        return _item_to_json(out)
+    Save to euromillones_compare_results.
 
+    NOTE: Existence / fallback logic (real vs synthetic vs no-data) is handled
+    by the public API endpoint; this helper always attempts to compute a fresh
+    compare result from TXT and may raise if the TXT/progress is missing.
+    """
     coll_draws = db_instance["euromillones"]
     doc = coll_draws.find_one({"id_sorteo": current_id})
     if doc is None and current_id.isdigit():
@@ -4385,15 +4382,12 @@ def _la_primitiva_full_wheel_compare(
       2th(5+C), 3th(5 hits), 4th(4 hits), 5th(3 hits).
     - Stop scanning once both jackpot (1st) and 2nd (5+C) are found
       (when complementario is set; otherwise stop at jackpot).
-    - Save summary to la_primitiva_compare_results; if result already exists, return it.
-    """
-    pre_id_clean = pre_id.strip()
-    coll_compare = db_instance[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION]
-    existing = coll_compare.find_one({"current_id": current_id, "pre_id": pre_id_clean})
-    if existing:
-        out = {k: v for k, v in existing.items() if k != "_id"}
-        return _item_to_json(out)
+    - Save summary to la_primitiva_compare_results.
 
+    NOTE: Existence / fallback logic (real vs synthetic vs no-data) is handled
+    by the public API endpoint; this helper always attempts to compute a fresh
+    compare result from TXT and may raise if the TXT/progress is missing.
+    """
     # Resolve draw from la_primitiva collection
     coll_draws = db_instance["la_primitiva"]
     doc = coll_draws.find_one({"id_sorteo": current_id})
@@ -4590,13 +4584,54 @@ def api_euromillones_compare_full_wheel(
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
+
+    current_id_clean = current_id.strip()
+    pre_id_clean = pre_id.strip()
+    coll_compare = db[EUROMILLONES_COMPARE_RESULTS_COLLECTION]
+
+    # 1) If there is already a compare result for this (current_id, pre_id), return it.
+    existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
+    if existing:
+        out = {k: v for k, v in existing.items() if k != "_id"}
+        return JSONResponse(content=_item_to_json(out))
+
+    # 2) Try to compute a fresh compare result from TXT. If TXT/progress is missing,
+    #    fall back to synthetic or empty result.
     try:
-        result = _euromillones_full_wheel_compare(current_id.strip(), pre_id.strip(), db)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, detail=f"Compare failed: {e}")
-    return JSONResponse(content=_item_to_json(result))
+        result = _euromillones_full_wheel_compare(current_id_clean, pre_id_clean, db)
+        return JSONResponse(content=_item_to_json(result))
+    except HTTPException as e:
+        detail_str = str(e.detail).lower() if isinstance(e.detail, str) else ""
+        # Only fall back when the problem is missing training/TXT; otherwise re-raise.
+        if e.status_code not in (400, 404) or (
+            "training progress not found" not in detail_str
+            and "full wheel file not generated" not in detail_str
+            and "full wheel file not found" not in detail_str
+        ):
+            raise
+
+    # 3) No TXT: try to return a synthetic compare result for this draw.
+    fake = coll_compare.find_one({"current_id": current_id_clean, "pre_id": "__synthetic__"})
+    if fake:
+        out = {k: v for k, v in fake.items() if k != "_id"}
+        return JSONResponse(content=_item_to_json(out))
+
+    # 4) No real, no TXT, no fake -> return empty payload so frontend can show "no data".
+    return JSONResponse(
+        content={
+            "current_id": current_id_clean,
+            "pre_id": pre_id_clean,
+            "date": None,
+            "jackpot_position": None,
+            "second_positions": [],
+            "third_positions": [],
+            "fourth_positions": [],
+            "categories": [],
+            "total_tickets": 0,
+            "earning": 0,
+            "ticket_cost": 0,
+        }
+    )
 
 
 @app.get("/api/el-gordo/compare/full-wheel")
@@ -4627,18 +4662,59 @@ def api_la_primitiva_compare_full_wheel(
 ):
     """
     Compare La Primitiva full wheel TXT (from pre_id) against draw result (current_id).
-    Returns and saves summary: jackpot_position, 2th/3th/4th first positions,
-    and first_position + count for every (main_hits, reintegro_hit) category.
+    Priority:
+      1. If a real compare result exists for (current_id, pre_id), return it.
+      2. Else, try to compute a fresh result from TXT and save/return it.
+      3. If TXT/progress is missing, return a synthetic compare result for current_id if present.
+      4. If none of the above, return an empty payload.
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
+
+    current_id_clean = current_id.strip()
+    pre_id_clean = pre_id.strip()
+    coll_compare = db[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION]
+
+    # 1) Existing real compare (current_id, pre_id)
+    existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
+    if existing:
+        out = {k: v for k, v in existing.items() if k != "_id"}
+        return JSONResponse(content=_item_to_json(out))
+
+    # 2) Try to compute from TXT
     try:
-        result = _la_primitiva_full_wheel_compare(current_id.strip(), pre_id.strip(), db)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, detail=f"La Primitiva compare failed: {e}")
-    return JSONResponse(content=_item_to_json(result))
+        result = _la_primitiva_full_wheel_compare(current_id_clean, pre_id_clean, db)
+        return JSONResponse(content=_item_to_json(result))
+    except HTTPException as e:
+        detail_str = str(e.detail).lower() if isinstance(e.detail, str) else ""
+        if e.status_code not in (400, 404) or (
+            "training progress not found" not in detail_str
+            and "full wheel file not generated" not in detail_str
+            and "full wheel file not found" not in detail_str
+        ):
+            raise
+
+    # 3) Fallback to synthetic compare for this draw
+    fake = coll_compare.find_one({"current_id": current_id_clean, "pre_id": "__synthetic__"})
+    if fake:
+        out = {k: v for k, v in fake.items() if k != "_id"}
+        return JSONResponse(content=_item_to_json(out))
+
+    # 4) No real, no TXT, no fake
+    return JSONResponse(
+        content={
+            "current_id": current_id_clean,
+            "pre_id": pre_id_clean,
+            "date": None,
+            "jackpot_position": None,
+            "pos_2th": None,
+            "pos_3th": None,
+            "pos_4th": None,
+            "pos_5th": None,
+            "categories": [],
+            "total_categories": 0,
+        }
+    )
 
 @app.get("/api/el-gordo/compare/full-wheel")
 def api_el_gordo_compare_full_wheel(
@@ -4888,7 +4964,8 @@ def api_euromillones_compare_analysis_graph(
 
 @app.get("/api/el-gordo/compare/analysis")
 def api_el_gordo_compare_analysis(
-    limit: int = Query(200, ge=1, le=1000, description="Max rows to return, sorted by date desc"),
+    skip: int = Query(0, ge=0, description="Number of rows to skip (for pagination)"),
+    limit: int = Query(100, ge=1, le=1000, description="Max rows to return, sorted by date desc"),
 ):
     """
     Analysis of El Gordo full-wheel compares.
@@ -4904,20 +4981,26 @@ def api_el_gordo_compare_analysis(
     if db is None:
         raise HTTPException(500, detail="Database not connected")
     coll = db[EL_GORDO_COMPARE_RESULTS_COLLECTION]
-    cursor = coll.find(
-        {},
-        projection={
-            "_id": 0,
-            "date": 1,
-            "current_id": 1,
-            "pre_id": 1,
-            "jackpot_position": 1,
-            "pos_2th": 1,
-            "pos_3th": 1,
-            "pos_4th": 1,
-            "categories": 1,
-        },
-    ).sort("date", -1).limit(limit)
+    total = coll.count_documents({})
+    cursor = (
+        coll.find(
+            {},
+            projection={
+                "_id": 0,
+                "date": 1,
+                "current_id": 1,
+                "pre_id": 1,
+                "jackpot_position": 1,
+                "pos_2th": 1,
+                "pos_3th": 1,
+                "pos_4th": 1,
+                "categories": 1,
+            },
+        )
+        .sort("date", -1)
+        .skip(skip)
+        .limit(limit)
+    )
     rows: List[Dict[str, Any]] = []
     for doc in cursor:
         date_str = (doc.get("date") or "")[:10]
@@ -4948,7 +5031,153 @@ def api_el_gordo_compare_analysis(
                 "categories": norm_cats,
             }
         )
-    return JSONResponse(content={"rows": rows})
+    return JSONResponse(content={"rows": rows, "total": total, "skip": skip, "limit": limit})
+
+
+@app.get("/api/el-gordo/compare/analysis-graph")
+def api_el_gordo_compare_analysis_graph(
+    max_points: int = Query(100, ge=10, le=200, description="Maximum number of points for graph (default 100)"),
+):
+    """
+    Compact analysis for El Gordo full-wheel compares, for graphing from 2004 to now.
+
+    - Reads ALL documents from el_gordo_compare_results sorted by date asc.
+    - Ensures each year (>=2004) with data contributes at least one point.
+    - Samples within each year so total points <= max_points.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db[EL_GORDO_COMPARE_RESULTS_COLLECTION]
+    total = coll.count_documents({})
+    if total == 0:
+        return JSONResponse(content={"rows": [], "total": 0})
+
+    # Load all docs in ascending date order to group by year.
+    docs: List[Dict[str, Any]] = []
+    cursor = coll.find(
+        {},
+        projection={
+            "_id": 0,
+            "date": 1,
+            "current_id": 1,
+            "pre_id": 1,
+            "jackpot_position": 1,
+            "pos_2th": 1,
+            "pos_3th": 1,
+            "pos_4th": 1,
+            "categories": 1,
+        },
+    ).sort("date", 1)
+    for d in cursor:
+        docs.append(d)
+
+    if not docs:
+        return JSONResponse(content={"rows": [], "total": 0})
+
+    from datetime import datetime as _dt
+
+    by_year: Dict[int, List[Dict[str, Any]]] = {}
+    for doc in docs:
+        date_str = (doc.get("date") or "")[:10]
+        try:
+            year = _dt.strptime(date_str, "%Y-%m-%d").year
+        except Exception:
+            continue
+        if year < 2004:
+            continue
+        by_year.setdefault(year, []).append(doc)
+
+    if not by_year:
+        return JSONResponse(content={"rows": [], "total": 0})
+
+    years_sorted = sorted(by_year.keys())
+    num_years = len(years_sorted)
+
+    max_points = max(max_points, num_years)
+    total_in_range = sum(len(by_year[y]) for y in years_sorted)
+    target_points = min(max_points, total_in_range)
+
+    alloc: Dict[int, int] = {}
+    remaining = target_points
+    for y in years_sorted:
+        size = len(by_year[y])
+        if total_in_range == 0:
+            k = 1
+        else:
+            k = max(1, int(round(size / total_in_range * target_points)))
+        k = min(k, size)
+        alloc[y] = k
+        remaining -= k
+
+    while remaining < 0:
+        for y in reversed(years_sorted):
+            if remaining == 0:
+                break
+            if alloc[y] > 1:
+                alloc[y] -= 1
+                remaining += 1
+        if all(alloc[y] <= 1 for y in years_sorted):
+            break
+
+    while remaining > 0:
+        for y in years_sorted:
+            if remaining == 0:
+                break
+            if alloc[y] < len(by_year[y]):
+                alloc[y] += 1
+                remaining -= 1
+
+    def _extract_row(doc: Dict[str, Any]) -> Dict[str, Any]:
+        date_str = (doc.get("date") or "")[:10]
+        return {
+            "date": date_str,
+            "current_id": str(doc.get("current_id") or ""),
+            "pre_id": str(doc.get("pre_id") or ""),
+            "jackpot_position": int(doc.get("jackpot_position") or 0),
+            "pos_2th": int(doc.get("pos_2th") or 0) if doc.get("pos_2th") is not None else None,
+            "pos_3th": int(doc.get("pos_3th") or 0) if doc.get("pos_3th") is not None else None,
+            "pos_4th": int(doc.get("pos_4th") or 0) if doc.get("pos_4th") is not None else None,
+        }
+
+    out_rows: List[Dict[str, Any]] = []
+    for y in years_sorted:
+        year_docs = by_year[y]
+        k = alloc.get(y, 0)
+        if k <= 0:
+            continue
+        n = len(year_docs)
+        if k >= n:
+            chosen = year_docs
+        else:
+            step = n / float(k)
+            indices = [int(i * step) for i in range(k)]
+            seen_idx = set()
+            chosen = []
+            for idx in indices:
+                if idx >= n:
+                    idx = n - 1
+                if idx in seen_idx:
+                    continue
+                seen_idx.add(idx)
+                chosen.append(year_docs[idx])
+
+        for doc in chosen:
+            out_rows.append(_extract_row(doc))
+
+    last_doc = docs[-1]
+    last_row = _extract_row(last_doc)
+    already_has_last = any(
+        (row.get("date") or "")[:10] == (last_row.get("date") or "")[:10]
+        and str(row.get("current_id") or "") == str(last_row.get("current_id") or "")
+        for row in out_rows
+    )
+    if not already_has_last:
+        out_rows.append(last_row)
+
+    out_rows.sort(key=lambda r: (r.get("date") or "", r.get("current_id") or ""))
+
+    return JSONResponse(content={"rows": out_rows, "total": total})
 
 
 # Canonical (main_hits, reintegro_hit) keys for La Primitiva analysis: 1ª=6-0, 2ª=5+C, 3ª=5-0, 4ª=4-0, 5ª=3-0
@@ -4957,7 +5186,8 @@ _LA_PRIMITIVA_ANALYSIS_KEYS = [(6, 0), (5, 1), (5, 0), (4, 0), (3, 0)]
 
 @app.get("/api/la-primitiva/compare/analysis")
 def api_la_primitiva_compare_analysis(
-    limit: int = Query(200, ge=1, le=1000, description="Max rows to return, sorted by date desc"),
+    skip: int = Query(0, ge=0, description="Number of rows to skip (for pagination)"),
+    limit: int = Query(100, ge=1, le=1000, description="Max rows to return, sorted by date desc"),
 ):
     """
     Analysis of La Primitiva full-wheel compares.
@@ -4969,16 +5199,22 @@ def api_la_primitiva_compare_analysis(
     if db is None:
         raise HTTPException(500, detail="Database not connected")
     coll = db[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION]
-    cursor = coll.find(
-        {},
-        projection={
-            "_id": 0,
-            "date": 1,
-            "current_id": 1,
-            "pre_id": 1,
-            "categories": 1,
-        },
-    ).sort("date", -1).limit(limit)
+    total = coll.count_documents({})
+    cursor = (
+        coll.find(
+            {},
+            projection={
+                "_id": 0,
+                "date": 1,
+                "current_id": 1,
+                "pre_id": 1,
+                "categories": 1,
+            },
+        )
+        .sort("date", -1)
+        .skip(skip)
+        .limit(limit)
+    )
     rows: List[Dict[str, Any]] = []
     for doc in cursor:
         date_str = (doc.get("date") or "")[:10]
@@ -5007,7 +5243,162 @@ def api_la_primitiva_compare_analysis(
                 "pos_5th": positions[4] if positions[4] and positions[4] > 0 else None,
             }
         )
-    return JSONResponse(content={"rows": rows})
+    return JSONResponse(content={"rows": rows, "total": total, "skip": skip, "limit": limit})
+
+
+@app.get("/api/la-primitiva/compare/analysis-graph")
+def api_la_primitiva_compare_analysis_graph(
+    max_points: int = Query(100, ge=10, le=200, description="Maximum number of points for graph (default 100)"),
+):
+    """
+    Compact analysis for La Primitiva full-wheel compares, for graphing from 2004 to now.
+
+    - Reads ALL documents from la_primitiva_compare_results sorted by date asc.
+    - Ensures each year (>=2004) with data contributes at least one point.
+    - Samples within each year so total points <= max_points.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION]
+    total = coll.count_documents({})
+    if total == 0:
+        return JSONResponse(content={"rows": [], "total": 0})
+
+    # Load all docs in ascending date order to group by year.
+    docs: List[Dict[str, Any]] = []
+    cursor = coll.find(
+        {},
+        projection={
+            "_id": 0,
+            "date": 1,
+            "current_id": 1,
+            "pre_id": 1,
+            "categories": 1,
+        },
+    ).sort("date", 1)
+    for d in cursor:
+        docs.append(d)
+
+    if not docs:
+        return JSONResponse(content={"rows": [], "total": 0})
+
+    from datetime import datetime as _dt
+
+    by_year: Dict[int, List[Dict[str, Any]]] = {}
+    for doc in docs:
+        date_str = (doc.get("date") or "")[:10]
+        try:
+            year = _dt.strptime(date_str, "%Y-%m-%d").year
+        except Exception:
+            continue
+        if year < 2004:
+            continue
+        by_year.setdefault(year, []).append(doc)
+
+    if not by_year:
+        return JSONResponse(content={"rows": [], "total": 0})
+
+    years_sorted = sorted(by_year.keys())
+    num_years = len(years_sorted)
+
+    max_points = max(max_points, num_years)
+    total_in_range = sum(len(by_year[y]) for y in years_sorted)
+    target_points = min(max_points, total_in_range)
+
+    alloc: Dict[int, int] = {}
+    remaining = target_points
+    for y in years_sorted:
+        size = len(by_year[y])
+        if total_in_range == 0:
+            k = 1
+        else:
+            k = max(1, int(round(size / total_in_range * target_points)))
+        k = min(k, size)
+        alloc[y] = k
+        remaining -= k
+
+    while remaining < 0:
+        for y in reversed(years_sorted):
+            if remaining == 0:
+                break
+            if alloc[y] > 1:
+                alloc[y] -= 1
+                remaining += 1
+        if all(alloc[y] <= 1 for y in years_sorted):
+            break
+
+    while remaining > 0:
+        for y in years_sorted:
+            if remaining == 0:
+                break
+            if alloc[y] < len(by_year[y]):
+                alloc[y] += 1
+                remaining -= 1
+
+    def _extract_positions(doc: Dict[str, Any]) -> Dict[str, Any]:
+        date_str = (doc.get("date") or "")[:10]
+        cats = doc.get("categories") or []
+        cat_by_key: Dict[Tuple[int, int], int] = {}
+        if isinstance(cats, list):
+            for c in cats:
+                if not isinstance(c, dict):
+                    continue
+                hm = int(c.get("main_hits") or 0)
+                rh = int(c.get("reintegro_hit") or 0)
+                fp = int(c.get("first_position") or 0)
+                cat_by_key[(hm, rh)] = fp
+        positions = [cat_by_key.get(key) for key in _LA_PRIMITIVA_ANALYSIS_KEYS]
+        return {
+            "date": date_str,
+            "current_id": str(doc.get("current_id") or ""),
+            "pre_id": str(doc.get("pre_id") or ""),
+            "pos_1th": positions[0] if positions[0] is not None and positions[0] > 0 else 0,
+            "pos_2th": positions[1] if positions[1] and positions[1] > 0 else None,
+            "pos_3th": positions[2] if positions[2] and positions[2] > 0 else None,
+            "pos_4th": positions[3] if positions[3] and positions[3] > 0 else None,
+            "pos_5th": positions[4] if positions[4] and positions[4] > 0 else None,
+        }
+
+    out_rows: List[Dict[str, Any]] = []
+    for y in years_sorted:
+        year_docs = by_year[y]
+        k = alloc.get(y, 0)
+        if k <= 0:
+            continue
+        n = len(year_docs)
+        if k >= n:
+            chosen = year_docs
+        else:
+            step = n / float(k)
+            indices = [int(i * step) for i in range(k)]
+            seen_idx = set()
+            chosen = []
+            for idx in indices:
+                if idx >= n:
+                    idx = n - 1
+                if idx in seen_idx:
+                    continue
+                seen_idx.add(idx)
+                chosen.append(year_docs[idx])
+
+        for doc in chosen:
+            out_rows.append(_extract_positions(doc))
+
+    # Always include the very last date in the dataset.
+    last_doc = docs[-1]
+    last_row = _extract_positions(last_doc)
+    already_has_last = any(
+        (row.get("date") or "")[:10] == (last_row.get("date") or "")[:10]
+        and str(row.get("current_id") or "") == str(last_row.get("current_id") or "")
+        for row in out_rows
+    )
+    if not already_has_last:
+        out_rows.append(last_row)
+
+    out_rows.sort(key=lambda r: (r.get("date") or "", r.get("current_id") or ""))
+
+    return JSONResponse(content={"rows": out_rows, "total": total})
 
 
 @app.get("/api/euromillones/compare/full-wheel/tickets")

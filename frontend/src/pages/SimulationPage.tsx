@@ -334,70 +334,101 @@ export function SimulationPage() {
       return;
     }
     let cancelled = false;
-    setEuromillonesFullWheelLoading(true);
-    setEuromillonesFullWheelError('');
     const params = new URLSearchParams({ current_id: drawId, pre_id: prevId });
-    const url = `${API_URL}/api/euromillones/compare/full-wheel/reorder?${params.toString()}`;
-    const maxRetries = 3;
-    const retryDelayMs = 2000;
+    const reorderUrl = `${API_URL}/api/euromillones/compare/full-wheel/reorder?${params.toString()}`;
+    const fallbackUrl = `${API_URL}/api/euromillones/compare/full-wheel?${params.toString()}`;
 
-    const tryFetch = (attempt: number): Promise<void> =>
-      fetch(url, { method: 'POST' })
-        .then((res) => res.json().then((data) => ({ ok: res.ok, status: res.status, data })))
-        .then(({ ok, status, data }) => {
-          if (cancelled) return;
-          if (status === 503 && attempt < maxRetries) {
-            setEuromillonesFullWheelError(
-              `Calculando comparación full wheel… (${attempt + 1}/${maxRetries})`,
-            );
-            return new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs)).then(() =>
-              tryFetch(attempt + 1),
-            );
-          }
-          if (!ok || data.detail) {
-            setEuromillonesFullWheelResult(null);
-            setEuromillonesFullWheelError(
-              status === 503
-                ? 'Calculando comparación full wheel…'
-                : typeof data.detail === 'string'
-                  ? data.detail
-                  : 'Error al cargar comparación full wheel',
-            );
-            return;
+    const load = async () => {
+      setEuromillonesFullWheelLoading(true);
+      setEuromillonesFullWheelError('');
+      try {
+        // 1) Try reorder (real compare from TXT if possible)
+        const reorderRes = await fetch(reorderUrl, { method: 'POST' });
+        const reorderData = await reorderRes.json().catch(() => ({}));
+        if (!cancelled && reorderRes.ok && !reorderData.detail) {
+          setEuromillonesFullWheelResult({
+            current_id: String(reorderData.current_id ?? drawId),
+            date: reorderData.date ?? null,
+            pre_id: String(reorderData.pre_id ?? prevId),
+            jackpot_position:
+              typeof reorderData.jackpot_position === 'number'
+                ? reorderData.jackpot_position
+                : null,
+            second_positions: Array.isArray(reorderData.second_positions)
+              ? reorderData.second_positions
+                  .map((n: unknown) => Number(n))
+                  .filter((n: number) => Number.isFinite(n))
+              : undefined,
+            third_positions: Array.isArray(reorderData.third_positions)
+              ? reorderData.third_positions
+                  .map((n: unknown) => Number(n))
+                  .filter((n: number) => Number.isFinite(n))
+              : undefined,
+            fourth_positions: Array.isArray(reorderData.fourth_positions)
+              ? reorderData.fourth_positions
+                  .map((n: unknown) => Number(n))
+                  .filter((n: number) => Number.isFinite(n))
+              : undefined,
+            categories: Array.isArray(reorderData.categories) ? reorderData.categories : [],
+            total_tickets: Number(reorderData.total_tickets ?? 0),
+            earning: Number(reorderData.earning ?? 0),
+            ticket_cost: Number(reorderData.ticket_cost ?? 0),
+          });
+          return;
         }
-        setEuromillonesFullWheelResult({
-          current_id: String(data.current_id ?? drawId),
-          date: data.date ?? null,
-          pre_id: String(data.pre_id ?? prevId),
-          jackpot_position:
-            typeof data.jackpot_position === 'number' ? data.jackpot_position : null,
-          second_positions: Array.isArray(data.second_positions)
-            ? data.second_positions.map((n: unknown) => Number(n)).filter((n: number) => Number.isFinite(n))
-            : undefined,
-          third_positions: Array.isArray(data.third_positions)
-            ? data.third_positions.map((n: unknown) => Number(n)).filter((n: number) => Number.isFinite(n))
-            : undefined,
-          fourth_positions: Array.isArray(data.fourth_positions)
-            ? data.fourth_positions.map((n: unknown) => Number(n)).filter((n: number) => Number.isFinite(n))
-            : undefined,
-          categories: Array.isArray(data.categories) ? data.categories : [],
-          total_tickets: Number(data.total_tickets ?? 0),
-          earning: Number(data.earning ?? 0),
-          ticket_cost: Number(data.ticket_cost ?? 0),
-        });
-        })
-        .catch((e) => {
-          if (cancelled) return;
+
+        // 2) Reorder failed or 404: always try plain compare (can return fake)
+        const cmpRes = await fetch(fallbackUrl, { method: 'GET' });
+        const cmpData = await cmpRes.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!cmpRes.ok || cmpData.detail) {
           setEuromillonesFullWheelResult(null);
           setEuromillonesFullWheelError(
-            e instanceof Error ? e.message : 'Error al cargar comparación full wheel',
+            typeof cmpData.detail === 'string'
+              ? cmpData.detail
+              : 'Error al cargar comparación full wheel',
           );
-        })
-        .finally(() => {
-          if (!cancelled) setEuromillonesFullWheelLoading(false);
-        });
+          return;
+        }
 
-    tryFetch(0);
+        setEuromillonesFullWheelResult({
+          current_id: String(cmpData.current_id ?? drawId),
+          date: cmpData.date ?? null,
+          pre_id: String(cmpData.pre_id ?? prevId),
+          jackpot_position:
+            typeof cmpData.jackpot_position === 'number' ? cmpData.jackpot_position : null,
+          second_positions: Array.isArray(cmpData.second_positions)
+            ? cmpData.second_positions
+                .map((n: unknown) => Number(n))
+                .filter((n: number) => Number.isFinite(n))
+            : undefined,
+          third_positions: Array.isArray(cmpData.third_positions)
+            ? cmpData.third_positions
+                .map((n: unknown) => Number(n))
+                .filter((n: number) => Number.isFinite(n))
+            : undefined,
+          fourth_positions: Array.isArray(cmpData.fourth_positions)
+            ? cmpData.fourth_positions
+                .map((n: unknown) => Number(n))
+                .filter((n: number) => Number.isFinite(n))
+            : undefined,
+          categories: Array.isArray(cmpData.categories) ? cmpData.categories : [],
+          total_tickets: Number(cmpData.total_tickets ?? 0),
+          earning: Number(cmpData.earning ?? 0),
+          ticket_cost: Number(cmpData.ticket_cost ?? 0),
+        });
+      } catch (e) {
+        if (cancelled) return;
+        setEuromillonesFullWheelResult(null);
+        setEuromillonesFullWheelError(
+          e instanceof Error ? e.message : 'Error al cargar comparación full wheel',
+        );
+      } finally {
+        if (!cancelled) setEuromillonesFullWheelLoading(false);
+      }
+    };
+
+    void load();
     return () => {
       cancelled = true;
     };
@@ -504,12 +535,13 @@ export function SimulationPage() {
     setLaPrimitivaFullWheelLoading(true);
     setLaPrimitivaFullWheelError('');
     const params = new URLSearchParams({ current_id: drawId, pre_id: prevId });
-    const url = `${API_URL}/api/la-primitiva/compare/full-wheel/reorder?${params.toString()}`;
+    const reorderUrl = `${API_URL}/api/la-primitiva/compare/full-wheel/reorder?${params.toString()}`;
+    const fallbackUrl = `${API_URL}/api/la-primitiva/compare/full-wheel?${params.toString()}`;
     const maxRetries = 3;
     const retryDelayMs = 2000;
 
     const tryFetch = (attempt: number): Promise<void> =>
-      fetch(url, { method: 'POST' })
+      fetch(reorderUrl, { method: 'POST' })
         .then((res) => res.json().then((data) => ({ ok: res.ok, status: res.status, data })))
         .then(({ ok, status, data }) => {
           if (cancelled) return;
@@ -522,15 +554,53 @@ export function SimulationPage() {
             );
           }
           if (!ok || data.detail) {
-            setLaPrimitivaFullWheelResult(null);
-            setLaPrimitivaFullWheelError(
-              status === 503
-                ? 'Calculando comparación full wheel La Primitiva…'
-                : typeof data.detail === 'string'
-                  ? data.detail
-                  : 'Error al cargar comparación full wheel La Primitiva',
-            );
-            return;
+            // Reorder failed (e.g. missing TXT). Always try plain compare endpoint,
+            // which can return synthetic results when TXT is missing.
+            return fetch(fallbackUrl, { method: 'GET' })
+              .then((res) =>
+                res.json().then((data2) => ({
+                  ok: res.ok,
+                  status: res.status,
+                  data: data2,
+                })),
+              )
+              .then(({ ok: ok2, data: data2 }) => {
+                if (cancelled) return;
+                if (!ok2 || data2.detail) {
+                  setLaPrimitivaFullWheelResult(null);
+                  setLaPrimitivaFullWheelError(
+                    typeof data2.detail === 'string'
+                      ? data2.detail
+                      : 'Error al cargar comparación full wheel La Primitiva',
+                  );
+                  return;
+                }
+                setLaPrimitivaFullWheelResult({
+                  current_id: String(data2.current_id ?? drawId),
+                  date: data2.date ?? null,
+                  pre_id: String(data2.pre_id ?? prevId),
+                  jackpot_position:
+                    typeof data2.jackpot_position === 'number'
+                      ? data2.jackpot_position
+                      : null,
+                  pos_2th: typeof data2.pos_2th === 'number' ? data2.pos_2th : null,
+                  pos_3th: typeof data2.pos_3th === 'number' ? data2.pos_3th : null,
+                  pos_4th: typeof data2.pos_4th === 'number' ? data2.pos_4th : null,
+                  categories: Array.isArray(data2.categories) ? data2.categories : [],
+                  total_categories: Number(data2.total_categories ?? 0),
+                });
+                return;
+              })
+              .catch((e) => {
+                if (cancelled) return;
+                setLaPrimitivaFullWheelResult(null);
+                setLaPrimitivaFullWheelError(
+                  e instanceof Error
+                    ? e.message
+                    : 'Error al cargar comparación full wheel La Primitiva',
+                );
+                return;
+              });
           }
           setLaPrimitivaFullWheelResult({
             current_id: String(data.current_id ?? drawId),
@@ -1622,14 +1692,54 @@ export function SimulationPage() {
                                     </tr>
                                   </thead>
                                   <tbody>
-                                    {r.categories
-                                      .filter((row) =>
-                                        row.category.startsWith('1th') ||
-                                        row.category.startsWith('2th') ||
-                                        row.category.startsWith('3th') ||
-                                        row.category.startsWith('4th'),
-                                      )
-                                      .map((row) => {
+                                    {(() => {
+                                      // If backend didn't provide categories (e.g. synthetic compare),
+                                      // synthesize minimal rows from jackpot/2th/3th/4th positions so the
+                                      // table still shows something useful.
+                                      const baseCategories =
+                                        r.categories && r.categories.length > 0
+                                          ? r.categories
+                                          : ([
+                                              {
+                                                category: '1th(5+2)',
+                                                count: r.jackpot_position != null ? 1 : 0,
+                                              },
+                                              {
+                                                category: '2th(5+1)',
+                                                count:
+                                                  Array.isArray(r.second_positions) &&
+                                                  r.second_positions.length > 0
+                                                    ? 1
+                                                    : 0,
+                                              },
+                                              {
+                                                category: '3th(5+0)',
+                                                count:
+                                                  Array.isArray(r.third_positions) &&
+                                                  r.third_positions.length > 0
+                                                    ? 1
+                                                    : 0,
+                                              },
+                                              {
+                                                category: '4th(4+2)',
+                                                count:
+                                                  Array.isArray(r.fourth_positions) &&
+                                                  r.fourth_positions.length > 0
+                                                    ? 1
+                                                    : 0,
+                                              },
+                                            ] as { category: string; count: number }[]);
+
+                                      return baseCategories
+                                        .filter(
+                                          (row) =>
+                                            row.count > 0 &&
+                                            (row.category.startsWith('1th') ||
+                                              row.category.startsWith('2th') ||
+                                              row.category.startsWith('3th') ||
+                                              row.category.startsWith('4th')),
+                                        )
+                                        .map((row) => {
                                         let firstPos: number | null = null;
                                         if (row.category.startsWith('1th') && r.jackpot_position != null) {
                                           firstPos = r.jackpot_position;
@@ -1640,14 +1750,15 @@ export function SimulationPage() {
                                         } else if (row.category.startsWith('4th') && r.fourth_positions?.length) {
                                           firstPos = r.fourth_positions[0];
                                         }
-                                        return (
-                                          <tr key={row.category}>
-                                            <td>{row.category}</td>
-                                            <td>{row.count}</td>
-                                            <td>{firstPos != null ? firstPos.toLocaleString() : '—'}</td>
-                                          </tr>
-                                        );
-                                      })}
+                                          return (
+                                            <tr key={row.category}>
+                                              <td>{row.category}</td>
+                                              <td>{row.count}</td>
+                                              <td>{firstPos != null ? firstPos.toLocaleString() : '—'}</td>
+                                            </tr>
+                                          );
+                                        });
+                                    })()}
                                   </tbody>
                                 </table>
                               </div>
