@@ -4663,7 +4663,8 @@ def api_el_gordo_compare_full_wheel(
 
 @app.get("/api/euromillones/compare/analysis")
 def api_euromillones_compare_analysis(
-    limit: int = Query(200, ge=1, le=1000, description="Max rows to return, sorted by date desc"),
+    skip: int = Query(0, ge=0, description="Number of rows to skip (for pagination)"),
+    limit: int = Query(100, ge=1, le=1000, description="Max rows to return, sorted by date desc"),
 ):
     """
     Analysis of Euromillones full-wheel compares.
@@ -4677,19 +4678,25 @@ def api_euromillones_compare_analysis(
     if db is None:
         raise HTTPException(500, detail="Database not connected")
     coll = db[EUROMILLONES_COMPARE_RESULTS_COLLECTION]
-    cursor = coll.find(
-        {},
-        projection={
-            "_id": 0,
-            "date": 1,
-            "jackpot_position": 1,
-            "second_positions": 1,
-            "third_positions": 1,
-            "fourth_positions": 1,
-            "current_id": 1,
-            "pre_id": 1,
-        },
-    ).sort("date", -1).limit(limit)
+    total = coll.count_documents({})
+    cursor = (
+        coll.find(
+            {},
+            projection={
+                "_id": 0,
+                "date": 1,
+                "jackpot_position": 1,
+                "second_positions": 1,
+                "third_positions": 1,
+                "fourth_positions": 1,
+                "current_id": 1,
+                "pre_id": 1,
+            },
+        )
+        .sort("date", -1)
+        .skip(skip)
+        .limit(limit)
+    )
     rows = []
     for doc in cursor:
         date_str = (doc.get("date") or "")[:10]
@@ -4707,7 +4714,176 @@ def api_euromillones_compare_analysis(
                 "pos_4th": int(fourth_positions[0]) if fourth_positions else None,
             }
         )
-    return JSONResponse(content={"rows": rows})
+    return JSONResponse(content={"rows": rows, "total": total, "skip": skip, "limit": limit})
+
+
+@app.get("/api/euromillones/compare/analysis-graph")
+def api_euromillones_compare_analysis_graph(
+    max_points: int = Query(100, ge=10, le=200, description="Maximum number of points for graph (default 100)"),
+):
+    """
+    Compact analysis for Euromillones full-wheel compares, for graphing from 2004 to now.
+
+    - Reads ALL documents from euromillones_compare_results sorted by date asc.
+    - If total <= max_points: return all.
+    - If total > max_points: pick approximately one every `step = ceil(total / max_points)` documents,
+      so the output has at most `max_points` rows uniformly sampled over time.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    coll = db[EUROMILLONES_COMPARE_RESULTS_COLLECTION]
+    total = coll.count_documents({})
+    if total == 0:
+        return JSONResponse(content={"rows": [], "total": 0})
+
+    # Load all documents in ascending date order so we can group by year.
+    docs: List[Dict[str, Any]] = []
+    cursor = coll.find(
+        {},
+        projection={
+            "_id": 0,
+            "date": 1,
+            "jackpot_position": 1,
+            "second_positions": 1,
+            "third_positions": 1,
+            "fourth_positions": 1,
+            "current_id": 1,
+            "pre_id": 1,
+        },
+    ).sort("date", 1)
+    for doc in cursor:
+        docs.append(doc)
+
+    if not docs:
+        return JSONResponse(content={"rows": [], "total": 0})
+
+    # Group docs by year, ensuring we cover from 2004 up to latest year that has data.
+    from datetime import datetime as _dt
+
+    by_year: Dict[int, List[Dict[str, Any]]] = {}
+    for doc in docs:
+        date_str = (doc.get("date") or "")[:10]
+        try:
+            year = _dt.strptime(date_str, "%Y-%m-%d").year
+        except Exception:
+            continue
+        if year < 2004:
+            continue
+        by_year.setdefault(year, []).append(doc)
+
+    if not by_year:
+        return JSONResponse(content={"rows": [], "total": 0})
+
+    years_sorted = sorted(by_year.keys())
+    num_years = len(years_sorted)
+
+    # We want at least 1 point per year, and at most max_points in total.
+    max_points = max(max_points, num_years)  # ensure capacity for one per year if needed
+    total_in_range = sum(len(by_year[y]) for y in years_sorted)
+    target_points = min(max_points, total_in_range)
+
+    # Initial allocation proportional to year sizes, with minimum 1 per year.
+    alloc: Dict[int, int] = {}
+    remaining = target_points
+    for y in years_sorted:
+        size = len(by_year[y])
+        if total_in_range == 0:
+            k = 1
+        else:
+            k = max(1, int(round(size / total_in_range * target_points)))
+        k = min(k, size)  # cannot pick more than we have
+        alloc[y] = k
+        remaining -= k
+
+    # If we allocated too many (sum > target_points), reduce from years that have >1.
+    while remaining < 0:
+        for y in reversed(years_sorted):
+            if remaining == 0:
+                break
+            if alloc[y] > 1:
+                alloc[y] -= 1
+                remaining += 1
+        if all(alloc[y] <= 1 for y in years_sorted):
+            break
+
+    # If we allocated too few (sum < target_points), add extra points to larger years when possible.
+    while remaining > 0:
+        for y in years_sorted:
+            if remaining == 0:
+                break
+            if alloc[y] < len(by_year[y]):
+                alloc[y] += 1
+                remaining -= 1
+
+    # Now sample within each year evenly across its docs.
+    out_rows: List[Dict[str, Any]] = []
+    for y in years_sorted:
+        year_docs = by_year[y]
+        k = alloc.get(y, 0)
+        if k <= 0:
+            continue
+        n = len(year_docs)
+        if k >= n:
+            chosen = year_docs
+        else:
+            step = n / float(k)
+            indices = [int(i * step) for i in range(k)]
+            # Ensure indices are within bounds and unique but keep order.
+            seen_idx = set()
+            chosen = []
+            for idx in indices:
+                if idx >= n:
+                    idx = n - 1
+                if idx in seen_idx:
+                    continue
+                seen_idx.add(idx)
+                chosen.append(year_docs[idx])
+
+        for doc in chosen:
+            date_str = (doc.get("date") or "")[:10]
+            second_positions = doc.get("second_positions") or []
+            third_positions = doc.get("third_positions") or []
+            fourth_positions = doc.get("fourth_positions") or []
+            out_rows.append(
+                {
+                    "date": date_str,
+                    "current_id": str(doc.get("current_id") or ""),
+                    "pre_id": str(doc.get("pre_id") or ""),
+                    "pos_1th": int(doc.get("jackpot_position") or 0),
+                    "pos_2th": int(second_positions[0]) if second_positions else None,
+                    "pos_3th": int(third_positions[0]) if third_positions else None,
+                    "pos_4th": int(fourth_positions[0]) if fourth_positions else None,
+                }
+            )
+
+    # Ensure we always include the very last date in the dataset.
+    last_doc = docs[-1]
+    last_date_str = (last_doc.get("date") or "")[:10]
+    last_second_positions = last_doc.get("second_positions") or []
+    last_third_positions = last_doc.get("third_positions") or []
+    last_fourth_positions = last_doc.get("fourth_positions") or []
+    already_has_last = any(
+        (row.get("date") or "")[:10] == last_date_str
+        and str(row.get("current_id") or "") == str(last_doc.get("current_id") or "")
+        for row in out_rows
+    )
+    if not already_has_last:
+        out_rows.append(
+            {
+                "date": last_date_str,
+                "current_id": str(last_doc.get("current_id") or ""),
+                "pre_id": str(last_doc.get("pre_id") or ""),
+                "pos_1th": int(last_doc.get("jackpot_position") or 0),
+                "pos_2th": int(last_second_positions[0]) if last_second_positions else None,
+                "pos_3th": int(last_third_positions[0]) if last_third_positions else None,
+                "pos_4th": int(last_fourth_positions[0]) if last_fourth_positions else None,
+            }
+        )
+
+    # Ensure final rows are sorted chronologically.
+    out_rows.sort(key=lambda r: (r.get("date") or "", r.get("current_id") or ""))
+
+    return JSONResponse(content={"rows": out_rows, "total": total})
 
 
 @app.get("/api/el-gordo/compare/analysis")

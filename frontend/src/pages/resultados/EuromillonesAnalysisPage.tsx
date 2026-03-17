@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Drawer } from 'antd';
+import { Drawer, Pagination } from 'antd';
 import {
   ResponsiveContainer,
   LineChart,
@@ -28,6 +28,12 @@ export function EuromillonesAnalysisPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [showGraph, setShowGraph] = useState(false);
+  const [page, setPage] = useState(1);
+  const pageSize = 100;
+  const [total, setTotal] = useState(0);
+  const [graphRows, setGraphRows] = useState<AnalysisRow[] | null>(null);
+  const [graphMode, setGraphMode] = useState<'page' | 'range2004'>('page');
+  const [graphLoading, setGraphLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -35,9 +41,13 @@ export function EuromillonesAnalysisPage() {
       setLoading(true);
       setError('');
       try {
-        const res = await fetch(`${API_URL}/api/euromillones/compare/analysis?limit=200`, {
-          cache: 'no-store',
-        });
+        const skip = (page - 1) * pageSize;
+        const res = await fetch(
+          `${API_URL}/api/euromillones/compare/analysis?skip=${skip}&limit=${pageSize}`,
+          {
+            cache: 'no-store',
+          },
+        );
         const data = await res.json();
         if (!res.ok || data.detail) {
           throw new Error(
@@ -46,6 +56,7 @@ export function EuromillonesAnalysisPage() {
         }
         if (cancelled) return;
         setRows(Array.isArray(data.rows) ? (data.rows as AnalysisRow[]) : []);
+        setTotal(typeof data.total === 'number' ? data.total : 0);
       } catch (e) {
         if (cancelled) return;
         setError(e instanceof Error ? e.message : 'Error al cargar análisis full wheel');
@@ -57,13 +68,22 @@ export function EuromillonesAnalysisPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [page]);
+
+  const activeRowsForGraph = graphMode === 'range2004' && graphRows ? graphRows : rows;
 
   const chartData = useMemo(
     () =>
-      rows
+      activeRowsForGraph
         .slice()
-        .reverse()
+        // Ensure graph is always in chronological order (oldest -> newest)
+        .sort((a, b) => {
+          const da = a.date || '';
+          const db = b.date || '';
+          if (da < db) return -1;
+          if (da > db) return 1;
+          return 0;
+        })
         .map((r) => ({
           label: r.date || r.current_id,
           pos_1th: r.pos_1th || null,
@@ -71,7 +91,7 @@ export function EuromillonesAnalysisPage() {
           pos_3th: r.pos_3th,
           pos_4th: r.pos_4th,
         })),
-    [rows],
+    [activeRowsForGraph],
   );
 
   return (
@@ -85,37 +105,86 @@ export function EuromillonesAnalysisPage() {
         }}
       >
         <h3 style={{ marginTop: 0, marginBottom: '0.75rem' }}>Análisis full wheel (Euromillones)</h3>
-        {rows.length > 0 && (
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          {rows.length > 0 && (
+            <button
+              type="button"
+              className="form-input"
+              onClick={() => {
+                setGraphMode('page');
+                setShowGraph((v) => !v);
+              }}
+              title={showGraph ? 'Ocultar gráfico (página actual)' : 'Ver gráfico (página actual)'}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '0.35rem 0.5rem',
+                minWidth: '2.5rem',
+              }}
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden
+              >
+                <polyline points="3 17 9 11 13 15 21 7" />
+                <polyline points="14 7 21 7 21 14" />
+              </svg>
+            </button>
+          )}
           <button
             type="button"
             className="form-input"
-            onClick={() => setShowGraph((v) => !v)}
-            title={showGraph ? 'Ocultar gráfico' : 'Ver gráfico'}
+            onClick={async () => {
+              setGraphMode('range2004');
+              if (!graphRows) {
+                setGraphLoading(true);
+                try {
+                  const res = await fetch(
+                    `${API_URL}/api/euromillones/compare/analysis-graph?max_points=100`,
+                    { cache: 'no-store' },
+                  );
+                  const data = await res.json();
+                  if (!res.ok || data.detail) {
+                    throw new Error(
+                      typeof data.detail === 'string'
+                        ? data.detail
+                        : 'Error al cargar gráfico (2004–hoy)',
+                    );
+                  }
+                  setGraphRows(Array.isArray(data.rows) ? (data.rows as AnalysisRow[]) : []);
+                } catch (e) {
+                  setError(
+                    e instanceof Error ? e.message : 'Error al cargar gráfico (2004–hoy)',
+                  );
+                } finally {
+                  setGraphLoading(false);
+                }
+              }
+              setShowGraph(true);
+            }}
+            disabled={graphLoading}
+            title="Ver gráfico desde 2004 hasta hoy (máx. 100 sorteos)"
             style={{
               display: 'inline-flex',
               alignItems: 'center',
               justifyContent: 'center',
               padding: '0.35rem 0.5rem',
-              minWidth: '2.5rem',
+              fontSize: '0.8rem',
+              minWidth: 'auto',
             }}
           >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden
-            >
-              <polyline points="3 17 9 11 13 15 21 7" />
-              <polyline points="14 7 21 7 21 14" />
-            </svg>
+            {graphLoading ? 'Cargando 2004–hoy…' : 'Gráfico 2004–hoy (100)'}
           </button>
-        )}
+        </div>
       </div>
       {loading && rows.length === 0 && <p style={{ margin: 0 }}>Cargando análisis…</p>}
       {error && !loading && (
@@ -150,8 +219,24 @@ export function EuromillonesAnalysisPage() {
           </table>
         </div>
       )}
+      {total > pageSize && (
+        <div style={{ marginTop: 'var(--space-sm)', display: 'flex', justifyContent: 'flex-end' }}>
+          <Pagination
+            current={page}
+            pageSize={pageSize}
+            total={total}
+            showSizeChanger={false}
+            showQuickJumper
+            onChange={(p) => setPage(p)}
+          />
+        </div>
+      )}
       <Drawer
-        title="Gráfico de posiciones (1th–4th)"
+        title={
+          graphMode === 'range2004'
+            ? 'Gráfico de posiciones (1th–4th) — 2004–hoy (máx. 100 sorteos)'
+            : 'Gráfico de posiciones (1th–4th) — página actual'
+        }
         placement="right"
         width="100%"
         open={showGraph && chartData.length > 0}
