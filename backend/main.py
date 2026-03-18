@@ -30,7 +30,7 @@ from datetime import datetime as dt, timedelta
 
 from bson import ObjectId
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware 
 from fastapi.responses import JSONResponse
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError, PyMongoError
