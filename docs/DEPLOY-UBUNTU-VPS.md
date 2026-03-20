@@ -354,18 +354,20 @@ After that, use `https://yourdomain.com` in `VITE_API_URL` if the frontend is on
 
 ## 10. Quick checklist
 
-| Step | Command / action |
-|------|-------------------|
-| Node 20 | `node -v` |
-| Python 3.11+ | `python3 --version` |
-| MongoDB | `sudo systemctl status mongod` |
-| Chrome | `google-chrome-stable --version` |
-| Backend .env | `MONGO_URI`, `MONGO_DB` in `backend/.env` |
-| Backend run | `uvicorn main:app --host 0.0.0.0 --port 8000` then systemd |
-| Frontend build | `VITE_API_URL=... npm run build` in `frontend/` |
-| CORS | Add production frontend origin in `backend/main.py` if different domain |
-| Nginx | Serve `frontend/dist` and proxy `/api/` to `127.0.0.1:8000` |
-| Daily scrape | Cron: `POST /api/scrape/daily` or run `scripts/run_daily_scrape.py` |
+
+| Step           | Command / action                                                        |
+| -------------- | ----------------------------------------------------------------------- |
+| Node 20        | `node -v`                                                               |
+| Python 3.11+   | `python3 --version`                                                     |
+| MongoDB        | `sudo systemctl status mongod`                                          |
+| Chrome         | `google-chrome-stable --version`                                        |
+| Backend .env   | `MONGO_URI`, `MONGO_DB` in `backend/.env`                               |
+| Backend run    | `uvicorn main:app --host 0.0.0.0 --port 8000` then systemd              |
+| Frontend build | `VITE_API_URL=... npm run build` in `frontend/`                         |
+| CORS           | Add production frontend origin in `backend/main.py` if different domain |
+| Nginx          | Serve `frontend/dist` and proxy `/api/` to `127.0.0.1:8000`             |
+| Daily scrape   | Cron: `POST /api/scrape/daily` or run `scripts/run_daily_scrape.py`     |
+
 
 ---
 
@@ -444,7 +446,7 @@ Use your **VPS public IP** (e.g. `203.0.113.50`). Replace it in the steps below.
 ### Open the app in a browser
 
 1. On your Windows PC, open **Chrome** or **Edge**.
-2. In the address bar type: **`http://YOUR_VPS_IP`** (e.g. `http://203.0.113.50`).
+2. In the address bar type: `**http://YOUR_VPS_IP`** (e.g. `http://203.0.113.50`).
 3. Press Enter. You should see the Lottery-Prediction frontend (dashboard, resultados, etc.).
 
 ### Quick API check (optional)
@@ -460,14 +462,17 @@ You should see: `{"status":"ok"}`.
 
 ### If it doesn’t load
 
-| Problem | What to check |
-|--------|----------------|
-| Page not loading | VPS firewall: `sudo ufw allow 80` and your provider’s firewall/security group allows port 80. |
-| “Can’t connect” | Ping from Windows: `ping YOUR_VPS_IP`. If it fails, the IP may be wrong or the VPS down. |
+
+| Problem                  | What to check                                                                                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Page not loading         | VPS firewall: `sudo ufw allow 80` and your provider’s firewall/security group allows port 80.                                                    |
+| “Can’t connect”          | Ping from Windows: `ping YOUR_VPS_IP`. If it fails, the IP may be wrong or the VPS down.                                                         |
 | Blank page or API errors | Open DevTools (F12) → Console/Network. If CORS errors, add `http://YOUR_VPS_IP` to `allow_origins` in `backend/main.py` and restart the backend. |
-| 502 Bad Gateway | On VPS: `sudo systemctl status lottery-backend` and `curl http://127.0.0.1:8000/api/health`. |
+| 502 Bad Gateway          | On VPS: `sudo systemctl status lottery-backend` and `curl http://127.0.0.1:8000/api/health`.                                                     |
+
 
 ### If you didn’t set up Nginx yet
 
-- **API only**: Open port 8000 on the VPS (`sudo ufw allow 8000`) and in the browser go to **`http://YOUR_VPS_IP:8000/docs`** to use the Swagger UI.
-- **Full app**: You need Nginx (or another way) to serve the frontend and proxy `/api/` to the backend, then use **`http://YOUR_VPS_IP`** as above.
+- **API only**: Open port 8000 on the VPS (`sudo ufw allow 8000`) and in the browser go to `**http://YOUR_VPS_IP:8000/docs`** to use the Swagger UI.
+- **Full app**: You need Nginx (or another way) to serve the frontend and proxy `/api/` to the backend, then use `**http://YOUR_VPS_IP`** as above.
+
