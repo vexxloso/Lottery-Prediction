@@ -4640,6 +4640,9 @@ def _la_primitiva_full_wheel_compare(
     complementario_set = {complementario_draw} if complementario_draw is not None else set()
     draw_date = (draw.get("fecha_sorteo") or doc.get("fecha_sorteo") or "")[:10] or None
 
+    current_id_clean = current_id.strip()
+    pre_id_clean = pre_id.strip()
+
     # Resolve TXT path from training progress
     coll_progress = db_instance[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
     progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
@@ -4731,6 +4734,8 @@ def _la_primitiva_full_wheel_compare(
             detail="Jackpot (6 mains) not found in La Primitiva full wheel file; cannot compute compare result",
         )
 
+    coll_compare = db_instance[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION]
+
     # Build categories array in fixed canonical order (exactly 5 entries).
     ordered_keys: List[Tuple[Tuple[int, int], str]] = [
         ((6, 0), "1ª (6 aciertos)"),
@@ -4755,7 +4760,7 @@ def _la_primitiva_full_wheel_compare(
         )
 
     result = {
-        "current_id": current_id,
+        "current_id": current_id_clean,
         "date": draw_date,
         "pre_id": pre_id_clean,
         "jackpot_position": jackpot_position,
@@ -4767,12 +4772,12 @@ def _la_primitiva_full_wheel_compare(
         "total_categories": len(categories_out),
     }
     coll_compare.replace_one(
-        {"current_id": current_id, "pre_id": pre_id_clean},
+        {"current_id": current_id_clean, "pre_id": pre_id_clean},
         {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
         upsert=True,
     )
     print(
-        f"[la-prim-compare] saved result for current_id={current_id} pre_id={pre_id_clean} jackpot_position={jackpot_position}",
+        f"[la-prim-compare] saved result for current_id={current_id_clean} pre_id={pre_id_clean} jackpot_position={jackpot_position}",
         flush=True,
     )
     return result
