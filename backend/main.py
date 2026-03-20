@@ -2966,8 +2966,161 @@ async def api_el_gordo_betting_enqueue_by_count(request: Request):
     )
 
 
+@app.post("/api/el-gordo/betting/enqueue-by-range")
+async def api_el_gordo_betting_enqueue_by_range(request: Request):
+    """
+    Create buy-queue items by position range from the El Gordo full-wheeling pool TXT file.
+
+    Body: { "start_position": int, "end_position": int, "draw_date"?, "cutoff_draw_id"? }
+      - Range is start-inclusive, end-exclusive: positions start..(end-1).
+      - end must be > start.
+      - end can be total_in_file + 1.
+      - Tickets already in queue (waiting/in_progress) or bought are skipped.
+    """
+    try:
+        body = await request.json() or {}
+    except Exception:
+        body = {}
+
+    start_position = body.get("start_position")
+    end_position = body.get("end_position")
+    if not isinstance(start_position, int) or not isinstance(end_position, int):
+        raise HTTPException(400, detail="Body must contain 'start_position' and 'end_position' (integers)")
+    if start_position < 1:
+        raise HTTPException(400, detail="start_position must be >= 1")
+    if end_position <= start_position:
+        raise HTTPException(400, detail="end_position must be > start_position")
+
+    draw_date = (body.get("draw_date") or "").strip()[:10] or None
+    cutoff_draw_id = (body.get("cutoff_draw_id") or "").strip() or None
+
+    if db is None:
+        raise HTTPException(503, detail="Database not available")
+
+    coll_progress = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    coll_queue = db[EL_GORDO_BUY_QUEUE_COLLECTION]
+
+    date_str = draw_date
+    cutoff = cutoff_draw_id
+    if not date_str and not cutoff:
+        last = (_get_last_draw_date("el-gordo") or "").strip()
+        if last:
+            date_str = last[:10]
+        if not date_str:
+            raise HTTPException(400, detail="No last_draw_date for el-gordo; provide draw_date or cutoff_draw_id")
+
+    doc = None
+    if cutoff:
+        doc = coll_progress.find_one({"cutoff_draw_id": cutoff})
+        if doc is None and cutoff.isdigit():
+            doc = coll_progress.find_one({"cutoff_draw_id": int(cutoff)})
+    if doc is None and date_str:
+        doc = coll_progress.find_one({"full_wheel_draw_date": date_str}) or coll_progress.find_one({"probs_fecha_sorteo": date_str})
+    if doc is None:
+        raise HTTPException(404, detail="No train progress found for draw_date or cutoff_draw_id")
+
+    path = (doc.get("full_wheel_file_path") or "").strip()
+    total_in_file = int(doc.get("full_wheel_total_tickets") or 0)
+    if not path or total_in_file <= 0:
+        raise HTTPException(404, detail="Full wheel file not found or empty for this draw")
+
+    if start_position > total_in_file:
+        raise HTTPException(400, detail=f"start_position must be <= total tickets ({total_in_file})")
+    if end_position > total_in_file + 1:
+        raise HTTPException(400, detail=f"end_position must be <= total tickets + 1 ({total_in_file + 1})")
+
+    # Exclusions
+    excluded: set[tuple[tuple[int, ...], int]] = set()
+    for d in coll_queue.find({"status": {"$in": ["waiting", "in_progress"]}}, projection={"tickets": 1}):
+        d_date = (d.get("draw_date") or "").strip()
+        d_cutoff = (d.get("cutoff_draw_id") or "").strip()
+        if d_date != date_str and d_cutoff != cutoff:
+            continue
+        for t in (d.get("tickets") or []):
+            mains = t.get("mains")
+            clave = t.get("clave", 0)
+            if isinstance(mains, list) and len(mains) == 5 and 0 <= int(clave) <= 9:
+                excluded.add((tuple(sorted(mains)), int(clave)))
+
+    for t in (doc.get("bought_tickets") or []):
+        mains = t.get("mains")
+        clave = t.get("clave", 0)
+        if isinstance(mains, list) and len(mains) == 5 and 0 <= int(clave) <= 9:
+            excluded.add((tuple(sorted(mains)), int(clave)))
+
+    collected: List[Dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line:
+                    continue
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    pos_str, mains_str, clave_str = line.split(";", 2)
+                    position = int(pos_str)
+                except Exception:
+                    continue
+
+                if position < start_position:
+                    continue
+                if position >= end_position:
+                    break
+
+                try:
+                    mains = [int(x) for x in mains_str.split(",") if x]
+                    clave = int(clave_str)
+                except Exception:
+                    continue
+
+                if len(mains) != 5 or not (0 <= clave <= 9):
+                    continue
+
+                key = (tuple(sorted(mains)), clave)
+                if key in excluded:
+                    continue
+                excluded.add(key)
+                collected.append({"mains": mains, "clave": clave})
+    except FileNotFoundError:
+        raise HTTPException(404, detail="Full wheel file not found on disk")
+
+    if len(collected) == 0:
+        raise HTTPException(400, detail="No tickets available in this range (all already in queue or bought)")
+
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    inserted_ids = []
+    for i in range(0, len(collected), EL_GORDO_BUCKET_SIZE):
+        chunk = collected[i : i + EL_GORDO_BUCKET_SIZE]
+        doc_queue = {
+            "lottery": "el-gordo",
+            "tickets": chunk,
+            "tickets_count": len(chunk),
+            "draw_date": date_str,
+            "cutoff_draw_id": cutoff,
+            "status": "waiting",
+            "created_at": now,
+        }
+        ins = coll_queue.insert_one(doc_queue)
+        inserted_ids.append(str(ins.inserted_id))
+
+    requested_count = end_position - start_position
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "requested_range": {"start_position": start_position, "end_position": end_position},
+            "requested_tickets_count": requested_count,
+            "collected_tickets_count": len(collected),
+            "queued_items": len(inserted_ids),
+            "queued_tickets_count": len(collected),
+            "message": f"{len(inserted_ids)} colas creadas ({len(collected)} boletos).",
+        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
 @app.get("/api/el-gordo/betting/buy-queue")
-def api_el_gordo_betting_buy_queue(limit: int = Query(50, ge=1, le=100)):
+def api_el_gordo_betting_buy_queue(limit: int = Query(50, ge=1, le=5000)):
     """Return recent El Gordo buy-queue items (status, tickets for hover). Tickets included so UI can exclude them from pool and show on hover."""
     if db is None:
         return JSONResponse(content={"items": []}, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
@@ -3410,6 +3563,7 @@ def _euromillones_full_wheel_reorder_txt(
     main_set: set,
     star_set: set,
     draw_date: str,
+    bought_ticket_keys: Optional[set[Tuple[Tuple[int, ...], Tuple[int, ...]]]] = None,
 ) -> None:
     """
     Reorder tickets in the full wheel TXT: swap only mains and stars so that
@@ -3538,6 +3692,24 @@ def _euromillones_full_wheel_reorder_txt(
                 # We have all moved tickets; can stop early
                 break
 
+    # If some of the tickets to be moved are already present in bought_tickets,
+    # we must skip those moves (keep original TXT content at those new positions).
+    if bought_ticket_keys:
+        moved_to_filtered: Dict[int, int] = {}
+        for new_pos, old_pos in moved_to.items():
+            mains_str2, stars_str2 = moved_content.get(old_pos, ("", ""))
+            if not mains_str2 and not stars_str2:
+                moved_to_filtered[new_pos] = old_pos
+                continue
+            moved_mains = [int(x) for x in mains_str2.split(",") if x]
+            moved_stars = [int(x) for x in stars_str2.split(",") if x]
+            if len(moved_mains) == 5 and len(moved_stars) == 2:
+                key = (tuple(sorted(moved_mains)), tuple(sorted(moved_stars)))
+                if key in bought_ticket_keys:
+                    continue
+            moved_to_filtered[new_pos] = old_pos
+        moved_to = moved_to_filtered
+
     # Write to temp file, streaming from original; only swapped tickets use moved_content
     dirpath = os.path.dirname(path)
     fd, temp_path = tempfile.mkstemp(suffix=".txt", prefix="euromillones_reorder_", dir=dirpath if dirpath else ".")
@@ -3580,6 +3752,7 @@ def _el_gordo_full_wheel_reorder_txt(
     main_set: set,
     clave_set: set,
     draw_date: str,
+    bought_ticket_keys: Optional[set[Tuple[Tuple[int, ...], int]]] = None,
 ) -> None:
     """
     Reorder El Gordo full wheel TXT using position_generator_el_gordo rules.
@@ -3729,6 +3902,23 @@ def _el_gordo_full_wheel_reorder_txt(
             if position >= jackpot_position and len(moved_content) == len(moved_from):
                 break
 
+    # Skip moves when the moved ticket already exists in bought_tickets.
+    if bought_ticket_keys:
+        moved_to_filtered: Dict[int, int] = {}
+        for new_pos, old_pos in moved_to.items():
+            mains_str2, clave_str2 = moved_content.get(old_pos, ("", "0"))
+            moved_mains = [int(x) for x in mains_str2.split(",") if x]
+            try:
+                moved_clave = int(clave_str2)
+            except Exception:
+                moved_clave = None
+            if len(moved_mains) == 5 and moved_clave is not None:
+                key = (tuple(sorted(moved_mains)), moved_clave)
+                if key in bought_ticket_keys:
+                    continue
+            moved_to_filtered[new_pos] = old_pos
+        moved_to = moved_to_filtered
+
     dirpath = os.path.dirname(path)
     fd, temp_path = tempfile.mkstemp(suffix=".txt", prefix="el_gordo_reorder_", dir=dirpath if dirpath else ".")
     try:
@@ -3770,6 +3960,7 @@ def _la_primitiva_full_wheel_reorder_txt(
     main_set: set,
     draw_date: str,
     complementario: Optional[int] = None,
+    bought_ticket_keys: Optional[set[Tuple[int, ...]]] = None,
 ) -> None:
     """
     Reorder La Primitiva full wheel TXT using position_generator_la_primitiva rules.
@@ -3995,6 +4186,19 @@ def _la_primitiva_full_wheel_reorder_txt(
                 moved_content[position] = mains_str
             if len(moved_content) == len(moved_from):
                 break
+
+    # Skip moves when the moved ticket already exists in bought_tickets.
+    if bought_ticket_keys:
+        moved_to_filtered: Dict[int, int] = {}
+        for new_pos, old_pos in moved_to.items():
+            mains_str2 = moved_content.get(old_pos, "")
+            mains = [int(x) for x in mains_str2.split(",") if x] if mains_str2 else []
+            if len(mains) == 6:
+                key = tuple(sorted(mains))
+                if key in bought_ticket_keys:
+                    continue
+            moved_to_filtered[new_pos] = old_pos
+        moved_to = moved_to_filtered
 
     # Write to temp file, streaming from original; only swapped tickets use moved_content
     dirpath = os.path.dirname(path)
@@ -5899,11 +6103,25 @@ def api_el_gordo_compare_full_wheel_reorder(
         if not os.path.isfile(path):
             raise HTTPException(404, detail="El Gordo full wheel file not found on disk")
 
+        bought_ticket_keys: set[Tuple[Tuple[int, ...], int]] = set()
+        for t in (progress_doc.get("bought_tickets") or []):
+            mains = t.get("mains") or []
+            clave = t.get("clave")
+            if not isinstance(mains, list) or clave is None:
+                continue
+            try:
+                mains_int = [int(x) for x in mains]
+                clave_int = int(clave)
+            except Exception:
+                continue
+            if len(mains_int) == 5:
+                bought_ticket_keys.add((tuple(sorted(mains_int)), clave_int))
+
         print(
             f"[el-gordo-reorder-api] calling _el_gordo_full_wheel_reorder_txt path={path} mains={sorted(main_set)} clave_set={clave_set}",
             flush=True,
         )
-        _el_gordo_full_wheel_reorder_txt(path, main_set, clave_set, draw_date)
+        _el_gordo_full_wheel_reorder_txt(path, main_set, clave_set, draw_date, bought_ticket_keys)
 
         coll_compare.delete_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
         print("[el-gordo-reorder-api] running compare after reorder", flush=True)
@@ -5990,12 +6208,24 @@ def api_la_primitiva_compare_full_wheel_reorder(
         if not os.path.isfile(path):
             raise HTTPException(404, detail="La Primitiva full wheel file not found on disk")
 
+        bought_ticket_keys: set[Tuple[int, ...]] = set()
+        for t in (progress_doc.get("bought_tickets") or []):
+            mains = t.get("mains") or []
+            if not isinstance(mains, list) or len(mains) != 6:
+                continue
+            try:
+                mains_int = [int(x) for x in mains]
+            except Exception:
+                continue
+            bought_ticket_keys.add(tuple(sorted(mains_int)))
+
         print(f"[la-prim-reorder-api] calling _la_primitiva_full_wheel_reorder_txt path={path!r} complementario={complementario}", flush=True)
         _la_primitiva_full_wheel_reorder_txt(
             path=path,
             main_set=main_set,
             draw_date=draw_date,
             complementario=complementario,
+            bought_ticket_keys=bought_ticket_keys,
         )
         print("[la-prim-reorder-api] reorder done, now running compare", flush=True)
         result = _la_primitiva_full_wheel_compare(current_id_clean, pre_id_clean, db)
@@ -6055,8 +6285,21 @@ def _api_euromillones_compare_full_wheel_reorder_impl(current_id: str, pre_id: s
     if not os.path.isfile(path):
         raise HTTPException(404, detail="Full wheel file not found on disk")
 
+    bought_ticket_keys: set[Tuple[Tuple[int, ...], Tuple[int, ...]]] = set()
+    for t in (progress_doc.get("bought_tickets") or []):
+        mains = t.get("mains") or []
+        stars = t.get("stars") or []
+        if isinstance(mains, list) and isinstance(stars, list) and len(mains) == 5 and len(stars) == 2:
+            try:
+                mains_int = [int(x) for x in mains]
+                stars_int = [int(x) for x in stars]
+            except Exception:
+                continue
+            key = (tuple(sorted(mains_int)), tuple(sorted(stars_int)))
+            bought_ticket_keys.add(key)
+
     try:
-        _euromillones_full_wheel_reorder_txt(path, main_set, star_set, draw_date)
+        _euromillones_full_wheel_reorder_txt(path, main_set, star_set, draw_date, bought_ticket_keys)
     except HTTPException:
         raise
     except Exception as e:
@@ -6478,8 +6721,166 @@ async def api_euromillones_betting_enqueue_by_count(request: Request):
     )
 
 
+@app.post("/api/euromillones/betting/enqueue-by-range")
+async def api_euromillones_betting_enqueue_by_range(request: Request):
+    """
+    Create buy-queue items by position range from the full-wheeling pool file.
+
+    Body: { "start_position": int, "end_position": int, "draw_date"?, "cutoff_draw_id"? }
+      - Positions are 1-based and read from the TXT file's "position;..." prefix.
+      - Range is start-inclusive, end-exclusive: positions start..(end-1).
+      - Constraints: start >= 1, end > start, end <= total_in_file + 1.
+      - Tickets already in queue (waiting/in_progress) or bought are skipped.
+    """
+    try:
+        body = await request.json() or {}
+    except Exception:
+        body = {}
+
+    start_position = body.get("start_position")
+    end_position = body.get("end_position")
+    if not isinstance(start_position, int) or not isinstance(end_position, int):
+        raise HTTPException(400, detail="Body must contain 'start_position' and 'end_position' (integers)")
+    if start_position < 1:
+        raise HTTPException(400, detail="start_position must be >= 1")
+    if end_position <= start_position:
+        raise HTTPException(400, detail="end_position must be > start_position")
+
+    draw_date = (body.get("draw_date") or "").strip()[:10] or None
+    cutoff_draw_id = (body.get("cutoff_draw_id") or "").strip() or None
+
+    if db is None:
+        raise HTTPException(503, detail="Database not available")
+
+    coll_progress = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    coll_queue = db[EUROMILLONES_BUY_QUEUE_COLLECTION]
+
+    date_str = draw_date
+    cutoff = cutoff_draw_id
+    if not date_str and not cutoff:
+        last = (_get_last_draw_date("euromillones") or "").strip()
+        if last:
+            date_str = last[:10]
+        if not date_str:
+            raise HTTPException(400, detail="No last_draw_date for euromillones; provide draw_date or cutoff_draw_id")
+
+    doc = None
+    if cutoff:
+        doc = coll_progress.find_one({"cutoff_draw_id": cutoff})
+        if doc is None and cutoff.isdigit():
+            doc = coll_progress.find_one({"cutoff_draw_id": int(cutoff)})
+    if doc is None and date_str:
+        doc = coll_progress.find_one({"full_wheel_draw_date": date_str}) or coll_progress.find_one({"probs_fecha_sorteo": date_str})
+    if doc is None:
+        raise HTTPException(404, detail="No train progress found for draw_date or cutoff_draw_id")
+
+    path = (doc.get("full_wheel_file_path") or "").strip()
+    total_in_file = int(doc.get("full_wheel_total_tickets") or 0)
+    if not path or total_in_file <= 0:
+        raise HTTPException(404, detail="Full wheel file not found or empty for this draw")
+
+    # end is exclusive, so the largest valid end is total_in_file + 1
+    if start_position > total_in_file:
+        raise HTTPException(400, detail=f"start_position must be <= total tickets ({total_in_file})")
+    if end_position > total_in_file + 1:
+        raise HTTPException(400, detail=f"end_position must be <= total tickets + 1 ({total_in_file + 1})")
+
+    # Exclusions: avoid queuing duplicates already waiting/in_progress for this same draw/cutoff.
+    excluded: set[tuple[tuple[int, ...], tuple[int, ...]]] = set()
+    for d in coll_queue.find({"status": {"$in": ["waiting", "in_progress"]}}, projection={"tickets": 1}):
+        d_date = (d.get("draw_date") or "").strip()
+        d_cutoff = (d.get("cutoff_draw_id") or "").strip()
+        # Keep only items for the inferred draw_date/cutoff context.
+        # (Same logic style as enqueue-by-count.)
+        if d_date != date_str and d_cutoff != cutoff:
+            continue
+        for t in (d.get("tickets") or []):
+            mains = t.get("mains")
+            stars = t.get("stars")
+            if isinstance(mains, list) and len(mains) == 5 and isinstance(stars, list) and len(stars) == 2:
+                excluded.add((tuple(sorted(mains)), tuple(sorted(stars))))
+
+    # Exclude bought tickets for this draw/cutoff (same logic as enqueue-by-count).
+    for t in (doc.get("bought_tickets") or []):
+        mains = t.get("mains")
+        stars = t.get("stars")
+        if isinstance(mains, list) and len(mains) == 5 and isinstance(stars, list) and len(stars) == 2:
+            excluded.add((tuple(sorted(mains)), tuple(sorted(stars))))
+
+    collected: List[Dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line:
+                    continue
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    pos_str, mains_str, stars_str = line.split(";", 2)
+                    position = int(pos_str)
+                except Exception:
+                    continue
+
+                # Position range filtering: start-inclusive, end-exclusive
+                if position < start_position:
+                    continue
+                if position >= end_position:
+                    break
+
+                try:
+                    mains = [int(x) for x in mains_str.split(",") if x]
+                    stars = [int(x) for x in stars_str.split(",") if x]
+                except Exception:
+                    continue
+
+                if len(mains) != 5 or len(stars) != 2:
+                    continue
+
+                key = (tuple(sorted(mains)), tuple(sorted(stars)))
+                if key in excluded:
+                    continue
+                excluded.add(key)
+                collected.append({"mains": mains, "stars": stars})
+    except FileNotFoundError:
+        raise HTTPException(404, detail="Full wheel file not found on disk")
+
+    if len(collected) == 0:
+        raise HTTPException(400, detail="No tickets available in this range (all already in queue or bought)")
+
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    inserted_ids = []
+    for i in range(0, len(collected), EUROMILLONES_BUCKET_SIZE):
+        chunk = collected[i : i + EUROMILLONES_BUCKET_SIZE]
+        doc_queue = {
+            "lottery": "euromillones",
+            "tickets": chunk,
+            "tickets_count": len(chunk),
+            "draw_date": date_str,
+            "cutoff_draw_id": cutoff,
+            "status": "waiting",
+            "created_at": now,
+        }
+        ins = coll_queue.insert_one(doc_queue)
+        inserted_ids.append(str(ins.inserted_id))
+
+    requested_count = end_position - start_position
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "requested_range": {"start_position": start_position, "end_position": end_position},
+            "requested_tickets_count": requested_count,
+            "collected_tickets_count": len(collected),
+            "queued_items": len(inserted_ids),
+            "queued_tickets_count": len(collected),
+            "message": f"{len(inserted_ids)} colas creadas ({len(collected)} boletos).",
+        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
 @app.get("/api/euromillones/betting/buy-queue")
-def api_euromillones_betting_buy_queue(limit: int = Query(50, ge=1, le=100)):
+def api_euromillones_betting_buy_queue(limit: int = Query(50, ge=1, le=5000)):
     if db is None:
         return JSONResponse(content={"items": []}, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
     coll = db[EUROMILLONES_BUY_QUEUE_COLLECTION]
@@ -7149,8 +7550,160 @@ async def api_la_primitiva_betting_enqueue_by_count(request: Request):
     )
 
 
+@app.post("/api/la-primitiva/betting/enqueue-by-range")
+async def api_la_primitiva_betting_enqueue_by_range(request: Request):
+    """
+    Create buy-queue items by position range from the La Primitiva full-wheeling pool TXT file.
+
+    Body: { "start_position": int, "end_position": int, "draw_date"?, "cutoff_draw_id"? }
+      - Range is start-inclusive, end-exclusive: positions start..(end-1).
+      - Each queued ticket gets a random reintegro (0-9).
+      - Tickets already in queue (waiting/in_progress) or bought are skipped.
+    """
+    try:
+        body = await request.json() or {}
+    except Exception:
+        body = {}
+
+    start_position = body.get("start_position")
+    end_position = body.get("end_position")
+    if not isinstance(start_position, int) or not isinstance(end_position, int):
+        raise HTTPException(400, detail="Body must contain 'start_position' and 'end_position' (integers)")
+    if start_position < 1:
+        raise HTTPException(400, detail="start_position must be >= 1")
+    if end_position <= start_position:
+        raise HTTPException(400, detail="end_position must be > start_position")
+
+    draw_date = (body.get("draw_date") or "").strip()[:10] or None
+    cutoff_draw_id = (body.get("cutoff_draw_id") or "").strip() or None
+
+    if db is None:
+        raise HTTPException(503, detail="Database not available")
+
+    coll_progress = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+    coll_queue = db[LA_PRIMITIVA_BUY_QUEUE_COLLECTION]
+
+    date_str = draw_date
+    cutoff = cutoff_draw_id
+    if not date_str and not cutoff:
+        last_draw_date = _get_last_draw_date("la-primitiva")
+        if last_draw_date:
+            date_str = (last_draw_date or "").strip()[:10]
+        if not date_str:
+            raise HTTPException(400, detail="No last_draw_date for la-primitiva; provide draw_date or cutoff_draw_id")
+
+    doc = None
+    if cutoff:
+        doc = coll_progress.find_one({"cutoff_draw_id": cutoff})
+        if doc is None and cutoff.isdigit():
+            doc = coll_progress.find_one({"cutoff_draw_id": int(cutoff)})
+    if doc is None and date_str:
+        doc = coll_progress.find_one({"full_wheel_draw_date": date_str}) or coll_progress.find_one({"probs_fecha_sorteo": date_str})
+    if doc is None:
+        raise HTTPException(404, detail="No train progress found for draw_date or cutoff_draw_id")
+
+    path = (doc.get("full_wheel_file_path") or "").strip()
+    total_in_file = int(doc.get("full_wheel_total_tickets") or 0)
+    if not path or total_in_file <= 0:
+        raise HTTPException(404, detail="Full wheel file not found or empty for this draw")
+
+    # end is exclusive so the largest valid end is total_in_file + 1
+    if start_position > total_in_file:
+        raise HTTPException(400, detail=f"start_position must be <= total tickets ({total_in_file})")
+    if end_position > total_in_file + 1:
+        raise HTTPException(400, detail=f"end_position must be <= total tickets + 1 ({total_in_file + 1})")
+
+    # Exclusions (queued + bought) to avoid duplicates.
+    excluded: set[tuple[int, ...]] = set()
+    for d in coll_queue.find({"status": {"$in": ["waiting", "in_progress"]}}, projection={"tickets": 1}):
+        d_date = (d.get("draw_date") or "").strip()
+        d_cutoff = (d.get("cutoff_draw_id") or "").strip()
+        if d_date != date_str and d_cutoff != cutoff:
+            continue
+        for t in (d.get("tickets") or []):
+            mains = t.get("mains")
+            if isinstance(mains, list) and len(mains) == 6:
+                excluded.add(tuple(sorted(mains)))
+
+    for t in (doc.get("bought_tickets") or []):
+        mains = t.get("mains")
+        if isinstance(mains, list) and len(mains) == 6:
+            excluded.add(tuple(sorted(mains)))
+
+    collected: List[Dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line:
+                    continue
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    pos_str, mains_str = line.split(";", 1)
+                    position = int(pos_str)
+                except Exception:
+                    continue
+
+                if position < start_position:
+                    continue
+                if position >= end_position:
+                    break
+
+                try:
+                    mains = [int(x) for x in mains_str.split(",") if x]
+                except Exception:
+                    continue
+
+                if len(mains) != 6:
+                    continue
+
+                key = tuple(sorted(mains))
+                if key in excluded:
+                    continue
+                excluded.add(key)
+                collected.append({"mains": mains})
+    except FileNotFoundError:
+        raise HTTPException(404, detail="Full wheel file not found on disk")
+
+    if len(collected) == 0:
+        raise HTTPException(400, detail="No tickets available in this range (all already in queue or bought)")
+
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    inserted_ids: List[str] = []
+    for i in range(0, len(collected), LA_PRIMITIVA_BUCKET_SIZE):
+        raw_chunk = collected[i : i + LA_PRIMITIVA_BUCKET_SIZE]
+        reintegro_bucket = random.randint(0, 9)
+        chunk = [{"mains": t["mains"], "reintegro": reintegro_bucket} for t in raw_chunk]
+        doc_queue = {
+            "lottery": "la-primitiva",
+            "tickets": chunk,
+            "tickets_count": len(chunk),
+            "draw_date": date_str,
+            "cutoff_draw_id": cutoff,
+            "status": "waiting",
+            "created_at": now,
+        }
+        ins = coll_queue.insert_one(doc_queue)
+        inserted_ids.append(str(ins.inserted_id))
+
+    requested_count = end_position - start_position
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "requested_range": {"start_position": start_position, "end_position": end_position},
+            "requested_tickets_count": requested_count,
+            "collected_tickets_count": len(collected),
+            "queued_items": len(inserted_ids),
+            "queued_tickets_count": len(collected),
+            "message": f"{len(inserted_ids)} colas creadas ({len(collected)} boletos).",
+        },
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
 @app.get("/api/la-primitiva/betting/buy-queue")
-def api_la_primitiva_betting_buy_queue(limit: int = Query(50, ge=1, le=100)):
+def api_la_primitiva_betting_buy_queue(limit: int = Query(50, ge=1, le=5000)):
     if db is None:
         return JSONResponse(content={"items": []}, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
     coll = db[LA_PRIMITIVA_BUY_QUEUE_COLLECTION]

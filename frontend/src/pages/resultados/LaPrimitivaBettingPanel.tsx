@@ -298,11 +298,16 @@ export function LaPrimitivaBettingPanel() {
   const [countInput, setCountInput] = useState<number>(100);
   const [enqueueByCountLoading, setEnqueueByCountLoading] = useState(false);
 
+  const [rangeModalOpen, setRangeModalOpen] = useState(false);
+  const [rangeStart, setRangeStart] = useState<number>(1);
+  const [rangeEnd, setRangeEnd] = useState<number>(2);
+  const [enqueueByRangeLoading, setEnqueueByRangeLoading] = useState(false);
+
   const fetchBuyQueue = useCallback(async () => {
     try {
-      // Backend validates limit <= 100 (see api_la_primitiva_betting_buy_queue),
-      // so we request the max allowed to see as many queued tickets as possible.
-      const res = await fetch(`${API_URL}/api/la-primitiva/betting/buy-queue?limit=100`, { cache: 'no-store' });
+      // Backend validates limit (see api_la_primitiva_betting_buy_queue),
+      // so we request a large value to show all queued items.
+      const res = await fetch(`${API_URL}/api/la-primitiva/betting/buy-queue?limit=5000`, { cache: 'no-store' });
       const data = await res.json();
       setBuyQueue(Array.isArray(data.items) ? data.items : []);
     } catch {
@@ -400,6 +405,62 @@ export function LaPrimitivaBettingPanel() {
     }
   };
 
+  const enqueueByRange = async () => {
+    if (totalTickets <= 0) return;
+
+    if (!Number.isInteger(rangeStart) || !Number.isInteger(rangeEnd)) {
+      setError('start y end deben ser números enteros');
+      return;
+    }
+    if (rangeStart < 1) {
+      setError('start_position debe ser >= 1');
+      return;
+    }
+    if (rangeEnd <= rangeStart) {
+      setError('end_position debe ser > start_position');
+      return;
+    }
+    if (rangeStart > totalTickets) {
+      setError(`start_position debe ser <= total tickets (${totalTickets})`);
+      return;
+    }
+    if (rangeEnd > totalTickets + 1) {
+      setError(`end_position debe ser <= total tickets + 1 (${totalTickets + 1})`);
+      return;
+    }
+
+    setEnqueueByRangeLoading(true);
+    setError('');
+    try {
+      const body: { start_position: number; end_position: number; draw_date?: string; cutoff_draw_id?: string } = {
+        start_position: rangeStart,
+        end_position: rangeEnd,
+      };
+      if (drawDate) body.draw_date = drawDate;
+      else if (cutoffDrawId) body.cutoff_draw_id = cutoffDrawId;
+
+      const res = await fetch(`${API_URL}/api/la-primitiva/betting/enqueue-by-range`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.detail ?? res.statusText ?? 'Error al encolar por rango');
+        return;
+      }
+
+      setRangeModalOpen(false);
+      await fetchBuyQueue();
+      fetchBettingPool(false);
+      setError('');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error al encolar por rango');
+    } finally {
+      setEnqueueByRangeLoading(false);
+    }
+  };
+
   const bucketFull = bucket.length >= BUCKET_MAX;
   const savedMainsKeys = new Set(realPool.map((t) => mainsKey(t)));
   const bucketMainsKeys = new Set(bucket.map(mainsKey));
@@ -465,6 +526,41 @@ export function LaPrimitivaBettingPanel() {
         </p>
       </Modal>
 
+      <Modal
+        title="Comprar por rango"
+        open={rangeModalOpen}
+        onCancel={() => !enqueueByRangeLoading && setRangeModalOpen(false)}
+        onOk={() => enqueueByRange()}
+        okText="Confirmar"
+        cancelText="Cancelar"
+        confirmLoading={enqueueByRangeLoading}
+        destroyOnClose
+      >
+        <p style={{ marginBottom: 8, fontSize: '0.9rem' }}>
+          Se encolarán boletos desde <strong>start_position</strong> hasta <strong>(end_position - 1)</strong>.
+          (end es excluido)
+        </p>
+        <p style={{ marginBottom: 6, color: 'var(--color-text-muted)' }}>start_position</p>
+        <InputNumber
+          min={1}
+          max={Math.max(totalTickets, 1)}
+          value={rangeStart}
+          onChange={(v) => setRangeStart(v ?? 1)}
+          style={{ width: '100%', marginBottom: 10 }}
+        />
+        <p style={{ marginBottom: 6, color: 'var(--color-text-muted)' }}>end_position</p>
+        <InputNumber
+          min={2}
+          max={totalTickets + 1}
+          value={rangeEnd}
+          onChange={(v) => setRangeEnd(v ?? 2)}
+          style={{ width: '100%' }}
+        />
+        <p style={{ marginTop: 12, fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+          Se crearán colas por el total de boletos disponibles en el rango (ya excluye los que están en cola o comprados).
+        </p>
+      </Modal>
+
       {reintegroModalOpen && (
         <div className="el-gordo-betting-reintegro-overlay" role="dialog" aria-modal="true" aria-label="Elegir reintegro">
           <div className="el-gordo-betting-reintegro-modal">
@@ -511,6 +607,15 @@ export function LaPrimitivaBettingPanel() {
                   title="Crear colas por número de boletos (se dividen en colas de 8)"
                 >
                   Comprar por cantidad
+                </button>
+                <button
+                  type="button"
+                  className="el-gordo-betting-random-btn"
+                  onClick={() => setRangeModalOpen(true)}
+                  disabled={totalTickets <= 0}
+                  title="Comprar por rango de positions (start..end-1)"
+                >
+                  Comprar por rango
                 </button>
                 <button
                   type="button"
