@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { InputNumber, Modal, Spin, Tooltip, Pagination } from 'antd';
+
+import { BuyQueueExportModal } from './BuyQueueExportModal';
+import {
+  downloadCsv,
+  exportFilenameBase,
+  flattenElGordoQueue,
+  openModernPrintView,
+} from './buyQueueExport';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
@@ -16,7 +24,7 @@ function shuffleArray<T>(arr: T[]): T[] {
   return a;
 }
 
-type ElGordoTicket = { mains: number[]; clave: number };
+type ElGordoTicket = { mains: number[]; clave: number; position?: number };
 
 function ticketKey(t: ElGordoTicket | null | undefined): string {
   if (t == null) return '';
@@ -283,7 +291,11 @@ export function ElGordoBettingPanel() {
     if (mains.length !== 5 || clave < 0 || clave > 9) return;
     setBucket((prev) => {
       if (prev.some((t) => ticketKey(t) === key)) return prev;
-      return [...prev, { mains: [...mains], clave }];
+      const next: ElGordoTicket = { mains: [...mains], clave };
+      if (typeof ticket.position === 'number' && Number.isFinite(ticket.position) && ticket.position >= 1) {
+        next.position = Math.floor(ticket.position);
+      }
+      return [...prev, next];
     });
   };
 
@@ -300,6 +312,7 @@ export function ElGordoBettingPanel() {
   const [rangeStart, setRangeStart] = useState<number>(1);
   const [rangeEnd, setRangeEnd] = useState<number>(2);
   const [enqueueByRangeLoading, setEnqueueByRangeLoading] = useState(false);
+  const [exportModalOpen, setExportModalOpen] = useState(false);
   const [buyQueue, setBuyQueue] = useState<{ id: string; status: string; tickets_count: number; tickets?: ElGordoTicket[]; created_at?: string; error?: string }[]>([]);
 
   const fetchBuyQueue = useCallback(async () => {
@@ -311,6 +324,58 @@ export function ElGordoBettingPanel() {
       setBuyQueue([]);
     }
   }, []);
+
+  const queueTicketsFlatCount = useMemo(
+    () => buyQueue.reduce((n, q) => n + (Array.isArray(q.tickets) ? q.tickets.length : 0), 0),
+    [buyQueue],
+  );
+
+  const handleExportElGordoCsv = useCallback(() => {
+    const { headers, rows } = flattenElGordoQueue(buyQueue);
+    if (rows.length === 0) {
+      setError('No hay boletos en la cola para exportar.');
+      return;
+    }
+    downloadCsv(`${exportFilenameBase('el-gordo')}.csv`, headers, rows);
+  }, [buyQueue]);
+
+  const handleExportElGordoPdf = useCallback(async (printTab: Window | null) => {
+    const { headers, rows } = flattenElGordoQueue(buyQueue);
+    if (rows.length === 0) {
+      printTab?.close();
+      setError('No hay boletos en la cola para exportar.');
+      return;
+    }
+    setError('');
+    try {
+      const res = await fetch(`${API_URL}/api/el-gordo/betting/save-queue-after-print`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        printTab?.close();
+        setError(typeof data.detail === 'string' ? data.detail : 'No se pudo guardar en boletos comprados.');
+        return;
+      }
+      await fetchBuyQueue();
+      fetchBettingPool(false);
+      requestAnimationFrame(() => {
+        document.getElementById('el-gordo-boletos-guardados')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    } catch (e) {
+      printTab?.close();
+      setError(e instanceof Error ? e.message : 'Error de red al guardar.');
+      return;
+    }
+    const ok = openModernPrintView(
+      {
+        title: 'El Gordo — Cola de compra',
+        subtitle: `Generado: ${new Date().toLocaleString('es-ES')}`,
+        columns: headers,
+        rows,
+      },
+      printTab,
+    );
+    if (!ok) setError('No se pudo abrir la ventana. Permite ventanas emergentes.');
+  }, [buyQueue, fetchBuyQueue, fetchBettingPool]);
 
   const saveBoughtFromQueue = useCallback(async () => {
     try {
@@ -456,7 +521,9 @@ export function ElGordoBettingPanel() {
     const picked = shuffleArray(availableCandidates).slice(0, need).map((t) => {
       const mains = Array.isArray(t.mains) ? t.mains : [];
       const clave = typeof t.clave === 'number' ? t.clave : Number(t.clave) || 0;
-      return { mains: [...mains], clave };
+      const row: ElGordoTicket = { mains: [...mains], clave };
+      if (typeof t.position === 'number' && Number.isFinite(t.position) && t.position >= 1) row.position = Math.floor(t.position);
+      return row;
     });
     setBucket((prev) => [...prev, ...picked]);
   };
@@ -645,7 +712,18 @@ export function ElGordoBettingPanel() {
         <div className="el-gordo-betting-right">
           {buyQueue.length > 0 && (
             <div style={{ marginBottom: 'var(--space-sm)', fontSize: '0.8rem', maxHeight: 220, overflowY: 'auto' }}>
-              <strong>Cola de compra</strong>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                <strong>Cola de compra</strong>
+                <button
+                  type="button"
+                  className="el-gordo-betting-btn-text"
+                  disabled={queueTicketsFlatCount === 0}
+                  onClick={() => setExportModalOpen(true)}
+                  title="Exportar cola (CSV o PDF / imprimir)"
+                >
+                  Exportar cola
+                </button>
+              </div>
               <ul style={{ margin: '4px 0 0', paddingLeft: '1.2rem', listStyle: 'none' }}>
                 {buyQueue.filter((q) => q != null).map((q, idx) => (
                   <li
@@ -743,7 +821,11 @@ export function ElGordoBettingPanel() {
             </div>
           </div>
 
-          <div className="el-gordo-betting-panel-card" style={{ flex: 1, minHeight: 180 }}>
+          <div
+            id="el-gordo-boletos-guardados"
+            className="el-gordo-betting-panel-card"
+            style={{ flex: 1, minHeight: 180 }}
+          >
             <h3>Boletos guardados</h3>
             <p style={{ margin: '0 0 var(--space-sm)', fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
               {realPool.length} boleto{realPool.length !== 1 ? 's' : ''} guardado{realPool.length !== 1 ? 's' : ''}
@@ -762,6 +844,14 @@ export function ElGordoBettingPanel() {
           </div>
         </div>
       </div>
+      <BuyQueueExportModal
+        open={exportModalOpen}
+        onCancel={() => setExportModalOpen(false)}
+        lotteryTitle="El Gordo"
+        disabled={queueTicketsFlatCount === 0}
+        onExportCsv={handleExportElGordoCsv}
+        onExportPdf={handleExportElGordoPdf}
+      />
     </section>
   );
 }

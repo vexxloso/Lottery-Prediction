@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { InputNumber, Modal, Spin, Tooltip, Pagination } from 'antd';
+
+import { BuyQueueExportModal } from './BuyQueueExportModal';
+import {
+  downloadCsv,
+  exportFilenameBase,
+  flattenLaPrimitivaQueue,
+  openModernPrintView,
+} from './buyQueueExport';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
@@ -18,9 +26,9 @@ function shuffleArray<T>(arr: T[]): T[] {
 }
 
 /** Ticket with only mains (for candidate selection and bucket). */
-type LaPrimitivaMains = { mains: number[] };
+type LaPrimitivaMains = { mains: number[]; position?: number };
 /** Full ticket with reintegro (for saved/bought and API). */
-type LaPrimitivaTicket = { mains: number[]; reintegro: number };
+type LaPrimitivaTicket = { mains: number[]; reintegro: number; position?: number };
 
 function mainsKey(t: LaPrimitivaMains): string {
   return (t.mains ?? []).slice().sort((a, b) => a - b).join(',');
@@ -205,10 +213,15 @@ export function LaPrimitivaBettingPanel() {
       }
       const rawBought = Array.isArray(data.bought_tickets) ? data.bought_tickets : [];
       setRealPool(
-        rawBought.map((t: { mains?: unknown; reintegro?: unknown }) => ({
-          mains: Array.isArray(t.mains) ? t.mains.map(Number) : [],
-          reintegro: typeof t.reintegro === 'number' ? t.reintegro : Number(t.reintegro) || 0,
-        }))
+        rawBought.map((t: { mains?: unknown; reintegro?: unknown; position?: unknown }) => {
+          const row: LaPrimitivaTicket = {
+            mains: Array.isArray(t.mains) ? t.mains.map(Number) : [],
+            reintegro: typeof t.reintegro === 'number' ? t.reintegro : Number(t.reintegro) || 0,
+          };
+          const p = t.position;
+          if (typeof p === 'number' && Number.isFinite(p) && p >= 1) row.position = Math.floor(p);
+          return row;
+        }),
       );
     } catch (e) {
       if (showLoading) {
@@ -249,10 +262,15 @@ export function LaPrimitivaBettingPanel() {
       }
       const tickets = Array.isArray(data.tickets) ? data.tickets : [];
       setCandidatePool(
-        tickets.map((t: { mains?: unknown }) => ({
-          mains: Array.isArray(t.mains) ? t.mains.map(Number) : [],
-          reintegro: 0,
-        })),
+        tickets.map((t: { mains?: unknown; position?: unknown }) => {
+          const row: LaPrimitivaTicket = {
+            mains: Array.isArray(t.mains) ? t.mains.map(Number) : [],
+            reintegro: 0,
+          };
+          const p = t.position;
+          if (typeof p === 'number' && Number.isFinite(p) && p >= 1) row.position = Math.floor(p);
+          return row;
+        }),
       );
       setTotalTickets(typeof data.total === 'number' ? data.total : 0);
     } catch (e) {
@@ -283,7 +301,11 @@ export function LaPrimitivaBettingPanel() {
     const key = mainsKey(ticket);
     setBucket((prev) => {
       if (prev.some((t) => mainsKey(t) === key)) return prev; // already in bucket
-      return [...prev, { mains: [...(ticket.mains ?? [])] }];
+      const next: LaPrimitivaMains = { mains: [...(ticket.mains ?? [])] };
+      if (typeof ticket.position === 'number' && Number.isFinite(ticket.position) && ticket.position >= 1) {
+        next.position = Math.floor(ticket.position);
+      }
+      return [...prev, next];
     });
   };
 
@@ -293,7 +315,9 @@ export function LaPrimitivaBettingPanel() {
 
   const [enqueueLoading, setEnqueueLoading] = useState(false);
   const [reintegroModalOpen, setReintegroModalOpen] = useState(false);
-  const [buyQueue, setBuyQueue] = useState<{ id: string; status: string; tickets_count: number; tickets?: { mains?: number[]; reintegro?: number }[]; error?: string }[]>([]);
+  const [buyQueue, setBuyQueue] = useState<
+    { id: string; status: string; tickets_count: number; tickets?: { mains?: number[]; reintegro?: number; position?: number }[]; error?: string }[]
+  >([]);
   const [countModalOpen, setCountModalOpen] = useState(false);
   const [countInput, setCountInput] = useState<number>(100);
   const [enqueueByCountLoading, setEnqueueByCountLoading] = useState(false);
@@ -302,6 +326,7 @@ export function LaPrimitivaBettingPanel() {
   const [rangeStart, setRangeStart] = useState<number>(1);
   const [rangeEnd, setRangeEnd] = useState<number>(2);
   const [enqueueByRangeLoading, setEnqueueByRangeLoading] = useState(false);
+  const [exportModalOpen, setExportModalOpen] = useState(false);
 
   const fetchBuyQueue = useCallback(async () => {
     try {
@@ -314,6 +339,58 @@ export function LaPrimitivaBettingPanel() {
       setBuyQueue([]);
     }
   }, []);
+
+  const queueTicketsFlatCount = useMemo(
+    () => buyQueue.reduce((n, q) => n + (Array.isArray(q.tickets) ? q.tickets.length : 0), 0),
+    [buyQueue],
+  );
+
+  const handleExportLaPrimitivaCsv = useCallback(() => {
+    const { headers, rows } = flattenLaPrimitivaQueue(buyQueue);
+    if (rows.length === 0) {
+      setError('No hay boletos en la cola para exportar.');
+      return;
+    }
+    downloadCsv(`${exportFilenameBase('la-primitiva')}.csv`, headers, rows);
+  }, [buyQueue]);
+
+  const handleExportLaPrimitivaPdf = useCallback(async (printTab: Window | null) => {
+    const { headers, rows } = flattenLaPrimitivaQueue(buyQueue);
+    if (rows.length === 0) {
+      printTab?.close();
+      setError('No hay boletos en la cola para exportar.');
+      return;
+    }
+    setError('');
+    try {
+      const res = await fetch(`${API_URL}/api/la-primitiva/betting/save-queue-after-print`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        printTab?.close();
+        setError(typeof data.detail === 'string' ? data.detail : 'No se pudo guardar en boletos comprados.');
+        return;
+      }
+      await fetchBuyQueue();
+      fetchBettingPool(false);
+      requestAnimationFrame(() => {
+        document.getElementById('la-primitiva-boletos-guardados')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    } catch (e) {
+      printTab?.close();
+      setError(e instanceof Error ? e.message : 'Error de red al guardar.');
+      return;
+    }
+    const ok = openModernPrintView(
+      {
+        title: 'La Primitiva — Cola de compra',
+        subtitle: `Generado: ${new Date().toLocaleString('es-ES')}`,
+        columns: headers,
+        rows,
+      },
+      printTab,
+    );
+    if (!ok) setError('No se pudo abrir la ventana. Permite ventanas emergentes.');
+  }, [buyQueue, fetchBuyQueue, fetchBettingPool]);
 
   const saveBoughtFromQueue = useCallback(async () => {
     try {
@@ -346,8 +423,18 @@ export function LaPrimitivaBettingPanel() {
     setEnqueueLoading(true);
     setError('');
     try {
-      const body: { tickets: { mains: number[]; reintegro: number }[]; draw_date?: string; cutoff_draw_id?: string } = {
-        tickets: bucket.map((m) => ({ mains: m.mains, reintegro })),
+      const body: {
+        tickets: { mains: number[]; reintegro: number; position?: number }[];
+        draw_date?: string;
+        cutoff_draw_id?: string;
+      } = {
+        tickets: bucket.map((m) => {
+          const row: { mains: number[]; reintegro: number; position?: number } = { mains: m.mains, reintegro };
+          if (typeof m.position === 'number' && Number.isFinite(m.position) && m.position >= 1) {
+            row.position = Math.floor(m.position);
+          }
+          return row;
+        }),
       };
       if (drawDate) body.draw_date = drawDate;
       else if (cutoffDrawId) body.cutoff_draw_id = cutoffDrawId;
@@ -474,7 +561,11 @@ export function LaPrimitivaBettingPanel() {
   const addRandomToBucket = () => {
     const need = Math.min(BUCKET_MAX - bucket.length, availableCandidates.length);
     if (need <= 0) return;
-    const picked = shuffleArray(availableCandidates).slice(0, need).map((t) => ({ mains: [...(t.mains ?? [])] }));
+    const picked = shuffleArray(availableCandidates).slice(0, need).map((t) => {
+      const row: LaPrimitivaMains = { mains: [...(t.mains ?? [])] };
+      if (typeof t.position === 'number' && Number.isFinite(t.position) && t.position >= 1) row.position = Math.floor(t.position);
+      return row;
+    });
     setBucket((prev) => [...prev, ...picked]);
   };
   const disabledReason = (t: LaPrimitivaMains): string => {
@@ -686,7 +777,18 @@ export function LaPrimitivaBettingPanel() {
         <div className="el-gordo-betting-right">
           {buyQueue.length > 0 && (
             <div style={{ marginBottom: 'var(--space-sm)', fontSize: '0.8rem', maxHeight: 220, overflowY: 'auto' }}>
-              <strong>Cola de compra</strong>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                <strong>Cola de compra</strong>
+                <button
+                  type="button"
+                  className="el-gordo-betting-btn-text"
+                  disabled={queueTicketsFlatCount === 0}
+                  onClick={() => setExportModalOpen(true)}
+                  title="Exportar cola (CSV o PDF / imprimir)"
+                >
+                  Exportar cola
+                </button>
+              </div>
               <ul style={{ margin: '4px 0 0', paddingLeft: '1.2rem', listStyle: 'none' }}>
                 {buyQueue.filter((q) => q != null).map((q, idx) => (
                   <li key={q?.id ?? `q-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
@@ -788,7 +890,11 @@ export function LaPrimitivaBettingPanel() {
             </div>
           </div>
 
-          <div className="el-gordo-betting-panel-card" style={{ flex: 1, minHeight: 180 }}>
+          <div
+            id="la-primitiva-boletos-guardados"
+            className="el-gordo-betting-panel-card"
+            style={{ flex: 1, minHeight: 180 }}
+          >
             <h3>Boletos guardados</h3>
             <p style={{ margin: '0 0 var(--space-sm)', fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
               {realPool.length} boleto{realPool.length !== 1 ? 's' : ''} guardado{realPool.length !== 1 ? 's' : ''}
@@ -807,6 +913,14 @@ export function LaPrimitivaBettingPanel() {
           </div>
         </div>
       </div>
+      <BuyQueueExportModal
+        open={exportModalOpen}
+        onCancel={() => setExportModalOpen(false)}
+        lotteryTitle="La Primitiva"
+        disabled={queueTicketsFlatCount === 0}
+        onExportCsv={handleExportLaPrimitivaCsv}
+        onExportPdf={handleExportLaPrimitivaPdf}
+      />
     </section>
   );
 }

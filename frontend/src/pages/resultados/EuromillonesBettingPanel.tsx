@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { InputNumber, Modal, Spin, Tooltip, Pagination } from 'antd';
+
+import { BuyQueueExportModal } from './BuyQueueExportModal';
+import {
+  downloadCsv,
+  exportFilenameBase,
+  flattenEuromillonesQueue,
+  openModernPrintView,
+} from './buyQueueExport';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
@@ -16,7 +24,7 @@ function shuffleArray<T>(arr: T[]): T[] {
   return a;
 }
 
-type EuromillonesTicket = { mains: number[]; stars: number[] };
+type EuromillonesTicket = { mains: number[]; stars: number[]; position?: number };
 
 function ticketKey(t: EuromillonesTicket): string {
   // Normalize order so the same ticket can't be treated as different due to array ordering.
@@ -250,7 +258,14 @@ export function EuromillonesBettingPanel() {
     const key = ticketKey(ticket);
     setBucket((prev) => {
       if (prev.some((t) => ticketKey(t) === key)) return prev; // already in bucket
-      return [...prev, { mains: [...(ticket.mains ?? [])], stars: [...(ticket.stars ?? [])] }];
+      const next: EuromillonesTicket = {
+        mains: [...(ticket.mains ?? [])],
+        stars: [...(ticket.stars ?? [])],
+      };
+      if (typeof ticket.position === 'number' && Number.isFinite(ticket.position) && ticket.position >= 1) {
+        next.position = Math.floor(ticket.position);
+      }
+      return [...prev, next];
     });
   };
 
@@ -268,6 +283,7 @@ export function EuromillonesBettingPanel() {
   const [rangeStart, setRangeStart] = useState<number>(1);
   const [rangeEnd, setRangeEnd] = useState<number>(2);
   const [enqueueByRangeLoading, setEnqueueByRangeLoading] = useState(false);
+  const [exportModalOpen, setExportModalOpen] = useState(false);
 
   const fetchBuyQueue = useCallback(async () => {
     try {
@@ -278,6 +294,58 @@ export function EuromillonesBettingPanel() {
       setBuyQueue([]);
     }
   }, []);
+
+  const queueTicketsFlatCount = useMemo(
+    () => buyQueue.reduce((n, q) => n + (Array.isArray(q.tickets) ? q.tickets.length : 0), 0),
+    [buyQueue],
+  );
+
+  const handleExportEuromillonesCsv = useCallback(() => {
+    const { headers, rows } = flattenEuromillonesQueue(buyQueue);
+    if (rows.length === 0) {
+      setError('No hay boletos en la cola para exportar.');
+      return;
+    }
+    downloadCsv(`${exportFilenameBase('euromillones')}.csv`, headers, rows);
+  }, [buyQueue]);
+
+  const handleExportEuromillonesPdf = useCallback(async (printTab: Window | null) => {
+    const { headers, rows } = flattenEuromillonesQueue(buyQueue);
+    if (rows.length === 0) {
+      printTab?.close();
+      setError('No hay boletos en la cola para exportar.');
+      return;
+    }
+    setError('');
+    try {
+      const res = await fetch(`${API_URL}/api/euromillones/betting/save-queue-after-print`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        printTab?.close();
+        setError(typeof data.detail === 'string' ? data.detail : 'No se pudo guardar en boletos comprados.');
+        return;
+      }
+      await fetchBuyQueue();
+      fetchBettingPool(false);
+      requestAnimationFrame(() => {
+        document.getElementById('euromillones-boletos-guardados')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    } catch (e) {
+      printTab?.close();
+      setError(e instanceof Error ? e.message : 'Error de red al guardar.');
+      return;
+    }
+    const ok = openModernPrintView(
+      {
+        title: 'Euromillones — Cola de compra',
+        subtitle: `Generado: ${new Date().toLocaleString('es-ES')}`,
+        columns: headers,
+        rows,
+      },
+      printTab,
+    );
+    if (!ok) setError('No se pudo abrir la ventana. Permite ventanas emergentes.');
+  }, [buyQueue, fetchBuyQueue, fetchBettingPool]);
 
   const saveBoughtFromQueue = useCallback(async () => {
     try {
@@ -421,7 +489,11 @@ export function EuromillonesBettingPanel() {
   const addRandomToBucket = () => {
     const need = Math.min(BUCKET_MAX - bucket.length, availableCandidates.length);
     if (need <= 0) return;
-    const picked = shuffleArray(availableCandidates).slice(0, need).map((t) => ({ mains: [...(t.mains ?? [])], stars: [...(t.stars ?? [])] }));
+    const picked = shuffleArray(availableCandidates).slice(0, need).map((t) => {
+      const row: EuromillonesTicket = { mains: [...(t.mains ?? [])], stars: [...(t.stars ?? [])] };
+      if (typeof t.position === 'number' && Number.isFinite(t.position) && t.position >= 1) row.position = Math.floor(t.position);
+      return row;
+    });
     setBucket((prev) => [...prev, ...picked]);
   };
   const inBucketOrReal = new Set([...bucket.map(ticketKey), ...realPool.map(ticketKey)]);
@@ -607,7 +679,18 @@ export function EuromillonesBettingPanel() {
         <div className="el-gordo-betting-right">
           {buyQueue.length > 0 && (
             <div style={{ marginBottom: 'var(--space-sm)', fontSize: '0.8rem', maxHeight: 220, overflowY: 'auto' }}>
-              <strong>Cola de compra</strong>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                <strong>Cola de compra</strong>
+                <button
+                  type="button"
+                  className="el-gordo-betting-btn-text"
+                  disabled={queueTicketsFlatCount === 0}
+                  onClick={() => setExportModalOpen(true)}
+                  title="Exportar cola (CSV o PDF / imprimir)"
+                >
+                  Exportar cola
+                </button>
+              </div>
               <ul style={{ margin: '4px 0 0', paddingLeft: '1.2rem', listStyle: 'none' }}>
                 {buyQueue.filter((q) => q != null).map((q, idx) => (
                   <li key={q?.id ?? `q-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
@@ -708,7 +791,11 @@ export function EuromillonesBettingPanel() {
             </div>
           </div>
 
-          <div className="el-gordo-betting-panel-card" style={{ flex: 1, minHeight: 180 }}>
+          <div
+            id="euromillones-boletos-guardados"
+            className="el-gordo-betting-panel-card"
+            style={{ flex: 1, minHeight: 180 }}
+          >
             <h3>Boletos guardados</h3>
             <p style={{ margin: '0 0 var(--space-sm)', fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
               {realPool.length} boleto{realPool.length !== 1 ? 's' : ''} guardado{realPool.length !== 1 ? 's' : ''}
@@ -727,6 +814,14 @@ export function EuromillonesBettingPanel() {
           </div>
         </div>
       </div>
+      <BuyQueueExportModal
+        open={exportModalOpen}
+        onCancel={() => setExportModalOpen(false)}
+        lotteryTitle="Euromillones"
+        disabled={queueTicketsFlatCount === 0}
+        onExportCsv={handleExportEuromillonesCsv}
+        onExportPdf={handleExportEuromillonesPdf}
+      />
     </section>
   );
 }
