@@ -86,6 +86,26 @@ def _bought_wheel_line_positions(bought_tickets: Optional[list]) -> set[int]:
     return out
 
 
+def _enqueue_range_exclude_positions_from_body(body: Dict[str, Any]) -> set[int]:
+    """
+    Optional JSON body field exclude_positions: list of 1-based wheel line indices to skip.
+    Sent by the frontend for tickets already in cesta / buy-queue / guardados so range enqueue
+    does not re-add those lines.
+    """
+    raw = body.get("exclude_positions")
+    if not isinstance(raw, list):
+        return set()
+    out: set[int] = set()
+    for x in raw:
+        if isinstance(x, bool):
+            continue
+        if isinstance(x, int) and x >= 1:
+            out.add(x)
+        elif isinstance(x, float) and x >= 1:
+            out.add(int(x))
+    return out
+
+
 def _txt_max_line_index_first_column(path: str) -> int:
     """Largest leading position integer in each TXT line (field before first ';')."""
     m = 0
@@ -3089,11 +3109,12 @@ async def api_el_gordo_betting_enqueue_by_range(request: Request):
     """
     Create buy-queue items by position range from the El Gordo full-wheeling pool TXT file.
 
-    Body: { "start_position": int, "end_position": int, "draw_date"?, "cutoff_draw_id"? }
-      - Range is start-inclusive, end-exclusive: positions start..(end-1).
-      - end must be > start.
-      - end can be total_in_file + 1.
-      - Tickets already in queue (waiting/in_progress) or bought are skipped.
+    Body: { "start_position": int, "end_position": int, "draw_date"?, "cutoff_draw_id"?, "exclude_positions"?: int[] }
+      - Range is inclusive on both ends: positions start_position..end_position.
+      - end must be >= start.
+      - end must be <= total_in_file.
+      - Optional exclude_positions: wheel line indices to skip (cesta/cola/guardados from UI).
+      - Tickets already in queue (waiting/in_progress/bought) or bought are skipped by combo.
     """
     try:
         body = await request.json() or {}
@@ -3106,8 +3127,8 @@ async def api_el_gordo_betting_enqueue_by_range(request: Request):
         raise HTTPException(400, detail="Body must contain 'start_position' and 'end_position' (integers)")
     if start_position < 1:
         raise HTTPException(400, detail="start_position must be >= 1")
-    if end_position <= start_position:
-        raise HTTPException(400, detail="end_position must be > start_position")
+    if end_position < start_position:
+        raise HTTPException(400, detail="end_position must be >= start_position")
 
     draw_date = (body.get("draw_date") or "").strip()[:10] or None
     cutoff_draw_id = (body.get("cutoff_draw_id") or "").strip() or None
@@ -3144,12 +3165,14 @@ async def api_el_gordo_betting_enqueue_by_range(request: Request):
 
     if start_position > total_in_file:
         raise HTTPException(400, detail=f"start_position must be <= total tickets ({total_in_file})")
-    if end_position > total_in_file + 1:
-        raise HTTPException(400, detail=f"end_position must be <= total tickets + 1 ({total_in_file + 1})")
+    if end_position > total_in_file:
+        raise HTTPException(400, detail=f"end_position must be <= total tickets ({total_in_file})")
+
+    exclude_pos = _enqueue_range_exclude_positions_from_body(body)
 
     # Exclusions
     excluded: set[tuple[tuple[int, ...], int]] = set()
-    for d in coll_queue.find({"status": {"$in": ["waiting", "in_progress"]}}, projection={"tickets": 1}):
+    for d in coll_queue.find({"status": {"$in": ["waiting", "in_progress", "bought"]}}, projection={"tickets": 1}):
         d_date = (d.get("draw_date") or "").strip()
         d_cutoff = (d.get("cutoff_draw_id") or "").strip()
         if d_date != date_str and d_cutoff != cutoff:
@@ -3183,8 +3206,10 @@ async def api_el_gordo_betting_enqueue_by_range(request: Request):
 
                 if position < start_position:
                     continue
-                if position >= end_position:
+                if position > end_position:
                     break
+                if position in exclude_pos:
+                    continue
 
                 try:
                     mains = [int(x) for x in mains_str.split(",") if x]
@@ -3222,7 +3247,7 @@ async def api_el_gordo_betting_enqueue_by_range(request: Request):
         ins = coll_queue.insert_one(doc_queue)
         inserted_ids.append(str(ins.inserted_id))
 
-    requested_count = end_position - start_position
+    requested_count = end_position - start_position + 1
     return JSONResponse(
         content={
             "status": "ok",
@@ -6967,11 +6992,12 @@ async def api_euromillones_betting_enqueue_by_range(request: Request):
     """
     Create buy-queue items by position range from the full-wheeling pool file.
 
-    Body: { "start_position": int, "end_position": int, "draw_date"?, "cutoff_draw_id"? }
+    Body: { "start_position": int, "end_position": int, "draw_date"?, "cutoff_draw_id"?, "exclude_positions"?: int[] }
       - Positions are 1-based and read from the TXT file's "position;..." prefix.
-      - Range is start-inclusive, end-exclusive: positions start..(end-1).
-      - Constraints: start >= 1, end > start, end <= total_in_file + 1.
-      - Tickets already in queue (waiting/in_progress) or bought are skipped.
+      - Range is inclusive on both ends: positions start_position..end_position.
+      - Constraints: start >= 1, end >= start, end <= total_in_file.
+      - Optional exclude_positions: wheel line indices to skip (e.g. cesta/cola/guardados from UI).
+      - Tickets already in queue (waiting/in_progress/bought) or bought are skipped by combo.
     """
     try:
         body = await request.json() or {}
@@ -6984,8 +7010,8 @@ async def api_euromillones_betting_enqueue_by_range(request: Request):
         raise HTTPException(400, detail="Body must contain 'start_position' and 'end_position' (integers)")
     if start_position < 1:
         raise HTTPException(400, detail="start_position must be >= 1")
-    if end_position <= start_position:
-        raise HTTPException(400, detail="end_position must be > start_position")
+    if end_position < start_position:
+        raise HTTPException(400, detail="end_position must be >= start_position")
 
     draw_date = (body.get("draw_date") or "").strip()[:10] or None
     cutoff_draw_id = (body.get("cutoff_draw_id") or "").strip() or None
@@ -7020,15 +7046,16 @@ async def api_euromillones_betting_enqueue_by_range(request: Request):
     if not path or total_in_file <= 0:
         raise HTTPException(404, detail="Full wheel file not found or empty for this draw")
 
-    # end is exclusive, so the largest valid end is total_in_file + 1
     if start_position > total_in_file:
         raise HTTPException(400, detail=f"start_position must be <= total tickets ({total_in_file})")
-    if end_position > total_in_file + 1:
-        raise HTTPException(400, detail=f"end_position must be <= total tickets + 1 ({total_in_file + 1})")
+    if end_position > total_in_file:
+        raise HTTPException(400, detail=f"end_position must be <= total tickets ({total_in_file})")
 
-    # Exclusions: avoid queuing duplicates already waiting/in_progress for this same draw/cutoff.
+    exclude_pos = _enqueue_range_exclude_positions_from_body(body)
+
+    # Exclusions: avoid queuing duplicates already in queue (incl. bought rows) for this draw/cutoff.
     excluded: set[tuple[tuple[int, ...], tuple[int, ...]]] = set()
-    for d in coll_queue.find({"status": {"$in": ["waiting", "in_progress"]}}, projection={"tickets": 1}):
+    for d in coll_queue.find({"status": {"$in": ["waiting", "in_progress", "bought"]}}, projection={"tickets": 1}):
         d_date = (d.get("draw_date") or "").strip()
         d_cutoff = (d.get("cutoff_draw_id") or "").strip()
         # Keep only items for the inferred draw_date/cutoff context.
@@ -7063,11 +7090,13 @@ async def api_euromillones_betting_enqueue_by_range(request: Request):
                 except Exception:
                     continue
 
-                # Position range filtering: start-inclusive, end-exclusive
+                # Position range: inclusive start and end
                 if position < start_position:
                     continue
-                if position >= end_position:
+                if position > end_position:
                     break
+                if position in exclude_pos:
+                    continue
 
                 try:
                     mains = [int(x) for x in mains_str.split(",") if x]
@@ -7105,7 +7134,7 @@ async def api_euromillones_betting_enqueue_by_range(request: Request):
         ins = coll_queue.insert_one(doc_queue)
         inserted_ids.append(str(ins.inserted_id))
 
-    requested_count = end_position - start_position
+    requested_count = end_position - start_position + 1
     return JSONResponse(
         content={
             "status": "ok",
@@ -7884,10 +7913,11 @@ async def api_la_primitiva_betting_enqueue_by_range(request: Request):
     """
     Create buy-queue items by position range from the La Primitiva full-wheeling pool TXT file.
 
-    Body: { "start_position": int, "end_position": int, "draw_date"?, "cutoff_draw_id"? }
-      - Range is start-inclusive, end-exclusive: positions start..(end-1).
+    Body: { "start_position": int, "end_position": int, "draw_date"?, "cutoff_draw_id"?, "exclude_positions"?: int[] }
+      - Range is inclusive on both ends: positions start_position..end_position.
       - Each queued ticket gets a random reintegro (0-9).
-      - Tickets already in queue (waiting/in_progress) or bought are skipped.
+      - Optional exclude_positions: wheel line indices to skip (cesta/cola/guardados from UI).
+      - Tickets already in queue (waiting/in_progress/bought) or bought are skipped by combo.
     """
     try:
         body = await request.json() or {}
@@ -7900,8 +7930,8 @@ async def api_la_primitiva_betting_enqueue_by_range(request: Request):
         raise HTTPException(400, detail="Body must contain 'start_position' and 'end_position' (integers)")
     if start_position < 1:
         raise HTTPException(400, detail="start_position must be >= 1")
-    if end_position <= start_position:
-        raise HTTPException(400, detail="end_position must be > start_position")
+    if end_position < start_position:
+        raise HTTPException(400, detail="end_position must be >= start_position")
 
     draw_date = (body.get("draw_date") or "").strip()[:10] or None
     cutoff_draw_id = (body.get("cutoff_draw_id") or "").strip() or None
@@ -7936,15 +7966,16 @@ async def api_la_primitiva_betting_enqueue_by_range(request: Request):
     if not path or total_in_file <= 0:
         raise HTTPException(404, detail="Full wheel file not found or empty for this draw")
 
-    # end is exclusive so the largest valid end is total_in_file + 1
     if start_position > total_in_file:
         raise HTTPException(400, detail=f"start_position must be <= total tickets ({total_in_file})")
-    if end_position > total_in_file + 1:
-        raise HTTPException(400, detail=f"end_position must be <= total tickets + 1 ({total_in_file + 1})")
+    if end_position > total_in_file:
+        raise HTTPException(400, detail=f"end_position must be <= total tickets ({total_in_file})")
+
+    exclude_pos = _enqueue_range_exclude_positions_from_body(body)
 
     # Exclusions (queued + bought) to avoid duplicates.
     excluded: set[tuple[int, ...]] = set()
-    for d in coll_queue.find({"status": {"$in": ["waiting", "in_progress"]}}, projection={"tickets": 1}):
+    for d in coll_queue.find({"status": {"$in": ["waiting", "in_progress", "bought"]}}, projection={"tickets": 1}):
         d_date = (d.get("draw_date") or "").strip()
         d_cutoff = (d.get("cutoff_draw_id") or "").strip()
         if d_date != date_str and d_cutoff != cutoff:
@@ -7976,8 +8007,10 @@ async def api_la_primitiva_betting_enqueue_by_range(request: Request):
 
                 if position < start_position:
                     continue
-                if position >= end_position:
+                if position > end_position:
                     break
+                if position in exclude_pos:
+                    continue
 
                 try:
                     mains = [int(x) for x in mains_str.split(",") if x]
@@ -8016,7 +8049,7 @@ async def api_la_primitiva_betting_enqueue_by_range(request: Request):
         ins = coll_queue.insert_one(doc_queue)
         inserted_ids.append(str(ins.inserted_id))
 
-    requested_count = end_position - start_position
+    requested_count = end_position - start_position + 1
     return JSONResponse(
         content={
             "status": "ok",

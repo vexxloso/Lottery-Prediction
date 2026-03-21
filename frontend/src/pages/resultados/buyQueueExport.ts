@@ -17,6 +17,18 @@ export type ExportTable = {
   rows: string[][];
 };
 
+/** Lottery-style: 1 → 01 (two digits). */
+export function pad2(n: number): string {
+  if (!Number.isFinite(n)) return '00';
+  return String(Math.max(0, Math.floor(n))).padStart(2, '0');
+}
+
+/** Sorted numbers as 01/15/22/48/01 */
+export function formatNumsSlash(nums: number[]): string {
+  const sorted = [...nums].map(Number).filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
+  return sorted.map((x) => pad2(x)).join('/');
+}
+
 function posCell(t: { position?: number }): string {
   if (typeof t.position === 'number' && Number.isFinite(t.position) && t.position >= 1) {
     return String(Math.floor(t.position));
@@ -32,8 +44,10 @@ export function flattenEuromillonesQueue(queue: EuromillonesQueueItem[]): Export
     if (!Array.isArray(ts)) continue;
     for (const t of ts) {
       idx += 1;
-      const m = [...(t.mains ?? [])].map(Number).sort((a, b) => a - b).join(', ');
-      const s = [...(t.stars ?? [])].map(Number).sort((a, b) => a - b).join(', ');
+      const mains = [...(t.mains ?? [])].map(Number);
+      const stars = [...(t.stars ?? [])].map(Number);
+      const m = formatNumsSlash(mains);
+      const s = formatNumsSlash(stars);
       rows.push([String(idx), posCell(t), m, s]);
     }
   }
@@ -51,9 +65,10 @@ export function flattenElGordoQueue(queue: ElGordoQueueItem[]): ExportTable {
     if (!Array.isArray(ts)) continue;
     for (const t of ts) {
       idx += 1;
-      const m = [...(t.mains ?? [])].map(Number).sort((a, b) => a - b).join(', ');
+      const mains = [...(t.mains ?? [])].map(Number);
+      const m = formatNumsSlash(mains);
       const c = typeof t.clave === 'number' ? t.clave : Number(t.clave) || 0;
-      rows.push([String(idx), posCell(t), m, String(c)]);
+      rows.push([String(idx), posCell(t), m, pad2(Number(c))]);
     }
   }
   return {
@@ -70,9 +85,10 @@ export function flattenLaPrimitivaQueue(queue: LaPrimitivaQueueItem[]): ExportTa
     if (!Array.isArray(ts)) continue;
     for (const t of ts) {
       idx += 1;
-      const m = [...(t.mains ?? [])].map(Number).sort((a, b) => a - b).join(', ');
+      const mains = [...(t.mains ?? [])].map(Number);
+      const m = formatNumsSlash(mains);
       const r = typeof t.reintegro === 'number' ? t.reintegro : Number(t.reintegro) || 0;
-      rows.push([String(idx), posCell(t), m, String(r)]);
+      rows.push([String(idx), posCell(t), m, pad2(Number(r))]);
     }
   }
   return {
@@ -81,11 +97,21 @@ export function flattenLaPrimitivaQueue(queue: LaPrimitivaQueueItem[]): ExportTa
   };
 }
 
+/** Build .txt body: title lines + tab-separated table (UTF-8 BOM). */
+export function buildExportTxtLines(title: string, headers: string[], rows: string[][]): string[] {
+  const gen = `Generado: ${new Date().toLocaleString('es-ES')}`;
+  const headRow = headers.join('\t');
+  const dataRows = rows.map((r) => r.join('\t'));
+  return [title, gen, '', headRow, ...dataRows];
+}
+
 /** Windows / browser-safe download name (invalid chars → _). */
-function sanitizeDownloadFilename(name: string): string {
+function sanitizeDownloadFilename(name: string, ext: 'csv' | 'txt'): string {
   const trimmed = name.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/\.+$/, '');
-  const withExt = trimmed.toLowerCase().endsWith('.csv') ? trimmed : `${trimmed || 'cola'}.csv`;
-  return withExt || 'cola-compra.csv';
+  const e = ext.toLowerCase();
+  const lower = trimmed.toLowerCase();
+  const withExt = lower.endsWith(`.${e}`) ? trimmed : `${trimmed || 'cola'}.${e}`;
+  return withExt || `cola-compra.${e}`;
 }
 
 /** European-style CSV (;) with BOM for Excel. */
@@ -98,7 +124,10 @@ export function downloadCsv(filename: string, headers: string[], rows: string[][
   };
   const lines = [headers.map(esc).join(sep), ...rows.map((r) => r.map(esc).join(sep))];
   const blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
-  const downloadName = sanitizeDownloadFilename(filename.endsWith('.csv') ? filename : `${filename}.csv`);
+  const downloadName = sanitizeDownloadFilename(
+    filename.toLowerCase().endsWith('.csv') ? filename : `${filename}.csv`,
+    'csv',
+  );
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -107,6 +136,26 @@ export function downloadCsv(filename: string, headers: string[], rows: string[][
   Object.assign(a.style, { position: 'fixed', left: '-9999px', top: '0' });
   document.body.appendChild(a);
   // Must stay synchronous with the user click; deferring (rAF) can lose the gesture on strict browsers.
+  a.click();
+  window.setTimeout(() => {
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, 4000);
+}
+
+/** Plain UTF-8 text with BOM (Excel / Notepad friendly). */
+export function downloadTxt(filename: string, lines: string[]): void {
+  const blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/plain;charset=utf-8' });
+  const downloadName = sanitizeDownloadFilename(
+    filename.toLowerCase().endsWith('.txt') ? filename : `${filename}.txt`,
+    'txt',
+  );
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = downloadName;
+  Object.assign(a.style, { position: 'fixed', left: '-9999px', top: '0' });
+  document.body.appendChild(a);
   a.click();
   window.setTimeout(() => {
     a.remove();

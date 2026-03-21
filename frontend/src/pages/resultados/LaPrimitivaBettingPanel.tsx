@@ -4,11 +4,18 @@ import { InputNumber, Modal, Spin, Tooltip, Pagination } from 'antd';
 
 import { BuyQueueExportModal } from './BuyQueueExportModal';
 import {
+  buildExportTxtLines,
   downloadCsv,
+  downloadTxt,
   exportFilenameBase,
   flattenLaPrimitivaQueue,
   openModernPrintView,
 } from './buyQueueExport';
+import {
+  collectWheelPositionsFromBettingState,
+  countWheelPositionsInRange,
+  wheelPositionsInRange,
+} from './rangeEnqueueExclude';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
@@ -345,6 +352,16 @@ export function LaPrimitivaBettingPanel() {
     [buyQueue],
   );
 
+  const wheelPositionsOccupied = useMemo(
+    () => collectWheelPositionsFromBettingState(buyQueue, bucket, realPool),
+    [buyQueue, bucket, realPool],
+  );
+
+  const rangeSkippedByOccupiedCount = useMemo(
+    () => countWheelPositionsInRange(wheelPositionsOccupied, rangeStart, rangeEnd),
+    [wheelPositionsOccupied, rangeStart, rangeEnd],
+  );
+
   const handleExportLaPrimitivaCsv = useCallback(() => {
     const { headers, rows } = flattenLaPrimitivaQueue(buyQueue);
     if (rows.length === 0) {
@@ -352,6 +369,18 @@ export function LaPrimitivaBettingPanel() {
       return;
     }
     downloadCsv(`${exportFilenameBase('la-primitiva')}.csv`, headers, rows);
+  }, [buyQueue]);
+
+  const handleExportLaPrimitivaTxt = useCallback(() => {
+    const { headers, rows } = flattenLaPrimitivaQueue(buyQueue);
+    if (rows.length === 0) {
+      setError('No hay boletos en la cola para exportar.');
+      return;
+    }
+    downloadTxt(
+      `${exportFilenameBase('la-primitiva')}.txt`,
+      buildExportTxtLines('La Primitiva — Cola de compra', headers, rows),
+    );
   }, [buyQueue]);
 
   const handleExportLaPrimitivaPdf = useCallback(async (printTab: Window | null) => {
@@ -503,25 +532,32 @@ export function LaPrimitivaBettingPanel() {
       setError('start_position debe ser >= 1');
       return;
     }
-    if (rangeEnd <= rangeStart) {
-      setError('end_position debe ser > start_position');
+    if (rangeEnd < rangeStart) {
+      setError('end_position debe ser >= start_position');
       return;
     }
     if (rangeStart > totalTickets) {
       setError(`start_position debe ser <= total tickets (${totalTickets})`);
       return;
     }
-    if (rangeEnd > totalTickets + 1) {
-      setError(`end_position debe ser <= total tickets + 1 (${totalTickets + 1})`);
+    if (rangeEnd > totalTickets) {
+      setError(`end_position debe ser <= total tickets (${totalTickets})`);
       return;
     }
 
     setEnqueueByRangeLoading(true);
     setError('');
     try {
-      const body: { start_position: number; end_position: number; draw_date?: string; cutoff_draw_id?: string } = {
+      const body: {
+        start_position: number;
+        end_position: number;
+        draw_date?: string;
+        cutoff_draw_id?: string;
+        exclude_positions: number[];
+      } = {
         start_position: rangeStart,
         end_position: rangeEnd,
+        exclude_positions: wheelPositionsInRange(wheelPositionsOccupied, rangeStart, rangeEnd),
       };
       if (drawDate) body.draw_date = drawDate;
       else if (cutoffDrawId) body.cutoff_draw_id = cutoffDrawId;
@@ -628,8 +664,11 @@ export function LaPrimitivaBettingPanel() {
         destroyOnClose
       >
         <p style={{ marginBottom: 8, fontSize: '0.9rem' }}>
-          Se encolarán boletos desde <strong>start_position</strong> hasta <strong>(end_position - 1)</strong>.
-          (end es excluido)
+          Se encolarán boletos desde <strong>start_position</strong> hasta <strong>end_position</strong> (ambos inclusive).
+        </p>
+        <p style={{ marginBottom: 10, fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+          No se incluyen líneas ya en <strong>cesta</strong>, <strong>cola</strong> o <strong>guardados</strong> (por posición del
+          bombo). En este rango hay <strong>{rangeSkippedByOccupiedCount}</strong> posición(es) ocupada(s) que se omiten.
         </p>
         <p style={{ marginBottom: 6, color: 'var(--color-text-muted)' }}>start_position</p>
         <InputNumber
@@ -641,10 +680,10 @@ export function LaPrimitivaBettingPanel() {
         />
         <p style={{ marginBottom: 6, color: 'var(--color-text-muted)' }}>end_position</p>
         <InputNumber
-          min={2}
-          max={totalTickets + 1}
+          min={1}
+          max={Math.max(totalTickets, 1)}
           value={rangeEnd}
-          onChange={(v) => setRangeEnd(v ?? 2)}
+          onChange={(v) => setRangeEnd(v ?? 1)}
           style={{ width: '100%' }}
         />
         <p style={{ marginTop: 12, fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
@@ -704,7 +743,7 @@ export function LaPrimitivaBettingPanel() {
                   className="el-gordo-betting-random-btn"
                   onClick={() => setRangeModalOpen(true)}
                   disabled={totalTickets <= 0}
-                  title="Comprar por rango de positions (start..end-1)"
+                  title="Comprar por rango de posiciones (start y end inclusive)"
                 >
                   Comprar por rango
                 </button>
@@ -919,6 +958,7 @@ export function LaPrimitivaBettingPanel() {
         lotteryTitle="La Primitiva"
         disabled={queueTicketsFlatCount === 0}
         onExportCsv={handleExportLaPrimitivaCsv}
+        onExportTxt={handleExportLaPrimitivaTxt}
         onExportPdf={handleExportLaPrimitivaPdf}
       />
     </section>

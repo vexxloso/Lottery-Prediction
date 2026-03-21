@@ -1,5 +1,5 @@
 import { Modal, Button, Typography, Space } from 'antd';
-import { FileTextOutlined, FilePdfOutlined } from '@ant-design/icons';
+import { FileTextOutlined, FileOutlined, FilePdfOutlined } from '@ant-design/icons';
 
 import { openPrintTabForLater } from './buyQueueExport';
 
@@ -11,6 +11,7 @@ type Props = {
   lotteryTitle: string;
   disabled: boolean;
   onExportCsv: () => void;
+  onExportTxt: () => void;
   /**
    * `printTab` is opened synchronously on click (before any await) so the browser allows it.
    * Pass it to `openModernPrintView(..., printTab)` after saving.
@@ -24,6 +25,7 @@ export function BuyQueueExportModal({
   lotteryTitle,
   disabled,
   onExportCsv,
+  onExportTxt,
   onExportPdf,
 }: Props) {
   return (
@@ -34,7 +36,7 @@ export function BuyQueueExportModal({
       footer={null}
       centered
       destroyOnClose
-      width={420}
+      width={440}
     >
       <Paragraph type="secondary" style={{ marginBottom: 20 }}>
         Elige el formato. <Text strong>PDF / imprimir</Text> guarda antes los boletos de la cola en{' '}
@@ -57,6 +59,18 @@ export function BuyQueueExportModal({
         <Button
           block
           size="large"
+          icon={<FileOutlined />}
+          disabled={disabled}
+          onClick={() => {
+            onExportTxt();
+            window.setTimeout(() => onCancel(), 150);
+          }}
+        >
+          Descargar TXT
+        </Button>
+        <Button
+          block
+          size="large"
           type="primary"
           icon={<FilePdfOutlined />}
           disabled={disabled}
@@ -75,7 +89,8 @@ export function BuyQueueExportModal({
         </Button>
       </Space>
       <Paragraph type="secondary" style={{ marginTop: 20, marginBottom: 0, fontSize: 12 }}>
-        El CSV usa separador <code>;</code> (compatible con Excel en español). El archivo PDF final es del navegador («Guardar como PDF» en el diálogo de impresión).
+        Números con dos cifras y barras (p. ej. <code>01/15/22/48/01</code>). CSV: separador <code>;</code>. TXT: columnas
+        separadas por tabulador.
       </Paragraph>
     </Modal>
   );
