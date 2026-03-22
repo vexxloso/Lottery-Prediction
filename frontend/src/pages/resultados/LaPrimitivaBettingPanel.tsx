@@ -334,6 +334,7 @@ export function LaPrimitivaBettingPanel() {
   const [rangeEnd, setRangeEnd] = useState<number>(2);
   const [enqueueByRangeLoading, setEnqueueByRangeLoading] = useState(false);
   const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [deleteAllWaitingLoading, setDeleteAllWaitingLoading] = useState(false);
 
   const fetchBuyQueue = useCallback(async () => {
     try {
@@ -349,6 +350,11 @@ export function LaPrimitivaBettingPanel() {
 
   const queueTicketsFlatCount = useMemo(
     () => buyQueue.reduce((n, q) => n + (Array.isArray(q.tickets) ? q.tickets.length : 0), 0),
+    [buyQueue],
+  );
+
+  const waitingQueueBatchCount = useMemo(
+    () => buyQueue.filter((q) => q?.status === 'waiting').length,
     [buyQueue],
   );
 
@@ -818,15 +824,43 @@ export function LaPrimitivaBettingPanel() {
             <div style={{ marginBottom: 'var(--space-sm)', fontSize: '0.8rem', maxHeight: 220, overflowY: 'auto' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
                 <strong>Cola de compra</strong>
-                <button
-                  type="button"
-                  className="el-gordo-betting-btn-text"
-                  disabled={queueTicketsFlatCount === 0}
-                  onClick={() => setExportModalOpen(true)}
-                  title="Exportar cola (CSV o PDF / imprimir)"
-                >
-                  Exportar cola
-                </button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    className="el-gordo-betting-btn-text"
+                    disabled={queueTicketsFlatCount === 0}
+                    onClick={() => setExportModalOpen(true)}
+                    title="Exportar cola (CSV o PDF / imprimir)"
+                  >
+                    Exportar cola
+                  </button>
+                  <button
+                    type="button"
+                    className="el-gordo-betting-btn-icon"
+                    disabled={waitingQueueBatchCount === 0 || deleteAllWaitingLoading}
+                    onClick={async () => {
+                      setDeleteAllWaitingLoading(true);
+                      try {
+                        const res = await fetch(`${API_URL}/api/la-primitiva/betting/buy-queue/waiting`, {
+                          method: 'DELETE',
+                        });
+                        if (res.ok) fetchBuyQueue();
+                        else {
+                          const data = await res.json().catch(() => ({}));
+                          setError(data.detail ?? 'Error al vaciar la cola (en espera)');
+                        }
+                      } catch (e) {
+                        setError(e instanceof Error ? e.message : 'Error al vaciar la cola (en espera)');
+                      } finally {
+                        setDeleteAllWaitingLoading(false);
+                      }
+                    }}
+                    aria-label="Quitar todos los que están en cola"
+                    title="Quitar todos los que están «En cola» (no borra comprados, en curso ni errores)"
+                  >
+                    <DeleteIcon />
+                  </button>
+                </div>
               </div>
               <ul style={{ margin: '4px 0 0', paddingLeft: '1.2rem', listStyle: 'none' }}>
                 {buyQueue.filter((q) => q != null).map((q, idx) => (

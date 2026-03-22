@@ -3462,6 +3462,19 @@ async def api_el_gordo_betting_bot_complete(request: Request):
     )
 
 
+@app.delete("/api/el-gordo/betting/buy-queue/waiting")
+def api_el_gordo_betting_buy_queue_delete_all_waiting():
+    """Remove every queue row with status waiting (does not touch in_progress, bought, or failed)."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not connected")
+    coll = db[EL_GORDO_BUY_QUEUE_COLLECTION]
+    result = coll.delete_many({"status": "waiting"})
+    return JSONResponse(
+        content={"status": "ok", "deleted_count": result.deleted_count},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
 @app.delete("/api/el-gordo/betting/buy-queue/{queue_id}")
 def api_el_gordo_betting_buy_queue_delete(queue_id: str):
     """Cancel/remove a queue item. Allowed when status is 'waiting' or 'failed' (not in_progress or bought)."""
@@ -7244,6 +7257,19 @@ def api_euromillones_betting_save_queue_after_print():
     )
 
 
+@app.delete("/api/euromillones/betting/buy-queue/waiting")
+def api_euromillones_betting_buy_queue_delete_all_waiting():
+    """Remove every queue row with status waiting (does not touch in_progress, bought, or failed)."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not connected")
+    coll = db[EUROMILLONES_BUY_QUEUE_COLLECTION]
+    result = coll.delete_many({"status": "waiting"})
+    return JSONResponse(
+        content={"status": "ok", "deleted_count": result.deleted_count},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
 @app.delete("/api/euromillones/betting/buy-queue/{queue_id}")
 def api_euromillones_betting_buy_queue_delete(queue_id: str):
     if db is None:
@@ -8151,6 +8177,19 @@ def api_la_primitiva_betting_save_queue_after_print():
         promoted_count += 1
     return JSONResponse(
         content={"status": "ok", "saved_count": saved_count, "promoted_count": promoted_count},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.delete("/api/la-primitiva/betting/buy-queue/waiting")
+def api_la_primitiva_betting_buy_queue_delete_all_waiting():
+    """Remove every queue row with status waiting (does not touch in_progress, bought, or failed)."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not connected")
+    coll = db[LA_PRIMITIVA_BUY_QUEUE_COLLECTION]
+    result = coll.delete_many({"status": "waiting"})
+    return JSONResponse(
+        content={"status": "ok", "deleted_count": result.deleted_count},
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
 
