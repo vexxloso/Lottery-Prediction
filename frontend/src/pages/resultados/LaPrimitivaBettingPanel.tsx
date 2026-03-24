@@ -323,7 +323,7 @@ export function LaPrimitivaBettingPanel() {
   const [enqueueLoading, setEnqueueLoading] = useState(false);
   const [reintegroModalOpen, setReintegroModalOpen] = useState(false);
   const [buyQueue, setBuyQueue] = useState<
-    { id: string; status: string; tickets_count: number; tickets?: { mains?: number[]; reintegro?: number; position?: number }[]; error?: string }[]
+    { id: string; status: string; tickets_count: number; tickets?: { mains?: number[]; reintegro?: number; position?: number }[]; draw_date?: string; error?: string }[]
   >([]);
   const [countModalOpen, setCountModalOpen] = useState(false);
   const [countInput, setCountInput] = useState<number>(100);
@@ -348,19 +348,35 @@ export function LaPrimitivaBettingPanel() {
     }
   }, []);
 
+  const latestQueueDrawDate = useMemo(() => {
+    const drawDates = buyQueue
+      .map((q) => (q?.draw_date ?? '').trim().slice(0, 10))
+      .filter((d) => d !== '');
+    if (drawDates.length === 0) return '';
+    return drawDates.reduce((max, d) => (d > max ? d : max), drawDates[0]);
+  }, [buyQueue]);
+
+  const visibleBuyQueue = useMemo(
+    () =>
+      latestQueueDrawDate
+        ? buyQueue.filter((q) => (q?.draw_date ?? '').trim().slice(0, 10) === latestQueueDrawDate)
+        : [],
+    [buyQueue, latestQueueDrawDate],
+  );
+
   const queueTicketsFlatCount = useMemo(
-    () => buyQueue.reduce((n, q) => n + (Array.isArray(q.tickets) ? q.tickets.length : 0), 0),
-    [buyQueue],
+    () => visibleBuyQueue.reduce((n, q) => n + (Array.isArray(q.tickets) ? q.tickets.length : 0), 0),
+    [visibleBuyQueue],
   );
 
   const waitingQueueBatchCount = useMemo(
-    () => buyQueue.filter((q) => q?.status === 'waiting').length,
-    [buyQueue],
+    () => visibleBuyQueue.filter((q) => q?.status === 'waiting').length,
+    [visibleBuyQueue],
   );
 
   const wheelPositionsOccupied = useMemo(
-    () => collectWheelPositionsFromBettingState(buyQueue, bucket, realPool),
-    [buyQueue, bucket, realPool],
+    () => collectWheelPositionsFromBettingState(visibleBuyQueue, bucket, realPool),
+    [visibleBuyQueue, bucket, realPool],
   );
 
   const rangeSkippedByOccupiedCount = useMemo(
@@ -369,16 +385,16 @@ export function LaPrimitivaBettingPanel() {
   );
 
   const handleExportLaPrimitivaCsv = useCallback(() => {
-    const { headers, rows } = flattenLaPrimitivaQueue(buyQueue);
+    const { headers, rows } = flattenLaPrimitivaQueue(visibleBuyQueue);
     if (rows.length === 0) {
       setError('No hay boletos en la cola para exportar.');
       return;
     }
     downloadCsv(`${exportFilenameBase('la-primitiva')}.csv`, headers, rows);
-  }, [buyQueue]);
+  }, [visibleBuyQueue]);
 
   const handleExportLaPrimitivaTxt = useCallback(() => {
-    const { headers, rows } = flattenLaPrimitivaQueue(buyQueue);
+    const { headers, rows } = flattenLaPrimitivaQueue(visibleBuyQueue);
     if (rows.length === 0) {
       setError('No hay boletos en la cola para exportar.');
       return;
@@ -387,10 +403,10 @@ export function LaPrimitivaBettingPanel() {
       `${exportFilenameBase('la-primitiva')}.txt`,
       buildExportTxtLines('La Primitiva — Cola de compra', headers, rows),
     );
-  }, [buyQueue]);
+  }, [visibleBuyQueue]);
 
   const handleExportLaPrimitivaPdf = useCallback(async (printTab: Window | null) => {
-    const { headers, rows } = flattenLaPrimitivaQueue(buyQueue);
+    const { headers, rows } = flattenLaPrimitivaQueue(visibleBuyQueue);
     if (rows.length === 0) {
       printTab?.close();
       setError('No hay boletos en la cola para exportar.');
@@ -425,7 +441,7 @@ export function LaPrimitivaBettingPanel() {
       printTab,
     );
     if (!ok) setError('No se pudo abrir la ventana. Permite ventanas emergentes.');
-  }, [buyQueue, fetchBuyQueue, fetchBettingPool]);
+  }, [visibleBuyQueue, fetchBuyQueue, fetchBettingPool]);
 
   const saveBoughtFromQueue = useCallback(async () => {
     try {
@@ -594,7 +610,7 @@ export function LaPrimitivaBettingPanel() {
   const savedMainsKeys = new Set(realPool.map((t) => mainsKey(t)));
   const bucketMainsKeys = new Set(bucket.map(mainsKey));
   const inQueue = new Set<string>();
-  for (const q of buyQueue) {
+  for (const q of visibleBuyQueue) {
     const tickets = q?.tickets;
     if (Array.isArray(tickets)) for (const t of tickets) inQueue.add(mainsKey({ mains: t.mains ?? [] }));
   }
@@ -820,10 +836,13 @@ export function LaPrimitivaBettingPanel() {
         </div>
 
         <div className="el-gordo-betting-right">
-          {buyQueue.length > 0 && (
+          {visibleBuyQueue.length > 0 && (
             <div style={{ marginBottom: 'var(--space-sm)', fontSize: '0.8rem', maxHeight: 220, overflowY: 'auto' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-                <strong>Cola de compra</strong>
+                <strong>
+                  Cola de compra
+                  {latestQueueDrawDate ? ` (${latestQueueDrawDate})` : ''}
+                </strong>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   <button
                     type="button"
@@ -841,7 +860,8 @@ export function LaPrimitivaBettingPanel() {
                     onClick={async () => {
                       setDeleteAllWaitingLoading(true);
                       try {
-                        const res = await fetch(`${API_URL}/api/la-primitiva/betting/buy-queue/waiting`, {
+                        const drawDateQuery = latestQueueDrawDate ? `?draw_date=${encodeURIComponent(latestQueueDrawDate)}` : '';
+                        const res = await fetch(`${API_URL}/api/la-primitiva/betting/buy-queue/waiting${drawDateQuery}`, {
                           method: 'DELETE',
                         });
                         if (res.ok) fetchBuyQueue();
@@ -863,7 +883,7 @@ export function LaPrimitivaBettingPanel() {
                 </div>
               </div>
               <ul style={{ margin: '4px 0 0', paddingLeft: '1.2rem', listStyle: 'none' }}>
-                {buyQueue.filter((q) => q != null).map((q, idx) => (
+                {visibleBuyQueue.filter((q) => q != null).map((q, idx) => (
                   <li key={q?.id ?? `q-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
                     <Tooltip
                       title={

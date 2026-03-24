@@ -321,7 +321,7 @@ export function ElGordoBettingPanel() {
   const [enqueueByRangeLoading, setEnqueueByRangeLoading] = useState(false);
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [deleteAllWaitingLoading, setDeleteAllWaitingLoading] = useState(false);
-  const [buyQueue, setBuyQueue] = useState<{ id: string; status: string; tickets_count: number; tickets?: ElGordoTicket[]; created_at?: string; error?: string }[]>([]);
+  const [buyQueue, setBuyQueue] = useState<{ id: string; status: string; tickets_count: number; tickets?: ElGordoTicket[]; draw_date?: string; created_at?: string; error?: string }[]>([]);
 
   const fetchBuyQueue = useCallback(async () => {
     try {
@@ -333,19 +333,35 @@ export function ElGordoBettingPanel() {
     }
   }, []);
 
+  const latestQueueDrawDate = useMemo(() => {
+    const drawDates = buyQueue
+      .map((q) => (q?.draw_date ?? '').trim().slice(0, 10))
+      .filter((d) => d !== '');
+    if (drawDates.length === 0) return '';
+    return drawDates.reduce((max, d) => (d > max ? d : max), drawDates[0]);
+  }, [buyQueue]);
+
+  const visibleBuyQueue = useMemo(
+    () =>
+      latestQueueDrawDate
+        ? buyQueue.filter((q) => (q?.draw_date ?? '').trim().slice(0, 10) === latestQueueDrawDate)
+        : [],
+    [buyQueue, latestQueueDrawDate],
+  );
+
   const queueTicketsFlatCount = useMemo(
-    () => buyQueue.reduce((n, q) => n + (Array.isArray(q.tickets) ? q.tickets.length : 0), 0),
-    [buyQueue],
+    () => visibleBuyQueue.reduce((n, q) => n + (Array.isArray(q.tickets) ? q.tickets.length : 0), 0),
+    [visibleBuyQueue],
   );
 
   const waitingQueueBatchCount = useMemo(
-    () => buyQueue.filter((q) => q?.status === 'waiting').length,
-    [buyQueue],
+    () => visibleBuyQueue.filter((q) => q?.status === 'waiting').length,
+    [visibleBuyQueue],
   );
 
   const wheelPositionsOccupied = useMemo(
-    () => collectWheelPositionsFromBettingState(buyQueue, bucket, realPool),
-    [buyQueue, bucket, realPool],
+    () => collectWheelPositionsFromBettingState(visibleBuyQueue, bucket, realPool),
+    [visibleBuyQueue, bucket, realPool],
   );
 
   const rangeSkippedByOccupiedCount = useMemo(
@@ -354,16 +370,16 @@ export function ElGordoBettingPanel() {
   );
 
   const handleExportElGordoCsv = useCallback(() => {
-    const { headers, rows } = flattenElGordoQueue(buyQueue);
+    const { headers, rows } = flattenElGordoQueue(visibleBuyQueue);
     if (rows.length === 0) {
       setError('No hay boletos en la cola para exportar.');
       return;
     }
     downloadCsv(`${exportFilenameBase('el-gordo')}.csv`, headers, rows);
-  }, [buyQueue]);
+  }, [visibleBuyQueue]);
 
   const handleExportElGordoTxt = useCallback(() => {
-    const { headers, rows } = flattenElGordoQueue(buyQueue);
+    const { headers, rows } = flattenElGordoQueue(visibleBuyQueue);
     if (rows.length === 0) {
       setError('No hay boletos en la cola para exportar.');
       return;
@@ -372,10 +388,10 @@ export function ElGordoBettingPanel() {
       `${exportFilenameBase('el-gordo')}.txt`,
       buildExportTxtLines('El Gordo — Cola de compra', headers, rows),
     );
-  }, [buyQueue]);
+  }, [visibleBuyQueue]);
 
   const handleExportElGordoPdf = useCallback(async (printTab: Window | null) => {
-    const { headers, rows } = flattenElGordoQueue(buyQueue);
+    const { headers, rows } = flattenElGordoQueue(visibleBuyQueue);
     if (rows.length === 0) {
       printTab?.close();
       setError('No hay boletos en la cola para exportar.');
@@ -410,7 +426,7 @@ export function ElGordoBettingPanel() {
       printTab,
     );
     if (!ok) setError('No se pudo abrir la ventana. Permite ventanas emergentes.');
-  }, [buyQueue, fetchBuyQueue, fetchBettingPool]);
+  }, [visibleBuyQueue, fetchBuyQueue, fetchBettingPool]);
 
   const saveBoughtFromQueue = useCallback(async () => {
     try {
@@ -574,7 +590,7 @@ export function ElGordoBettingPanel() {
     ...realPool.map(ticketKey),
   ]);
   const inQueue = new Set<string>();
-  for (const q of buyQueue) {
+  for (const q of visibleBuyQueue) {
     const tickets = q?.tickets;
     if (Array.isArray(tickets)) for (const t of tickets) inQueue.add(ticketKey(t));
   }
@@ -755,10 +771,13 @@ export function ElGordoBettingPanel() {
 
         {/* Right 8: top = bucket gallery, bottom = real pool */}
         <div className="el-gordo-betting-right">
-          {buyQueue.length > 0 && (
+          {visibleBuyQueue.length > 0 && (
             <div style={{ marginBottom: 'var(--space-sm)', fontSize: '0.8rem', maxHeight: 220, overflowY: 'auto' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-                <strong>Cola de compra</strong>
+                <strong>
+                  Cola de compra
+                  {latestQueueDrawDate ? ` (${latestQueueDrawDate})` : ''}
+                </strong>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   <button
                     type="button"
@@ -776,7 +795,8 @@ export function ElGordoBettingPanel() {
                     onClick={async () => {
                       setDeleteAllWaitingLoading(true);
                       try {
-                        const res = await fetch(`${API_URL}/api/el-gordo/betting/buy-queue/waiting`, {
+                        const drawDateQuery = latestQueueDrawDate ? `?draw_date=${encodeURIComponent(latestQueueDrawDate)}` : '';
+                        const res = await fetch(`${API_URL}/api/el-gordo/betting/buy-queue/waiting${drawDateQuery}`, {
                           method: 'DELETE',
                         });
                         if (res.ok) fetchBuyQueue();
@@ -798,7 +818,7 @@ export function ElGordoBettingPanel() {
                 </div>
               </div>
               <ul style={{ margin: '4px 0 0', paddingLeft: '1.2rem', listStyle: 'none' }}>
-                {buyQueue.filter((q) => q != null).map((q, idx) => (
+                {visibleBuyQueue.filter((q) => q != null).map((q, idx) => (
                   <li
                     key={q?.id ?? `q-${idx}`}
                     style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}

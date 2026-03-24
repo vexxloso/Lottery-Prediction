@@ -281,7 +281,7 @@ export function EuromillonesBettingPanel() {
   };
 
   const [enqueueLoading, setEnqueueLoading] = useState(false);
-  const [buyQueue, setBuyQueue] = useState<{ id: string; status: string; tickets_count: number; tickets?: EuromillonesTicket[]; error?: string }[]>([]);
+  const [buyQueue, setBuyQueue] = useState<{ id: string; status: string; tickets_count: number; tickets?: EuromillonesTicket[]; draw_date?: string; error?: string }[]>([]);
   const [countModalOpen, setCountModalOpen] = useState(false);
   const [countInput, setCountInput] = useState<number>(100);
   const [enqueueByCountLoading, setEnqueueByCountLoading] = useState(false);
@@ -303,19 +303,35 @@ export function EuromillonesBettingPanel() {
     }
   }, []);
 
+  const latestQueueDrawDate = useMemo(() => {
+    const drawDates = buyQueue
+      .map((q) => (q?.draw_date ?? '').trim().slice(0, 10))
+      .filter((d) => d !== '');
+    if (drawDates.length === 0) return '';
+    return drawDates.reduce((max, d) => (d > max ? d : max), drawDates[0]);
+  }, [buyQueue]);
+
+  const visibleBuyQueue = useMemo(
+    () =>
+      latestQueueDrawDate
+        ? buyQueue.filter((q) => (q?.draw_date ?? '').trim().slice(0, 10) === latestQueueDrawDate)
+        : [],
+    [buyQueue, latestQueueDrawDate],
+  );
+
   const queueTicketsFlatCount = useMemo(
-    () => buyQueue.reduce((n, q) => n + (Array.isArray(q.tickets) ? q.tickets.length : 0), 0),
-    [buyQueue],
+    () => visibleBuyQueue.reduce((n, q) => n + (Array.isArray(q.tickets) ? q.tickets.length : 0), 0),
+    [visibleBuyQueue],
   );
 
   const waitingQueueBatchCount = useMemo(
-    () => buyQueue.filter((q) => q?.status === 'waiting').length,
-    [buyQueue],
+    () => visibleBuyQueue.filter((q) => q?.status === 'waiting').length,
+    [visibleBuyQueue],
   );
 
   const wheelPositionsOccupied = useMemo(
-    () => collectWheelPositionsFromBettingState(buyQueue, bucket, realPool),
-    [buyQueue, bucket, realPool],
+    () => collectWheelPositionsFromBettingState(visibleBuyQueue, bucket, realPool),
+    [visibleBuyQueue, bucket, realPool],
   );
 
   const rangeSkippedByOccupiedCount = useMemo(
@@ -324,16 +340,16 @@ export function EuromillonesBettingPanel() {
   );
 
   const handleExportEuromillonesCsv = useCallback(() => {
-    const { headers, rows } = flattenEuromillonesQueue(buyQueue);
+    const { headers, rows } = flattenEuromillonesQueue(visibleBuyQueue);
     if (rows.length === 0) {
       setError('No hay boletos en la cola para exportar.');
       return;
     }
     downloadCsv(`${exportFilenameBase('euromillones')}.csv`, headers, rows);
-  }, [buyQueue]);
+  }, [visibleBuyQueue]);
 
   const handleExportEuromillonesTxt = useCallback(() => {
-    const { headers, rows } = flattenEuromillonesQueue(buyQueue);
+    const { headers, rows } = flattenEuromillonesQueue(visibleBuyQueue);
     if (rows.length === 0) {
       setError('No hay boletos en la cola para exportar.');
       return;
@@ -342,10 +358,10 @@ export function EuromillonesBettingPanel() {
       `${exportFilenameBase('euromillones')}.txt`,
       buildExportTxtLines('Euromillones — Cola de compra', headers, rows),
     );
-  }, [buyQueue]);
+  }, [visibleBuyQueue]);
 
   const handleExportEuromillonesPdf = useCallback(async (printTab: Window | null) => {
-    const { headers, rows } = flattenEuromillonesQueue(buyQueue);
+    const { headers, rows } = flattenEuromillonesQueue(visibleBuyQueue);
     if (rows.length === 0) {
       printTab?.close();
       setError('No hay boletos en la cola para exportar.');
@@ -380,7 +396,7 @@ export function EuromillonesBettingPanel() {
       printTab,
     );
     if (!ok) setError('No se pudo abrir la ventana. Permite ventanas emergentes.');
-  }, [buyQueue, fetchBuyQueue, fetchBettingPool]);
+  }, [visibleBuyQueue, fetchBuyQueue, fetchBettingPool]);
 
   const saveBoughtFromQueue = useCallback(async () => {
     try {
@@ -540,7 +556,7 @@ export function EuromillonesBettingPanel() {
   };
   const inBucketOrReal = new Set([...bucket.map(ticketKey), ...realPool.map(ticketKey)]);
   const inQueue = new Set<string>();
-  for (const q of buyQueue) {
+  for (const q of visibleBuyQueue) {
     const tickets = q?.tickets;
     if (Array.isArray(tickets)) for (const t of tickets) inQueue.add(ticketKey(t));
   }
@@ -722,10 +738,13 @@ export function EuromillonesBettingPanel() {
         </div>
 
         <div className="el-gordo-betting-right">
-          {buyQueue.length > 0 && (
+          {visibleBuyQueue.length > 0 && (
             <div style={{ marginBottom: 'var(--space-sm)', fontSize: '0.8rem', maxHeight: 220, overflowY: 'auto' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-                <strong>Cola de compra</strong>
+                <strong>
+                  Cola de compra
+                  {latestQueueDrawDate ? ` (${latestQueueDrawDate})` : ''}
+                </strong>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   <button
                     type="button"
@@ -743,7 +762,8 @@ export function EuromillonesBettingPanel() {
                     onClick={async () => {
                       setDeleteAllWaitingLoading(true);
                       try {
-                        const res = await fetch(`${API_URL}/api/euromillones/betting/buy-queue/waiting`, {
+                        const drawDateQuery = latestQueueDrawDate ? `?draw_date=${encodeURIComponent(latestQueueDrawDate)}` : '';
+                        const res = await fetch(`${API_URL}/api/euromillones/betting/buy-queue/waiting${drawDateQuery}`, {
                           method: 'DELETE',
                         });
                         if (res.ok) fetchBuyQueue();
@@ -765,7 +785,7 @@ export function EuromillonesBettingPanel() {
                 </div>
               </div>
               <ul style={{ margin: '4px 0 0', paddingLeft: '1.2rem', listStyle: 'none' }}>
-                {buyQueue.filter((q) => q != null).map((q, idx) => (
+                {visibleBuyQueue.filter((q) => q != null).map((q, idx) => (
                   <li key={q?.id ?? `q-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
                     <Tooltip
                       title={
