@@ -23,10 +23,10 @@ export function pad2(n: number): string {
   return String(Math.max(0, Math.floor(n))).padStart(2, '0');
 }
 
-/** Sorted numbers as 01/15/22/48/01 */
+/** Sorted numbers as 01,15,22,48,01 */
 export function formatNumsSlash(nums: number[]): string {
   const sorted = [...nums].map(Number).filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
-  return sorted.map((x) => pad2(x)).join('/');
+  return sorted.map((x) => pad2(x)).join(',');
 }
 
 function posCell(t: { position?: number }): string {
