@@ -60,6 +60,15 @@ function DeleteIcon() {
   );
 }
 
+function RepairIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+      <polyline points="21 3 21 9 15 9" />
+    </svg>
+  );
+}
+
 function ShuffleIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -335,6 +344,7 @@ export function LaPrimitivaBettingPanel() {
   const [enqueueByRangeLoading, setEnqueueByRangeLoading] = useState(false);
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [deleteAllWaitingLoading, setDeleteAllWaitingLoading] = useState(false);
+  const [queueLastDrawDate, setQueueLastDrawDate] = useState('');
 
   const fetchBuyQueue = useCallback(async () => {
     try {
@@ -343,26 +353,14 @@ export function LaPrimitivaBettingPanel() {
       const res = await fetch(`${API_URL}/api/la-primitiva/betting/buy-queue?limit=5000`, { cache: 'no-store' });
       const data = await res.json();
       setBuyQueue(Array.isArray(data.items) ? data.items : []);
+      setQueueLastDrawDate(typeof data.last_draw_date === 'string' ? data.last_draw_date.slice(0, 10) : '');
     } catch {
       setBuyQueue([]);
+      setQueueLastDrawDate('');
     }
   }, []);
 
-  const latestQueueDrawDate = useMemo(() => {
-    const drawDates = buyQueue
-      .map((q) => (q?.draw_date ?? '').trim().slice(0, 10))
-      .filter((d) => d !== '');
-    if (drawDates.length === 0) return '';
-    return drawDates.reduce((max, d) => (d > max ? d : max), drawDates[0]);
-  }, [buyQueue]);
-
-  const visibleBuyQueue = useMemo(
-    () =>
-      latestQueueDrawDate
-        ? buyQueue.filter((q) => (q?.draw_date ?? '').trim().slice(0, 10) === latestQueueDrawDate)
-        : [],
-    [buyQueue, latestQueueDrawDate],
-  );
+  const visibleBuyQueue = buyQueue;
 
   const queueTicketsFlatCount = useMemo(
     () => visibleBuyQueue.reduce((n, q) => n + (Array.isArray(q.tickets) ? q.tickets.length : 0), 0),
@@ -384,17 +382,24 @@ export function LaPrimitivaBettingPanel() {
     [wheelPositionsOccupied, rangeStart, rangeEnd],
   );
 
-  const handleExportLaPrimitivaCsv = useCallback(() => {
-    const { headers, rows } = flattenLaPrimitivaQueue(visibleBuyQueue);
+  const queueSliceByTicketCount = useCallback((selection: { queueCount: number }) => {
+    const qCount = Math.max(0, Math.floor(selection.queueCount));
+    return visibleBuyQueue.slice(0, qCount);
+  }, [visibleBuyQueue]);
+
+  const handleExportLaPrimitivaCsv = useCallback((selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
+    const queueSlice = queueSliceByTicketCount(selection);
+    const { headers, rows } = flattenLaPrimitivaQueue(queueSlice);
     if (rows.length === 0) {
       setError('No hay boletos en la cola para exportar.');
       return;
     }
     downloadCsv(`${exportFilenameBase('la-primitiva')}.csv`, headers, rows);
-  }, [visibleBuyQueue]);
+  }, [queueSliceByTicketCount]);
 
-  const handleExportLaPrimitivaTxt = useCallback(() => {
-    const { headers, rows } = flattenLaPrimitivaQueue(visibleBuyQueue);
+  const handleExportLaPrimitivaTxt = useCallback((selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
+    const queueSlice = queueSliceByTicketCount(selection);
+    const { headers, rows } = flattenLaPrimitivaQueue(queueSlice);
     if (rows.length === 0) {
       setError('No hay boletos en la cola para exportar.');
       return;
@@ -403,10 +408,11 @@ export function LaPrimitivaBettingPanel() {
       `${exportFilenameBase('la-primitiva')}.txt`,
       buildExportTxtLines('La Primitiva — Cola de compra', headers, rows),
     );
-  }, [visibleBuyQueue]);
+  }, [queueSliceByTicketCount]);
 
-  const handleExportLaPrimitivaPdf = useCallback(async (printTab: Window | null) => {
-    const { headers, rows } = flattenLaPrimitivaQueue(visibleBuyQueue);
+  const handleExportLaPrimitivaPdf = useCallback(async (printTab: Window | null, selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
+    const queueSlice = queueSliceByTicketCount(selection);
+    const { headers, rows } = flattenLaPrimitivaQueue(queueSlice);
     if (rows.length === 0) {
       printTab?.close();
       setError('No hay boletos en la cola para exportar.');
@@ -414,7 +420,12 @@ export function LaPrimitivaBettingPanel() {
     }
     setError('');
     try {
-      const res = await fetch(`${API_URL}/api/la-primitiva/betting/save-queue-after-print`, { method: 'POST' });
+      const queueIds = queueSlice.map((q) => q?.id).filter((id): id is string => typeof id === 'string' && id !== '');
+      const res = await fetch(`${API_URL}/api/la-primitiva/betting/save-queue-after-print`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ queue_ids: queueIds }),
+      });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         printTab?.close();
@@ -441,7 +452,7 @@ export function LaPrimitivaBettingPanel() {
       printTab,
     );
     if (!ok) setError('No se pudo abrir la ventana. Permite ventanas emergentes.');
-  }, [visibleBuyQueue, fetchBuyQueue, fetchBettingPool]);
+  }, [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool]);
 
   const saveBoughtFromQueue = useCallback(async () => {
     try {
@@ -841,7 +852,7 @@ export function LaPrimitivaBettingPanel() {
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
                 <strong>
                   Cola de compra
-                  {latestQueueDrawDate ? ` (${latestQueueDrawDate})` : ''}
+                  {queueLastDrawDate ? ` (${queueLastDrawDate})` : ''}
                 </strong>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   <button
@@ -860,7 +871,7 @@ export function LaPrimitivaBettingPanel() {
                     onClick={async () => {
                       setDeleteAllWaitingLoading(true);
                       try {
-                        const drawDateQuery = latestQueueDrawDate ? `?draw_date=${encodeURIComponent(latestQueueDrawDate)}` : '';
+                        const drawDateQuery = queueLastDrawDate ? `?draw_date=${encodeURIComponent(queueLastDrawDate)}` : '';
                         const res = await fetch(`${API_URL}/api/la-primitiva/betting/buy-queue/waiting${drawDateQuery}`, {
                           method: 'DELETE',
                         });
@@ -906,12 +917,33 @@ export function LaPrimitivaBettingPanel() {
                         <span style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }} aria-hidden>
                           <QueueStatusIcon status={q?.status ?? ''} />
                         </span>
-                        <span style={{ flex: 1, minWidth: 0 }}>
+                        <span style={{ flex: 1, minWidth: 0, color: q?.status === 'failed' ? 'var(--color-error)' : undefined }}>
                           {q?.tickets_count ?? 0} boleto{(q?.tickets_count ?? 0) !== 1 ? 's' : ''} — {q?.status === 'waiting' ? 'En cola' : q?.status === 'in_progress' ? 'Comprando…' : q?.status === 'bought' ? 'Comprado' : 'Error'}
-                          {q?.error != null && q.error !== '' ? `: ${q.error}` : ''}
                         </span>
                       </span>
                     </Tooltip>
+                    {(q?.status === 'in_progress' || q?.status === 'failed') && q?.id ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            const res = await fetch(`${API_URL}/api/la-primitiva/betting/buy-queue/${encodeURIComponent(q.id)}/repair`, { method: 'POST' });
+                            if (res.ok) fetchBuyQueue();
+                            else {
+                              const data = await res.json().catch(() => ({}));
+                              setError(data.detail ?? 'Error al reparar');
+                            }
+                          } catch (e) {
+                            setError(e instanceof Error ? e.message : 'Error al reparar');
+                          }
+                        }}
+                        aria-label="Reparar cola"
+                        title="Reparar: volver a En cola para reintentar"
+                        style={{ padding: 2, border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--color-text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                      >
+                        <RepairIcon />
+                      </button>
+                    ) : null}
                     {(q?.status === 'waiting' || q?.status === 'failed') && q?.id ? (
                       <button
                         type="button"
@@ -1011,6 +1043,7 @@ export function LaPrimitivaBettingPanel() {
         onCancel={() => setExportModalOpen(false)}
         lotteryTitle="La Primitiva"
         disabled={queueTicketsFlatCount === 0}
+        queueTicketCounts={visibleBuyQueue.map((q) => (Array.isArray(q?.tickets) ? q.tickets.length : (q?.tickets_count ?? 0)))}
         onExportCsv={handleExportLaPrimitivaCsv}
         onExportTxt={handleExportLaPrimitivaTxt}
         onExportPdf={handleExportLaPrimitivaPdf}
