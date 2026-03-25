@@ -1819,6 +1819,15 @@
   min-height: 120px;
 }
 
+/* Keep "Boletos guardados" from expanding the whole page.
+   The gallery itself already has `overflow-y: auto`, so we only need a height cap. */
+#euromillones-boletos-guardados,
+#el-gordo-boletos-guardados,
+#la-primitiva-boletos-guardados {
+  max-height: 120vh;
+  min-height: 180px; /* ensures cards have space even on small pools */
+}
+
 .el-gordo-betting-bucket-header {
   display: flex;
   align-items: center;
