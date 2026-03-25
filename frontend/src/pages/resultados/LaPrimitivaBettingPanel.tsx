@@ -345,6 +345,7 @@ export function LaPrimitivaBettingPanel() {
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [deleteAllWaitingLoading, setDeleteAllWaitingLoading] = useState(false);
   const [queueLastDrawDate, setQueueLastDrawDate] = useState('');
+  const [queueNextDrawDate, setQueueNextDrawDate] = useState('');
 
   const fetchBuyQueue = useCallback(async () => {
     try {
@@ -354,9 +355,11 @@ export function LaPrimitivaBettingPanel() {
       const data = await res.json();
       setBuyQueue(Array.isArray(data.items) ? data.items : []);
       setQueueLastDrawDate(typeof data.last_draw_date === 'string' ? data.last_draw_date.slice(0, 10) : '');
+      setQueueNextDrawDate(typeof data.next_draw_date === 'string' ? data.next_draw_date.slice(0, 10) : '');
     } catch {
       setBuyQueue([]);
       setQueueLastDrawDate('');
+      setQueueNextDrawDate('');
     }
   }, []);
 
@@ -420,9 +423,10 @@ export function LaPrimitivaBettingPanel() {
         setError('No hay boletos en la cola para exportar.');
         return;
       }
-      downloadCsv(`${exportFilenameBase('la-primitiva')}.csv`, headers, rows);
+      const drawSuffix = queueNextDrawDate || queueLastDrawDate ? `-${queueNextDrawDate || queueLastDrawDate}` : '';
+      downloadCsv(`${exportFilenameBase('la-primitiva')}${drawSuffix}.csv`, headers, rows);
     },
-    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool],
+    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueNextDrawDate],
   );
 
   const handleExportLaPrimitivaTxt = useCallback(
@@ -458,12 +462,13 @@ export function LaPrimitivaBettingPanel() {
         setError('No hay boletos en la cola para exportar.');
         return;
       }
+      const drawSuffix = queueNextDrawDate || queueLastDrawDate ? `-${queueNextDrawDate || queueLastDrawDate}` : '';
       downloadTxt(
-        `${exportFilenameBase('la-primitiva')}.txt`,
+        `${exportFilenameBase('la-primitiva')}${drawSuffix}.txt`,
         buildExportTxtLines('La Primitiva — Cola de compra', headers, rows),
       );
     },
-    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool],
+    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueNextDrawDate],
   );
 
   const handleExportLaPrimitivaPdf = useCallback(async (printTab: Window | null, selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
@@ -500,7 +505,7 @@ export function LaPrimitivaBettingPanel() {
     }
     const ok = openModernPrintView(
       {
-        title: 'La Primitiva — Cola de compra',
+        title: `La Primitiva — Cola de compra${queueNextDrawDate ? ` (${queueNextDrawDate})` : queueLastDrawDate ? ` (${queueLastDrawDate})` : ''}`,
         subtitle: `Generado: ${new Date().toLocaleString('es-ES')}`,
         columns: headers,
         rows,
@@ -508,7 +513,7 @@ export function LaPrimitivaBettingPanel() {
       printTab,
     );
     if (!ok) setError('No se pudo abrir la ventana. Permite ventanas emergentes.');
-  }, [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool]);
+  }, [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueNextDrawDate]);
 
   const saveBoughtFromQueue = useCallback(async () => {
     try {
@@ -908,7 +913,7 @@ export function LaPrimitivaBettingPanel() {
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
                 <strong>
                   Cola de compra
-                  {queueLastDrawDate ? ` (${queueLastDrawDate})` : ''}
+                  {queueNextDrawDate ? ` (${queueNextDrawDate})` : queueLastDrawDate ? ` (${queueLastDrawDate})` : ''}
                 </strong>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   <button

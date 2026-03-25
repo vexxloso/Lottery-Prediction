@@ -302,6 +302,7 @@ export function EuromillonesBettingPanel() {
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [deleteAllWaitingLoading, setDeleteAllWaitingLoading] = useState(false);
   const [queueLastDrawDate, setQueueLastDrawDate] = useState('');
+  const [queueNextDrawDate, setQueueNextDrawDate] = useState('');
 
   const fetchBuyQueue = useCallback(async () => {
     try {
@@ -309,9 +310,11 @@ export function EuromillonesBettingPanel() {
       const data = await res.json();
       setBuyQueue(Array.isArray(data.items) ? data.items : []);
       setQueueLastDrawDate(typeof data.last_draw_date === 'string' ? data.last_draw_date.slice(0, 10) : '');
+      setQueueNextDrawDate(typeof data.next_draw_date === 'string' ? data.next_draw_date.slice(0, 10) : '');
     } catch {
       setBuyQueue([]);
       setQueueLastDrawDate('');
+      setQueueNextDrawDate('');
     }
   }, []);
 
@@ -375,9 +378,10 @@ export function EuromillonesBettingPanel() {
         setError('No hay boletos en la cola para exportar.');
         return;
       }
-      downloadCsv(`${exportFilenameBase('euromillones')}.csv`, headers, rows);
+      const drawSuffix = queueNextDrawDate || queueLastDrawDate ? `-${queueNextDrawDate || queueLastDrawDate}` : '';
+      downloadCsv(`${exportFilenameBase('euromillones')}${drawSuffix}.csv`, headers, rows);
     },
-    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool],
+    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueNextDrawDate],
   );
 
   const handleExportEuromillonesTxt = useCallback(
@@ -413,12 +417,13 @@ export function EuromillonesBettingPanel() {
         setError('No hay boletos en la cola para exportar.');
         return;
       }
+      const drawSuffix = queueNextDrawDate || queueLastDrawDate ? `-${queueNextDrawDate || queueLastDrawDate}` : '';
       downloadTxt(
-        `${exportFilenameBase('euromillones')}.txt`,
+        `${exportFilenameBase('euromillones')}${drawSuffix}.txt`,
         buildExportTxtLines('Euromillones — Cola de compra', headers, rows),
       );
     },
-    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool],
+    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueNextDrawDate],
   );
 
   const handleExportEuromillonesPdf = useCallback(async (printTab: Window | null, selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
@@ -455,7 +460,7 @@ export function EuromillonesBettingPanel() {
     }
     const ok = openModernPrintView(
       {
-        title: 'Euromillones — Cola de compra',
+        title: `Euromillones — Cola de compra${queueNextDrawDate ? ` (${queueNextDrawDate})` : queueLastDrawDate ? ` (${queueLastDrawDate})` : ''}`,
         subtitle: `Generado: ${new Date().toLocaleString('es-ES')}`,
         columns: headers,
         rows,
@@ -463,7 +468,7 @@ export function EuromillonesBettingPanel() {
       printTab,
     );
     if (!ok) setError('No se pudo abrir la ventana. Permite ventanas emergentes.');
-  }, [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool]);
+  }, [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueNextDrawDate]);
 
   const saveBoughtFromQueue = useCallback(async () => {
     try {
@@ -810,7 +815,7 @@ export function EuromillonesBettingPanel() {
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
                 <strong>
                   Cola de compra
-                  {queueLastDrawDate ? ` (${queueLastDrawDate})` : ''}
+                  {queueNextDrawDate ? ` (${queueNextDrawDate})` : queueLastDrawDate ? ` (${queueLastDrawDate})` : ''}
                 </strong>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   <button

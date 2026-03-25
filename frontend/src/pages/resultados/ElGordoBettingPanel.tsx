@@ -331,6 +331,7 @@ export function ElGordoBettingPanel() {
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [deleteAllWaitingLoading, setDeleteAllWaitingLoading] = useState(false);
   const [queueLastDrawDate, setQueueLastDrawDate] = useState('');
+  const [queueNextDrawDate, setQueueNextDrawDate] = useState('');
   const [buyQueue, setBuyQueue] = useState<{ id: string; status: string; tickets_count: number; tickets?: ElGordoTicket[]; draw_date?: string; created_at?: string; error?: string }[]>([]);
 
   const fetchBuyQueue = useCallback(async () => {
@@ -339,9 +340,11 @@ export function ElGordoBettingPanel() {
       const data = await res.json();
       setBuyQueue(Array.isArray(data.items) ? data.items : []);
       setQueueLastDrawDate(typeof data.last_draw_date === 'string' ? data.last_draw_date.slice(0, 10) : '');
+      setQueueNextDrawDate(typeof data.next_draw_date === 'string' ? data.next_draw_date.slice(0, 10) : '');
     } catch {
       setBuyQueue([]);
       setQueueLastDrawDate('');
+      setQueueNextDrawDate('');
     }
   }, []);
 
@@ -405,9 +408,10 @@ export function ElGordoBettingPanel() {
         setError('No hay boletos en la cola para exportar.');
         return;
       }
-      downloadCsv(`${exportFilenameBase('el-gordo')}.csv`, headers, rows);
+      const drawSuffix = queueNextDrawDate || queueLastDrawDate ? `-${queueNextDrawDate || queueLastDrawDate}` : '';
+      downloadCsv(`${exportFilenameBase('el-gordo')}${drawSuffix}.csv`, headers, rows);
     },
-    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool],
+    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueNextDrawDate],
   );
 
   const handleExportElGordoTxt = useCallback(
@@ -443,12 +447,13 @@ export function ElGordoBettingPanel() {
         setError('No hay boletos en la cola para exportar.');
         return;
       }
+      const drawSuffix = queueNextDrawDate || queueLastDrawDate ? `-${queueNextDrawDate || queueLastDrawDate}` : '';
       downloadTxt(
-        `${exportFilenameBase('el-gordo')}.txt`,
+        `${exportFilenameBase('el-gordo')}${drawSuffix}.txt`,
         buildExportTxtLines('El Gordo — Cola de compra', headers, rows),
       );
     },
-    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool],
+    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueNextDrawDate],
   );
 
   const handleExportElGordoPdf = useCallback(async (printTab: Window | null, selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
@@ -485,7 +490,7 @@ export function ElGordoBettingPanel() {
     }
     const ok = openModernPrintView(
       {
-        title: 'El Gordo — Cola de compra',
+        title: `El Gordo — Cola de compra${queueNextDrawDate ? ` (${queueNextDrawDate})` : queueLastDrawDate ? ` (${queueLastDrawDate})` : ''}`,
         subtitle: `Generado: ${new Date().toLocaleString('es-ES')}`,
         columns: headers,
         rows,
@@ -493,7 +498,7 @@ export function ElGordoBettingPanel() {
       printTab,
     );
     if (!ok) setError('No se pudo abrir la ventana. Permite ventanas emergentes.');
-  }, [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool]);
+  }, [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueNextDrawDate]);
 
   const saveBoughtFromQueue = useCallback(async () => {
     try {
@@ -843,7 +848,7 @@ export function ElGordoBettingPanel() {
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
                 <strong>
                   Cola de compra
-                  {queueLastDrawDate ? ` (${queueLastDrawDate})` : ''}
+                  {queueNextDrawDate ? ` (${queueNextDrawDate})` : queueLastDrawDate ? ` (${queueLastDrawDate})` : ''}
                 </strong>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   <button
