@@ -372,28 +372,84 @@ export function ElGordoBettingPanel() {
     return visibleBuyQueue.slice(0, qCount);
   }, [visibleBuyQueue]);
 
-  const handleExportElGordoCsv = useCallback((selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
-    const queueSlice = queueSliceByTicketCount(selection);
-    const { headers, rows } = flattenElGordoQueue(queueSlice);
-    if (rows.length === 0) {
-      setError('No hay boletos en la cola para exportar.');
-      return;
-    }
-    downloadCsv(`${exportFilenameBase('el-gordo')}.csv`, headers, rows);
-  }, [queueSliceByTicketCount]);
+  const handleExportElGordoCsv = useCallback(
+    async (selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
+      const queueSlice = queueSliceByTicketCount(selection);
+      const queueIds = queueSlice.map((q) => q?.id).filter((id): id is string => typeof id === 'string' && id !== '');
+      if (queueIds.length === 0) {
+        setError('No hay boletos en la cola para exportar.');
+        return;
+      }
 
-  const handleExportElGordoTxt = useCallback((selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
-    const queueSlice = queueSliceByTicketCount(selection);
-    const { headers, rows } = flattenElGordoQueue(queueSlice);
-    if (rows.length === 0) {
-      setError('No hay boletos en la cola para exportar.');
-      return;
-    }
-    downloadTxt(
-      `${exportFilenameBase('el-gordo')}.txt`,
-      buildExportTxtLines('El Gordo — Cola de compra', headers, rows),
-    );
-  }, [queueSliceByTicketCount]);
+      setError('');
+      try {
+        const res = await fetch(`${API_URL}/api/el-gordo/betting/save-queue-after-print`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ queue_ids: queueIds }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setError(typeof data.detail === 'string' ? data.detail : 'No se pudo guardar en boletos comprados.');
+          return;
+        }
+        await fetchBuyQueue();
+        fetchBettingPool(false);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Error de red al guardar.');
+        return;
+      }
+
+      const { headers, rows } = flattenElGordoQueue(queueSlice);
+      if (rows.length === 0) {
+        setError('No hay boletos en la cola para exportar.');
+        return;
+      }
+      downloadCsv(`${exportFilenameBase('el-gordo')}.csv`, headers, rows);
+    },
+    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool],
+  );
+
+  const handleExportElGordoTxt = useCallback(
+    async (selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
+      const queueSlice = queueSliceByTicketCount(selection);
+      const queueIds = queueSlice.map((q) => q?.id).filter((id): id is string => typeof id === 'string' && id !== '');
+      if (queueIds.length === 0) {
+        setError('No hay boletos en la cola para exportar.');
+        return;
+      }
+
+      setError('');
+      try {
+        const res = await fetch(`${API_URL}/api/el-gordo/betting/save-queue-after-print`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ queue_ids: queueIds }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setError(typeof data.detail === 'string' ? data.detail : 'No se pudo guardar en boletos comprados.');
+          return;
+        }
+        await fetchBuyQueue();
+        fetchBettingPool(false);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Error de red al guardar.');
+        return;
+      }
+
+      const { headers, rows } = flattenElGordoQueue(queueSlice);
+      if (rows.length === 0) {
+        setError('No hay boletos en la cola para exportar.');
+        return;
+      }
+      downloadTxt(
+        `${exportFilenameBase('el-gordo')}.txt`,
+        buildExportTxtLines('El Gordo — Cola de compra', headers, rows),
+      );
+    },
+    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool],
+  );
 
   const handleExportElGordoPdf = useCallback(async (printTab: Window | null, selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
     const queueSlice = queueSliceByTicketCount(selection);

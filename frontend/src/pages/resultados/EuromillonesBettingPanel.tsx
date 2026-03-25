@@ -342,28 +342,84 @@ export function EuromillonesBettingPanel() {
     return visibleBuyQueue.slice(0, qCount);
   }, [visibleBuyQueue]);
 
-  const handleExportEuromillonesCsv = useCallback((selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
-    const queueSlice = queueSliceByTicketCount(selection);
-    const { headers, rows } = flattenEuromillonesQueue(queueSlice);
-    if (rows.length === 0) {
-      setError('No hay boletos en la cola para exportar.');
-      return;
-    }
-    downloadCsv(`${exportFilenameBase('euromillones')}.csv`, headers, rows);
-  }, [queueSliceByTicketCount]);
+  const handleExportEuromillonesCsv = useCallback(
+    async (selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
+      const queueSlice = queueSliceByTicketCount(selection);
+      const queueIds = queueSlice.map((q) => q?.id).filter((id): id is string => typeof id === 'string' && id !== '');
+      if (queueIds.length === 0) {
+        setError('No hay boletos en la cola para exportar.');
+        return;
+      }
 
-  const handleExportEuromillonesTxt = useCallback((selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
-    const queueSlice = queueSliceByTicketCount(selection);
-    const { headers, rows } = flattenEuromillonesQueue(queueSlice);
-    if (rows.length === 0) {
-      setError('No hay boletos en la cola para exportar.');
-      return;
-    }
-    downloadTxt(
-      `${exportFilenameBase('euromillones')}.txt`,
-      buildExportTxtLines('Euromillones — Cola de compra', headers, rows),
-    );
-  }, [queueSliceByTicketCount]);
+      setError('');
+      try {
+        const res = await fetch(`${API_URL}/api/euromillones/betting/save-queue-after-print`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ queue_ids: queueIds }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setError(typeof data.detail === 'string' ? data.detail : 'No se pudo guardar en boletos comprados.');
+          return;
+        }
+        await fetchBuyQueue();
+        fetchBettingPool(false);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Error de red al guardar.');
+        return;
+      }
+
+      const { headers, rows } = flattenEuromillonesQueue(queueSlice);
+      if (rows.length === 0) {
+        setError('No hay boletos en la cola para exportar.');
+        return;
+      }
+      downloadCsv(`${exportFilenameBase('euromillones')}.csv`, headers, rows);
+    },
+    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool],
+  );
+
+  const handleExportEuromillonesTxt = useCallback(
+    async (selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
+      const queueSlice = queueSliceByTicketCount(selection);
+      const queueIds = queueSlice.map((q) => q?.id).filter((id): id is string => typeof id === 'string' && id !== '');
+      if (queueIds.length === 0) {
+        setError('No hay boletos en la cola para exportar.');
+        return;
+      }
+
+      setError('');
+      try {
+        const res = await fetch(`${API_URL}/api/euromillones/betting/save-queue-after-print`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ queue_ids: queueIds }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setError(typeof data.detail === 'string' ? data.detail : 'No se pudo guardar en boletos comprados.');
+          return;
+        }
+        await fetchBuyQueue();
+        fetchBettingPool(false);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Error de red al guardar.');
+        return;
+      }
+
+      const { headers, rows } = flattenEuromillonesQueue(queueSlice);
+      if (rows.length === 0) {
+        setError('No hay boletos en la cola para exportar.');
+        return;
+      }
+      downloadTxt(
+        `${exportFilenameBase('euromillones')}.txt`,
+        buildExportTxtLines('Euromillones — Cola de compra', headers, rows),
+      );
+    },
+    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool],
+  );
 
   const handleExportEuromillonesPdf = useCallback(async (printTab: Window | null, selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
     const queueSlice = queueSliceByTicketCount(selection);

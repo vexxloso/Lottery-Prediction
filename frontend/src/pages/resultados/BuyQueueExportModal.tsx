@@ -12,8 +12,8 @@ type Props = {
   lotteryTitle: string;
   disabled: boolean;
   queueTicketCounts: number[];
-  onExportCsv: (selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => void;
-  onExportTxt: (selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => void;
+  onExportCsv: (selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => void | Promise<void>;
+  onExportTxt: (selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => void | Promise<void>;
   /**
    * `printTab` is opened synchronously on click (before any await) so the browser allows it.
    * Pass it to `openModernPrintView(..., printTab)` after saving.
@@ -91,9 +91,15 @@ export function BuyQueueExportModal({
           icon={<FileTextOutlined />}
           disabled={disabled}
           onClick={() => {
-            onExportCsv(selection);
-            // Closing the modal in the same tick can interrupt the download (focus / unmount).
-            window.setTimeout(() => onCancel(), 150);
+            // Use async flow: backend sync first, then start download, then close modal.
+            void (async () => {
+              try {
+                await Promise.resolve(onExportCsv(selection));
+              } finally {
+                // Closing the modal in the same tick can interrupt the download (focus / unmount).
+                window.setTimeout(() => onCancel(), 150);
+              }
+            })();
           }}
         >
           Descargar CSV
@@ -104,8 +110,13 @@ export function BuyQueueExportModal({
           icon={<FileOutlined />}
           disabled={disabled}
           onClick={() => {
-            onExportTxt(selection);
-            window.setTimeout(() => onCancel(), 150);
+            void (async () => {
+              try {
+                await Promise.resolve(onExportTxt(selection));
+              } finally {
+                window.setTimeout(() => onCancel(), 150);
+              }
+            })();
           }}
         >
           Descargar TXT

@@ -387,28 +387,84 @@ export function LaPrimitivaBettingPanel() {
     return visibleBuyQueue.slice(0, qCount);
   }, [visibleBuyQueue]);
 
-  const handleExportLaPrimitivaCsv = useCallback((selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
-    const queueSlice = queueSliceByTicketCount(selection);
-    const { headers, rows } = flattenLaPrimitivaQueue(queueSlice);
-    if (rows.length === 0) {
-      setError('No hay boletos en la cola para exportar.');
-      return;
-    }
-    downloadCsv(`${exportFilenameBase('la-primitiva')}.csv`, headers, rows);
-  }, [queueSliceByTicketCount]);
+  const handleExportLaPrimitivaCsv = useCallback(
+    async (selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
+      const queueSlice = queueSliceByTicketCount(selection);
+      const queueIds = queueSlice.map((q) => q?.id).filter((id): id is string => typeof id === 'string' && id !== '');
+      if (queueIds.length === 0) {
+        setError('No hay boletos en la cola para exportar.');
+        return;
+      }
 
-  const handleExportLaPrimitivaTxt = useCallback((selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
-    const queueSlice = queueSliceByTicketCount(selection);
-    const { headers, rows } = flattenLaPrimitivaQueue(queueSlice);
-    if (rows.length === 0) {
-      setError('No hay boletos en la cola para exportar.');
-      return;
-    }
-    downloadTxt(
-      `${exportFilenameBase('la-primitiva')}.txt`,
-      buildExportTxtLines('La Primitiva — Cola de compra', headers, rows),
-    );
-  }, [queueSliceByTicketCount]);
+      setError('');
+      try {
+        const res = await fetch(`${API_URL}/api/la-primitiva/betting/save-queue-after-print`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ queue_ids: queueIds }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setError(typeof data.detail === 'string' ? data.detail : 'No se pudo guardar en boletos comprados.');
+          return;
+        }
+        await fetchBuyQueue();
+        fetchBettingPool(false);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Error de red al guardar.');
+        return;
+      }
+
+      const { headers, rows } = flattenLaPrimitivaQueue(queueSlice);
+      if (rows.length === 0) {
+        setError('No hay boletos en la cola para exportar.');
+        return;
+      }
+      downloadCsv(`${exportFilenameBase('la-primitiva')}.csv`, headers, rows);
+    },
+    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool],
+  );
+
+  const handleExportLaPrimitivaTxt = useCallback(
+    async (selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
+      const queueSlice = queueSliceByTicketCount(selection);
+      const queueIds = queueSlice.map((q) => q?.id).filter((id): id is string => typeof id === 'string' && id !== '');
+      if (queueIds.length === 0) {
+        setError('No hay boletos en la cola para exportar.');
+        return;
+      }
+
+      setError('');
+      try {
+        const res = await fetch(`${API_URL}/api/la-primitiva/betting/save-queue-after-print`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ queue_ids: queueIds }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setError(typeof data.detail === 'string' ? data.detail : 'No se pudo guardar en boletos comprados.');
+          return;
+        }
+        await fetchBuyQueue();
+        fetchBettingPool(false);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Error de red al guardar.');
+        return;
+      }
+
+      const { headers, rows } = flattenLaPrimitivaQueue(queueSlice);
+      if (rows.length === 0) {
+        setError('No hay boletos en la cola para exportar.');
+        return;
+      }
+      downloadTxt(
+        `${exportFilenameBase('la-primitiva')}.txt`,
+        buildExportTxtLines('La Primitiva — Cola de compra', headers, rows),
+      );
+    },
+    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool],
+  );
 
   const handleExportLaPrimitivaPdf = useCallback(async (printTab: Window | null, selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
     const queueSlice = queueSliceByTicketCount(selection);
