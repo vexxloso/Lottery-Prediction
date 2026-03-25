@@ -7,7 +7,7 @@ import {
   buildExportTxtLines,
   downloadCsv,
   downloadTxt,
-  exportFilenameBase,
+  exportFilenameBaseWithDrawDate,
   flattenElGordoQueue,
   openModernPrintView,
 } from './buyQueueExport';
@@ -408,10 +408,10 @@ export function ElGordoBettingPanel() {
         setError('No hay boletos en la cola para exportar.');
         return;
       }
-      const drawSuffix = queueNextDrawDate || queueLastDrawDate ? `-${queueNextDrawDate || queueLastDrawDate}` : '';
-      downloadCsv(`${exportFilenameBase('el-gordo')}${drawSuffix}.csv`, headers, rows);
+      const lastDrawDate = queueLastDrawDate || queueNextDrawDate;
+      downloadCsv(`${exportFilenameBaseWithDrawDate('el-gordo', lastDrawDate)}.csv`, headers, rows);
     },
-    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueNextDrawDate],
+    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueLastDrawDate, queueNextDrawDate],
   );
 
   const handleExportElGordoTxt = useCallback(
@@ -447,13 +447,13 @@ export function ElGordoBettingPanel() {
         setError('No hay boletos en la cola para exportar.');
         return;
       }
-      const drawSuffix = queueNextDrawDate || queueLastDrawDate ? `-${queueNextDrawDate || queueLastDrawDate}` : '';
+      const lastDrawDate = queueLastDrawDate || queueNextDrawDate;
       downloadTxt(
-        `${exportFilenameBase('el-gordo')}${drawSuffix}.txt`,
-        buildExportTxtLines('El Gordo — Cola de compra', headers, rows),
+        `${exportFilenameBaseWithDrawDate('el-gordo', lastDrawDate)}.txt`,
+        buildExportTxtLines(`El Gordo — Cola de compra${lastDrawDate ? ` (${lastDrawDate})` : ''}`, headers, rows),
       );
     },
-    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueNextDrawDate],
+    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueLastDrawDate, queueNextDrawDate],
   );
 
   const handleExportElGordoPdf = useCallback(async (printTab: Window | null, selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {

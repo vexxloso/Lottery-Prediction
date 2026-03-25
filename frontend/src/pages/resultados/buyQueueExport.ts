@@ -276,3 +276,27 @@ export function exportFilenameBase(lotterySlug: string): string {
   const hms = `${String(d.getHours()).padStart(2, '0')}-${String(d.getMinutes()).padStart(2, '0')}-${String(d.getSeconds()).padStart(2, '0')}`;
   return `Cola-${label}-${ymd}-${hms}`;
 }
+
+/**
+ * Filename format requested by users:
+ *   Cola-<Type>-<last_draw_date>(<printed_timestamp>)
+ *
+ * Example:
+ *   Cola-ElGordo-2026-03-08(2026-03-25-04-32-12)
+ */
+export function exportFilenameBaseWithDrawDate(
+  lotterySlug: string,
+  lastDrawDate: string | null | undefined,
+): string {
+  const label = LOTTERY_EXPORT_LABEL[lotterySlug] ?? lotterySlug.replace(/[^a-zA-Z0-9-]+/g, '-');
+  const d = new Date();
+  const printedYMD = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const printedHMS = `${String(d.getHours()).padStart(2, '0')}-${String(d.getMinutes()).padStart(2, '0')}-${String(d.getSeconds()).padStart(2, '0')}`;
+  const printed = `${printedYMD}-${printedHMS}`;
+
+  const dd = (lastDrawDate ?? '').toString().trim();
+  const drawDateOk = /^\d{4}-\d{2}-\d{2}$/.test(dd);
+  const drawDate = drawDateOk ? dd : printedYMD; // fallback to printed date (always valid)
+
+  return `Cola-${label}-${drawDate}(${printed})`;
+}

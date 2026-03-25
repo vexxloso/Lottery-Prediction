@@ -7,7 +7,7 @@ import {
   buildExportTxtLines,
   downloadCsv,
   downloadTxt,
-  exportFilenameBase,
+  exportFilenameBaseWithDrawDate,
   flattenEuromillonesQueue,
   openModernPrintView,
 } from './buyQueueExport';
@@ -378,10 +378,10 @@ export function EuromillonesBettingPanel() {
         setError('No hay boletos en la cola para exportar.');
         return;
       }
-      const drawSuffix = queueNextDrawDate || queueLastDrawDate ? `-${queueNextDrawDate || queueLastDrawDate}` : '';
-      downloadCsv(`${exportFilenameBase('euromillones')}${drawSuffix}.csv`, headers, rows);
+      const lastDrawDate = queueLastDrawDate || queueNextDrawDate;
+      downloadCsv(`${exportFilenameBaseWithDrawDate('euromillones', lastDrawDate)}.csv`, headers, rows);
     },
-    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueNextDrawDate],
+    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueLastDrawDate, queueNextDrawDate],
   );
 
   const handleExportEuromillonesTxt = useCallback(
@@ -417,13 +417,13 @@ export function EuromillonesBettingPanel() {
         setError('No hay boletos en la cola para exportar.');
         return;
       }
-      const drawSuffix = queueNextDrawDate || queueLastDrawDate ? `-${queueNextDrawDate || queueLastDrawDate}` : '';
+      const lastDrawDate = queueLastDrawDate || queueNextDrawDate;
       downloadTxt(
-        `${exportFilenameBase('euromillones')}${drawSuffix}.txt`,
-        buildExportTxtLines('Euromillones — Cola de compra', headers, rows),
+        `${exportFilenameBaseWithDrawDate('euromillones', lastDrawDate)}.txt`,
+        buildExportTxtLines(`Euromillones — Cola de compra${lastDrawDate ? ` (${lastDrawDate})` : ''}`, headers, rows),
       );
     },
-    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueNextDrawDate],
+    [queueSliceByTicketCount, fetchBuyQueue, fetchBettingPool, queueLastDrawDate, queueNextDrawDate],
   );
 
   const handleExportEuromillonesPdf = useCallback(async (printTab: Window | null, selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
