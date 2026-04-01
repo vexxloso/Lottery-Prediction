@@ -3287,20 +3287,14 @@ async def api_el_gordo_betting_enqueue_by_range(request: Request):
 
 @app.get("/api/el-gordo/betting/buy-queue")
 def api_el_gordo_betting_buy_queue(limit: int = Query(50, ge=1, le=5000)):
-    """Return recent El Gordo buy-queue items (status, tickets for hover). Tickets included so UI can exclude them from pool and show on hover."""
+    """Return recent El Gordo buy-queue items for scraper_metadata last_draw_date (draw_date on each item must match)."""
     if db is None:
         return JSONResponse(
             content={"items": [], "last_draw_date": None, "next_draw_date": _get_next_draw_date("el-gordo")},
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
     coll = db[EL_GORDO_BUY_QUEUE_COLLECTION]
-    coll_progress = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
-    progress_last = coll_progress.find_one(
-        {},
-        projection={"probs_fecha_sorteo": 1},
-        sort=[("probs_fecha_sorteo", -1), ("_id", -1)],
-    )
-    last_draw_date = (progress_last or {}).get("probs_fecha_sorteo")
+    last_draw_date = _get_last_draw_date("el-gordo")
     next_draw_date = _get_next_draw_date("el-gordo")
     queue_filter: Dict[str, Any] = {}
     if isinstance(last_draw_date, str) and last_draw_date.strip():
@@ -7270,13 +7264,7 @@ def api_euromillones_betting_buy_queue(limit: int = Query(50, ge=1, le=5000)):
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
     coll = db[EUROMILLONES_BUY_QUEUE_COLLECTION]
-    coll_progress = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
-    progress_last = coll_progress.find_one(
-        {},
-        projection={"probs_fecha_sorteo": 1},
-        sort=[("probs_fecha_sorteo", -1), ("_id", -1)],
-    )
-    last_draw_date = (progress_last or {}).get("probs_fecha_sorteo")
+    last_draw_date = _get_last_draw_date("euromillones")
     next_draw_date = _get_next_draw_date("euromillones")
     queue_filter: Dict[str, Any] = {}
     if isinstance(last_draw_date, str) and last_draw_date.strip():
@@ -8277,13 +8265,7 @@ def api_la_primitiva_betting_buy_queue(limit: int = Query(50, ge=1, le=5000)):
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
     coll = db[LA_PRIMITIVA_BUY_QUEUE_COLLECTION]
-    coll_progress = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
-    progress_last = coll_progress.find_one(
-        {},
-        projection={"probs_fecha_sorteo": 1},
-        sort=[("probs_fecha_sorteo", -1), ("_id", -1)],
-    )
-    last_draw_date = (progress_last or {}).get("probs_fecha_sorteo")
+    last_draw_date = _get_last_draw_date("la-primitiva")
     next_draw_date = _get_next_draw_date("la-primitiva")
     queue_filter: Dict[str, Any] = {}
     if isinstance(last_draw_date, str) and last_draw_date.strip():
