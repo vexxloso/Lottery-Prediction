@@ -125,30 +125,50 @@ def _txt_max_line_index_first_column(path: str) -> int:
 
 def _reorder_moved_to_avoid_bought_line_targets(
     moved_to: Dict[int, int],
-    forbidden_lines: set[int],
+    bought_line_positions: set[int],
     max_line: int,
     rng,
     *,
-    max_attempts: int = 160,
+    max_attempts: int = 500,
+    min_target_line: int = 3000,
 ) -> Dict[int, int]:
     """
-    Avoid placing moved content onto a line index that matches a bought ticket's saved
-    ``position``. If the planned ``new_pos`` is forbidden (or unusable), pick a random
-    line in [new_pos-3000, new_pos+3000] ∩ [1, max_line] that is not forbidden, not
-    already used as another move's target, and not any move's source ``old_pos``.
-    If no line works within ``max_attempts``, that move is dropped.
+    Adjust new_pos -> old_pos after initial reorder planning:
+    - Drop any move whose old_pos is in bought_line_positions (do not move off bought lines).
+    - If new_pos is in bought_line_positions, pick a random replacement target with
+      target > min_target_line and strictly outside [min(bought), max(bought)] (every bought
+      line lies in that band, so this avoids all bought destinations without a separate set check),
+      not already used as another target, not any remaining source old_pos.
+      If none found within max_attempts, drop that move.
     """
-    if not forbidden_lines or max_line < 1:
+    if not bought_line_positions or max_line < 1:
         return dict(moved_to)
-    all_sources = set(moved_to.values())
-    items = sorted(moved_to.items(), key=lambda x: x[0])
+    min_b = min(bought_line_positions)
+    max_b = max(bought_line_positions)
+    lo_tgt = min_target_line + 1
+
+    # Drop moves whose source line is a bought wheel position.
+    cur = {n: o for n, o in moved_to.items() if o not in bought_line_positions}
+    if not cur:
+        return {}
+    if max_line < lo_tgt:
+        return {
+            n: o
+            for n, o in cur.items()
+            if n not in bought_line_positions
+        }
+
+    all_sources = set(cur.values())
     claimed: set[int] = set()
     out: Dict[int, int] = {}
 
-    def acceptable_target(tgt: int) -> bool:
-        if not (1 <= tgt <= max_line):
+    def outside_bought_band(p: int) -> bool:
+        return p < min_b or p > max_b
+
+    def acceptable_replacement(tgt: int) -> bool:
+        if not (lo_tgt <= tgt <= max_line):
             return False
-        if tgt in forbidden_lines:
+        if not outside_bought_band(tgt):
             return False
         if tgt in claimed:
             return False
@@ -156,22 +176,27 @@ def _reorder_moved_to_avoid_bought_line_targets(
             return False
         return True
 
-    for orig_new, old_pos in items:
-        lo = max(1, orig_new - 3000)
-        hi = min(max_line, orig_new + 3000)
-        chosen: Optional[int] = None
-        if acceptable_target(orig_new):
-            chosen = orig_new
-        elif lo <= hi:
+    for orig_new, old_pos in sorted(cur.items(), key=lambda x: x[0]):
+        dest: Optional[int] = None
+        if orig_new in bought_line_positions:
+            chosen: Optional[int] = None
             for _ in range(max_attempts):
-                cand = rng.randint(lo, hi)
-                if acceptable_target(cand):
+                cand = rng.randint(lo_tgt, max_line)
+                if acceptable_replacement(cand):
                     chosen = cand
                     break
-        if chosen is None:
+            dest = chosen
+        else:
+            if orig_new in claimed:
+                continue
+            dest = orig_new
+
+        if dest is None:
             continue
-        out[chosen] = old_pos
-        claimed.add(chosen)
+        if dest in claimed:
+            continue
+        out[dest] = old_pos
+        claimed.add(dest)
     return out
 
 
@@ -1854,6 +1879,25 @@ _PUBLIC_API_PATHS = {
     "/api/euromillones/betting/bot/complete",
     "/api/la-primitiva/betting/bot/claim",
     "/api/la-primitiva/betting/bot/complete",
+    # Automation bot public endpoints (compare + prediction pipeline + full wheel)
+    "/api/euromillones/feature-model",
+    "/api/el-gordo/feature-model",
+    "/api/la-primitiva/feature-model",
+    "/api/euromillones/train/progress",
+    "/api/el-gordo/train/progress",
+    "/api/la-primitiva/train/progress",
+    "/api/euromillones/train/run-pipeline",
+    "/api/el-gordo/train/run-pipeline",
+    "/api/la-primitiva/train/run-pipeline",
+    "/api/euromillones/train/full-wheel",
+    "/api/el-gordo/train/full-wheel",
+    "/api/la-primitiva/train/full-wheel",
+    "/api/euromillones/compare/full-wheel",
+    "/api/el-gordo/compare/full-wheel",
+    "/api/la-primitiva/compare/full-wheel",
+    "/api/euromillones/compare/full-wheel/reorder",
+    "/api/el-gordo/compare/full-wheel/reorder",
+    "/api/la-primitiva/compare/full-wheel/reorder",
     # Dev-only helper to seed test bought tickets for Euromillones. Do NOT expose in production.
     "/api/dev/euromillones/betting/seed-test-bought",
     # Dev-only helper to seed test bought tickets for El Gordo. Do NOT expose in production.
@@ -3998,9 +4042,10 @@ def _euromillones_full_wheel_reorder_txt(
     if bought_line_positions:
         import random as rand_module
 
+        max_ln = max(jackpot_position, _txt_max_line_index_first_column(path))
         n_before = len(moved_to)
         moved_to = _reorder_moved_to_avoid_bought_line_targets(
-            moved_to, bought_line_positions, jackpot_position, rand_module
+            moved_to, bought_line_positions, max_ln, rand_module
         )
         if len(moved_to) != n_before:
             print(
@@ -4221,9 +4266,10 @@ def _el_gordo_full_wheel_reorder_txt(
     if bought_line_positions:
         import random as rand_module
 
+        max_ln = max(jackpot_position, _txt_max_line_index_first_column(path))
         n_before = len(moved_to)
         moved_to = _reorder_moved_to_avoid_bought_line_targets(
-            moved_to, bought_line_positions, jackpot_position, rand_module
+            moved_to, bought_line_positions, max_ln, rand_module
         )
         if len(moved_to) != n_before:
             print(

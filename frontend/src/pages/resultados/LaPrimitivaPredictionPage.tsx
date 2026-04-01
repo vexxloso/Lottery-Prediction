@@ -513,17 +513,6 @@ export function LaPrimitivaPredictionPage() {
             >
               Sorteo de referencia
             </div>
-            {cutoffDrawId && (
-              <div
-                style={{
-                  fontSize: '0.9rem',
-                  fontWeight: 600,
-                  marginBottom: 'var(--space-xs)',
-                }}
-              >
-                id_sorteo {cutoffDrawId}
-              </div>
-            )}
             {currentDraw ? (
               <>
                 <div

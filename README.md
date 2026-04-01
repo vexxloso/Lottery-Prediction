@@ -119,6 +119,31 @@ Check saved/bought tickets and repeat the cycle with improved strategy.
 
 ---
 
+## Daily Automation (01:00) 🤖
+
+There is an automation runner for prediction + compare orchestration:
+
+- Script: `scripts/run_daily_prediction_automation.py`
+- Reads latest row from each lottery `feature-model` endpoint (`id_sorteo`, `pre_id_sorteo`)
+- Ensures:
+  - `train/run-pipeline` completed
+  - `train/full-wheel` completed
+  - `compare/full-wheel/reorder` executed
+
+Run once:
+
+```bash
+python scripts/run_daily_prediction_automation.py --api-url http://localhost:8000 --once
+```
+
+Run continuously (executes now, then every day at local `01:00`):
+
+```bash
+python scripts/run_daily_prediction_automation.py --api-url http://localhost:8000
+```
+
+---
+
 ## Project Structure (High Level) 🗂️
 
 - `frontend/` - user interface and export views
