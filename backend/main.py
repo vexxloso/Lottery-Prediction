@@ -106,6 +106,16 @@ def _enqueue_range_exclude_positions_from_body(body: Dict[str, Any]) -> set[int]
     return out
 
 
+def _lottery_max_enqueue_by_count() -> int:
+    """Upper bound per enqueue-by-count request; override with LOTTERY_MAX_ENQUEUE_BY_COUNT (default 100000)."""
+    raw = os.environ.get("LOTTERY_MAX_ENQUEUE_BY_COUNT", "100000").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 100_000
+    return max(1, min(n, 2_000_000))
+
+
 def _txt_max_line_index_first_column(path: str) -> int:
     """Largest leading position integer in each TXT line (field before first ';')."""
     m = 0
@@ -3062,7 +3072,8 @@ EL_GORDO_BUCKET_SIZE = 6
 async def api_el_gordo_betting_enqueue_by_count(request: Request):
     """
     Create buy-queue items by ticket count. Body: { "count": int, "draw_date"?, "cutoff_draw_id"? }.
-    Reads from full_wheel file, splits into buckets of 6 (one queue item per bucket). No max count.
+    Reads from full_wheel file, splits into buckets of 6 (one queue item per bucket).
+    Capped by LOTTERY_MAX_ENQUEUE_BY_COUNT (default 100000). Inserts each bucket immediately to limit memory.
     """
     try:
         body = await request.json() or {}
@@ -3071,6 +3082,12 @@ async def api_el_gordo_betting_enqueue_by_count(request: Request):
     count = body.get("count")
     if not isinstance(count, int) or count < 1:
         raise HTTPException(400, detail="Body must contain 'count' (positive integer)")
+    max_n = _lottery_max_enqueue_by_count()
+    if count > max_n:
+        raise HTTPException(
+            400,
+            detail=f"count must be <= {max_n} per request (raise LOTTERY_MAX_ENQUEUE_BY_COUNT or split into multiple requests)",
+        )
     draw_date = (body.get("draw_date") or "").strip()[:10] or None
     cutoff_draw_id = (body.get("cutoff_draw_id") or "").strip() or None
     if db is None:
@@ -3116,11 +3133,14 @@ async def api_el_gordo_betting_enqueue_by_count(request: Request):
         clave = t.get("clave", 0)
         if isinstance(mains, list) and len(mains) == 5 and 0 <= int(clave) <= 9:
             excluded.add((tuple(sorted(mains)), int(clave)))
-    collected: List[Dict] = []
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    inserted_ids: List[str] = []
+    bucket_buf: List[Dict] = []
+    total_collected = 0
     try:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
-                if len(collected) >= count:
+                if total_collected >= count:
                     break
                 line = line.strip()
                 if not line:
@@ -3138,17 +3158,28 @@ async def api_el_gordo_betting_enqueue_by_count(request: Request):
                 if key in excluded:
                     continue
                 excluded.add(key)
-                collected.append({"mains": mains, "clave": clave, "position": position})
-                if len(collected) >= count:
+                bucket_buf.append({"mains": mains, "clave": clave, "position": position})
+                total_collected += 1
+                if len(bucket_buf) >= EL_GORDO_BUCKET_SIZE:
+                    chunk = bucket_buf[:EL_GORDO_BUCKET_SIZE]
+                    del bucket_buf[:EL_GORDO_BUCKET_SIZE]
+                    doc_queue = {
+                        "lottery": "el-gordo",
+                        "tickets": chunk,
+                        "tickets_count": len(chunk),
+                        "draw_date": date_str,
+                        "cutoff_draw_id": cutoff,
+                        "status": "waiting",
+                        "created_at": now,
+                    }
+                    ins = coll_queue.insert_one(doc_queue)
+                    inserted_ids.append(str(ins.inserted_id))
+                if total_collected >= count:
                     break
     except FileNotFoundError:
         raise HTTPException(404, detail="Full wheel file not found on disk")
-    if len(collected) == 0:
-        raise HTTPException(400, detail="No tickets available (all already in queue or bought)")
-    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    inserted_ids = []
-    for i in range(0, len(collected), EL_GORDO_BUCKET_SIZE):
-        chunk = collected[i : i + EL_GORDO_BUCKET_SIZE]
+    if bucket_buf:
+        chunk = bucket_buf
         doc_queue = {
             "lottery": "el-gordo",
             "tickets": chunk,
@@ -3160,12 +3191,14 @@ async def api_el_gordo_betting_enqueue_by_count(request: Request):
         }
         ins = coll_queue.insert_one(doc_queue)
         inserted_ids.append(str(ins.inserted_id))
+    if total_collected == 0:
+        raise HTTPException(400, detail="No tickets available (all already in queue or bought)")
     return JSONResponse(
         content={
             "status": "ok",
             "queued": len(inserted_ids),
-            "total_tickets": len(collected),
-            "message": f"{len(inserted_ids)} colas creadas ({len(collected)} boletos).",
+            "total_tickets": total_collected,
+            "message": f"{len(inserted_ids)} colas creadas ({total_collected} boletos).",
         },
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
@@ -3886,6 +3919,76 @@ _EMIL_CATEGORY_ORDER = [
 ]
 
 
+def _euromillones_read_line_payloads(path: str, positions: set[int]) -> Dict[int, Tuple[str, str]]:
+    """Read (mains_str, stars_str) for given 1-based line indices; scan whole file if needed."""
+    found: Dict[int, Tuple[str, str]] = {}
+    if not positions:
+        return found
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            raw = line.rstrip("\n")
+            if not raw:
+                continue
+            try:
+                pos_str, mains_str, stars_str = raw.split(";", 2)
+                position = int(pos_str)
+            except Exception:
+                continue
+            if position in positions:
+                found[position] = (mains_str, stars_str)
+    return found
+
+
+def _euromillones_resolve_ranks_to_physical(
+    planned: List[Tuple[int, int]],
+    bought_lines: set[int],
+    max_line: int,
+) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
+    """
+    planned: (old_line, new_rank) where new_rank is 1-based index among non-bought lines.
+    Returns (resolved_pairs, unresolved_planned).
+    """
+    if not planned or max_line < 1:
+        return [], list(planned)
+    pending = list(planned)
+    resolved: List[Tuple[int, int]] = []
+    c = 0
+    for i in range(1, max_line + 1):
+        if i in bought_lines:
+            continue
+        c += 1
+        next_pending: List[Tuple[int, int]] = []
+        for old_pos, new_rank in pending:
+            if new_rank == c:
+                resolved.append((old_pos, i))
+            else:
+                next_pending.append((old_pos, new_rank))
+        pending = next_pending
+        if not pending:
+            break
+    return resolved, pending
+
+
+def _el_gordo_read_line_payloads(path: str, positions: set[int]) -> Dict[int, Tuple[str, str]]:
+    """Read (mains_str, clave_str) for given 1-based line indices."""
+    found: Dict[int, Tuple[str, str]] = {}
+    if not positions:
+        return found
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            raw = line.rstrip("\n")
+            if not raw:
+                continue
+            try:
+                pos_str, mains_str, clave_str = raw.split(";", 2)
+                position = int(pos_str)
+            except Exception:
+                continue
+            if position in positions:
+                found[position] = (mains_str, clave_str)
+    return found
+
+
 def _euromillones_full_wheel_reorder_txt(
     path: str,
     main_set: set,
@@ -3895,13 +3998,16 @@ def _euromillones_full_wheel_reorder_txt(
     bought_line_positions: Optional[set[int]] = None,
 ) -> None:
     """
-    Reorder tickets in the full wheel TXT: swap only mains and stars so that
-    jackpot moves to first_position, and selected 2th/3th/4th get distinct new
-    positions in their ranges. Position numbers (No) on each line stay unchanged.
-    Uses draw date from current_id (year, month) for first_position. Overwrites
-    the file in place.
+    Reorder Euromillones full wheel TXT: first 2nd/3rd/4th positions before jackpot, then jackpot line.
+    Skip if jackpot line is bought, or if jackpot_position <= first_position (generator).
+    Planned moves use the same target *ranks* as before (first_position + bands); ranks map to
+    physical lines by counting non-bought lines. Swap mains/stars between old and dest lines;
+    line indices unchanged. Overwrites file in place.
     """
     from refer.position import position_generator
+
+    bought_lines: set[int] = set(bought_line_positions or [])
+    keys = bought_ticket_keys or set()
 
     date_str = (draw_date or "")[:10]
     if not date_str or len(date_str) < 7:
@@ -3916,11 +4022,10 @@ def _euromillones_full_wheel_reorder_txt(
         raise HTTPException(400, detail="first_position must be positive")
     print(f"[reorder] draw_date={date_str} year={year} month={month} first_position={first_position}", flush=True)
 
-    # First pass: stream until jackpot and collect positions for 2th/3th/4th; do NOT store content
+    first_2nd: Optional[int] = None
+    first_3rd: Optional[int] = None
+    first_4th: Optional[int] = None
     jackpot_position: Optional[int] = None
-    second_positions: List[int] = []
-    third_positions: List[int] = []
-    fourth_positions: List[int] = []
 
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -3928,7 +4033,7 @@ def _euromillones_full_wheel_reorder_txt(
             if not line:
                 continue
             try:
-                pos_str, mains_str, stars_str = line.split(";")
+                pos_str, mains_str, stars_str = line.split(";", 2)
                 position = int(pos_str)
                 mains = [int(x) for x in mains_str.split(",") if x]
                 stars = [int(x) for x in stars_str.split(",") if x]
@@ -3938,36 +4043,38 @@ def _euromillones_full_wheel_reorder_txt(
                 continue
             hits_main = sum(1 for n in mains if n in main_set)
             hits_star = sum(1 for n in stars if n in star_set)
-            if hits_main == 5 and hits_star == 1:
-                second_positions.append(position)
-            elif hits_main == 5 and hits_star == 0:
-                third_positions.append(position)
-            elif hits_main == 4 and hits_star == 2:
-                fourth_positions.append(position)
             if hits_main == 5 and hits_star == 2:
                 jackpot_position = position
                 break
+            if hits_main == 5 and hits_star == 1 and first_2nd is None:
+                first_2nd = position
+            elif hits_main == 5 and hits_star == 0 and first_3rd is None:
+                first_3rd = position
+            elif hits_main == 4 and hits_star == 2 and first_4th is None:
+                first_4th = position
 
     if jackpot_position is None:
         raise HTTPException(
             404,
             detail="Jackpot (5+2) not found in full wheel file; cannot reorder",
         )
-    print(f"[reorder] jackpot_position={jackpot_position} | 2th count={len(second_positions)} 3th={len(third_positions)} 4th={len(fourth_positions)}", flush=True)
+    print(
+        f"[reorder] jackpot_position={jackpot_position} | first 2th={first_2nd} 3th={first_3rd} 4th={first_4th}",
+        flush=True,
+    )
 
-    # Marks: how many to move per tier; only move if current position > first_position
-    n_2 = random.randint(1, 2)
-    n_3 = random.randint(3, 5)
-    n_4 = random.randint(10, 20)
+    if jackpot_position in bought_lines:
+        print("[reorder] skip: jackpot line is in bought line positions", flush=True)
+        return
+
+    if jackpot_position <= first_position:
+        print(
+            f"[reorder] skip: jackpot_position {jackpot_position} <= first_position {first_position}",
+            flush=True,
+        )
+        return
+
     import random as rand_module
-    cand_2 = [p for p in second_positions if p > first_position]
-    cand_3 = [p for p in third_positions if p > first_position]
-    cand_4 = [p for p in fourth_positions if p > first_position]
-    to_move_2 = rand_module.sample(cand_2, min(n_2, len(cand_2))) if cand_2 else []
-    to_move_3 = rand_module.sample(cand_3, min(n_3, len(cand_3))) if cand_3 else []
-    to_move_4 = rand_module.sample(cand_4, min(n_4, len(cand_4))) if cand_4 else []
-    print(f"[reorder] marks n_2={n_2} n_3={n_3} n_4={n_4} | candidates >first: 2th={len(cand_2)} 3th={len(cand_3)} 4th={len(cand_4)}", flush=True)
-    print(f"[reorder] to_move_2={to_move_2} to_move_3={to_move_3} to_move_4={to_move_4}", flush=True)
 
     def range_list(lo: float, hi: int) -> List[int]:
         return list(range(max(1, int(lo)), hi + 1))
@@ -3975,90 +4082,91 @@ def _euromillones_full_wheel_reorder_txt(
     r_2 = range_list(first_position * 0.8, first_position - 1)
     r_3 = range_list(first_position * 0.5, first_position - 1)
     r_4 = range_list(first_position * 0.3, first_position - 1)
-    used: set = {first_position}
+    used_ranks: set[int] = {first_position}
 
-    def pick_distinct(pool: List[int], count: int, available: List[int]) -> List[Tuple[int, int]]:
-        out: List[Tuple[int, int]] = []
-        avail = [x for x in available if x not in used]
-        if not avail or count <= 0:
-            return out
-        k = min(count, len(avail))
-        chosen = rand_module.sample(avail, k)
-        for old_pos, new_pos in zip(pool[:k], chosen):
-            used.add(new_pos)
-            out.append((old_pos, new_pos))
-        return out
+    def pick_one_rank(available: List[int]) -> Optional[int]:
+        pool = [x for x in available if x not in used_ranks]
+        if not pool:
+            return None
+        chosen = rand_module.choice(pool)
+        used_ranks.add(chosen)
+        return chosen
 
-    moves: List[Tuple[int, int]] = [(jackpot_position, first_position)]
-    used.add(first_position)
-    moves.extend(pick_distinct(to_move_2, len(to_move_2), r_2))
-    moves.extend(pick_distinct(to_move_3, len(to_move_3), r_3))
-    moves.extend(pick_distinct(to_move_4, len(to_move_4), r_4))
-    print(f"[reorder] ranges 2th len={len(r_2)} 3th len={len(r_3)} 4th len={len(r_4)} | moves ({len(moves)}): {moves}", flush=True)
+    planned: List[Tuple[int, int]] = [(jackpot_position, first_position)]
 
-    # Build mapping: for each new position -> old position (only for moved tickets)
-    moved_from: set[int] = set()
-    moved_to: Dict[int, int] = {}
-    for old_pos, new_pos in moves:
-        moved_from.add(old_pos)
-        moved_to[new_pos] = old_pos
+    if first_2nd is not None and first_2nd > first_position:
+        nr = pick_one_rank(r_2)
+        if nr is not None:
+            planned.append((first_2nd, nr))
+    if first_3rd is not None and first_3rd > first_position:
+        nr = pick_one_rank(r_3)
+        if nr is not None:
+            planned.append((first_3rd, nr))
+    if first_4th is not None and first_4th > first_position:
+        nr = pick_one_rank(r_4)
+        if nr is not None:
+            planned.append((first_4th, nr))
 
-    # Second pass: read only the moved tickets' content into memory
-    moved_content: Dict[int, Tuple[str, str]] = {}
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            raw = line.rstrip("\n")
-            if not raw:
-                continue
-            try:
-                pos_str, mains_str, stars_str = raw.split(";")
-                position = int(pos_str)
-            except Exception:
-                continue
-            if position in moved_from:
-                moved_content[position] = (mains_str, stars_str)
-            if position >= jackpot_position and len(moved_content) == len(moved_from):
-                # We have all moved tickets; can stop early
-                break
+    print(f"[reorder] planned (old, new_rank) before bought filter: {planned}", flush=True)
 
-    # If some of the tickets to be moved are already present in bought_tickets,
-    # we must skip those moves (keep original TXT content at those new positions).
-    if bought_ticket_keys:
-        moved_to_filtered: Dict[int, int] = {}
-        for new_pos, old_pos in moved_to.items():
-            mains_str2, stars_str2 = moved_content.get(old_pos, ("", ""))
-            if not mains_str2 and not stars_str2:
-                moved_to_filtered[new_pos] = old_pos
-                continue
-            moved_mains = [int(x) for x in mains_str2.split(",") if x]
-            moved_stars = [int(x) for x in stars_str2.split(",") if x]
-            if len(moved_mains) == 5 and len(moved_stars) == 2:
-                key = (tuple(sorted(moved_mains)), tuple(sorted(moved_stars)))
-                if key in bought_ticket_keys:
+    planned_filtered: List[Tuple[int, int]] = []
+    for old_pos, new_rank in planned:
+        if old_pos in bought_lines:
+            print(f"[reorder] drop move: old line {old_pos} is bought", flush=True)
+            continue
+        planned_filtered.append((old_pos, new_rank))
+    planned = planned_filtered
+
+    if keys:
+        pos_need: set[int] = {p for p, _ in planned}
+        payloads_keys = _euromillones_read_line_payloads(path, pos_need)
+        planned_keys: List[Tuple[int, int]] = []
+        for old_pos, new_rank in planned:
+            ms, ss = payloads_keys.get(old_pos, ("", ""))
+            mains = [int(x) for x in ms.split(",") if x]
+            stars = [int(x) for x in ss.split(",") if x]
+            if len(mains) == 5 and len(stars) == 2:
+                k = (tuple(sorted(mains)), tuple(sorted(stars)))
+                if k in keys:
+                    print(f"[reorder] drop move: old line {old_pos} matches bought ticket key", flush=True)
                     continue
-            moved_to_filtered[new_pos] = old_pos
-        moved_to = moved_to_filtered
+            planned_keys.append((old_pos, new_rank))
+        planned = planned_keys
 
-    if bought_line_positions:
-        import random as rand_module
+    if not planned:
+        print("[reorder] skip: no moves left after bought filters", flush=True)
+        return
 
-        max_ln = max(jackpot_position, _txt_max_line_index_first_column(path))
-        n_before = len(moved_to)
-        moved_to = _reorder_moved_to_avoid_bought_line_targets(
-            moved_to, bought_line_positions, max_ln, rand_module
-        )
-        if len(moved_to) != n_before:
-            print(
-                f"[reorder] bought-line target adjust: moves {n_before} -> {len(moved_to)} | final moved_to keys={sorted(moved_to.keys())}",
-                flush=True,
-            )
+    max_line = _txt_max_line_index_first_column(path)
+    if max_line < 1:
+        raise HTTPException(400, detail="Full wheel file has no valid positions")
 
-    # Write to temp file, streaming from original; only swapped tickets use moved_content
+    resolved, unresolved = _euromillones_resolve_ranks_to_physical(planned, bought_lines, max_line)
+    if unresolved:
+        print(f"[reorder] skip: could not resolve ranks (non-bought count too small): {unresolved}", flush=True)
+        return
+
+    print(f"[reorder] resolved physical (old, dest): {resolved}", flush=True)
+
+    involved: set[int] = set()
+    for o, d in resolved:
+        involved.add(o)
+        involved.add(d)
+    orig = _euromillones_read_line_payloads(path, involved)
+    if len(orig) < len(involved):
+        raise HTTPException(400, detail="Could not read all lines for reorder swap")
+
+    line_payload: Dict[int, Tuple[str, str]] = {}
+    for o, d in resolved:
+        if o not in orig or d not in orig:
+            raise HTTPException(400, detail="Missing line content for reorder swap")
+        line_payload[o] = orig[d]
+        line_payload[d] = orig[o]
+
     dirpath = os.path.dirname(path)
     fd, temp_path = tempfile.mkstemp(suffix=".txt", prefix="euromillones_reorder_", dir=dirpath if dirpath else ".")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as out:
-            # Stream original file and rewrite lines up to jackpot_position when needed
             with open(path, "r", encoding="utf-8") as src:
                 for line in src:
                     raw = line.rstrip("\n")
@@ -4066,20 +4174,17 @@ def _euromillones_full_wheel_reorder_txt(
                         out.write(line)
                         continue
                     try:
-                        pos_str, mains_str, stars_str = raw.split(";")
+                        pos_str, mains_str, stars_str = raw.split(";", 2)
                         position = int(pos_str)
                     except Exception:
-                        out.write(line)
-                        continue
-                    if position <= jackpot_position and position in moved_to:
-                        # This output position should receive content from a different (old) position
-                        old_pos = moved_to[position]
-                        mains_str2, stars_str2 = moved_content.get(old_pos, (mains_str, stars_str))
-                        out.write(f"{position};{mains_str2};{stars_str2}\n")
-                    else:
-                        # Either beyond jackpot_position or not moved: write original line
                         out.write(line if line.endswith("\n") else line + "\n")
-        print(f"[reorder] writing swapped lines up to {jackpot_position} and streamed tail to {path}", flush=True)
+                        continue
+                    if position in line_payload:
+                        m2, s2 = line_payload[position]
+                        out.write(f"{position};{m2};{s2}\n")
+                    else:
+                        out.write(line if line.endswith("\n") else line + "\n")
+        print(f"[reorder] full file rewrite -> {path}", flush=True)
         os.replace(temp_path, path)
     except Exception:
         try:
@@ -4099,16 +4204,16 @@ def _el_gordo_full_wheel_reorder_txt(
     bought_line_positions: Optional[set[int]] = None,
 ) -> None:
     """
-    Reorder El Gordo full wheel TXT using position_generator_el_gordo rules.
-
-    - Compute first_position from draw year/month via position_generator_el_gordo.
-    - Stream once to find jackpot + 2th/3th/4th old positions.
-    - If jackpot_position < first_position: skip reorder.
-    - Else: choose a small number of 2th/3th/4th tickets to move into bands
-      near first_position, build a swap list, and rewrite swapped lines up to
-      jackpot_position (mirror Euromillones approach).
+    Reorder El Gordo full wheel TXT (same rules as Euromillones reorder):
+    first 2ª(5+0), 3ª(4+clave), 4ª(4+0) line indices before jackpot (5+clave), then jackpot line.
+    Skip if jackpot line is bought, or if jackpot_position <= first_position (generator).
+    Target ranks from position_generator_el_gordo + bands; map ranks to physical lines skipping
+    bought lines; swap mains/clave between old and destination. Full file rewrite.
     """
     from refer.position import position_generator_el_gordo
+
+    bought_lines: set[int] = set(bought_line_positions or [])
+    keys = bought_ticket_keys or set()
 
     date_str = (draw_date or "")[:10]
     if not date_str or len(date_str) < 7:
@@ -4123,10 +4228,10 @@ def _el_gordo_full_wheel_reorder_txt(
         raise HTTPException(400, detail="first_position must be positive (El Gordo)")
     print(f"[el-gordo-reorder] draw_date={date_str} year={year} month={month} first_position={first_position}", flush=True)
 
+    first_2nd: Optional[int] = None
+    first_3rd: Optional[int] = None
+    first_4th: Optional[int] = None
     jackpot_position: Optional[int] = None
-    second_positions: List[int] = []
-    third_positions: List[int] = []
-    fourth_positions: List[int] = []
 
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -4134,7 +4239,7 @@ def _el_gordo_full_wheel_reorder_txt(
             if not line:
                 continue
             try:
-                pos_str, mains_str, clave_str = line.split(";")
+                pos_str, mains_str, clave_str = line.split(";", 2)
                 position = int(pos_str)
                 mains = [int(x) for x in mains_str.split(",") if x]
                 clave = int(clave_str)
@@ -4144,16 +4249,15 @@ def _el_gordo_full_wheel_reorder_txt(
                 continue
             hits_main = sum(1 for n in mains if n in main_set)
             hits_clave = 1 if clave in clave_set else 0
-            # 1th..4th categories for El Gordo (5+1, 5+0, 4+1, 4+0)
             if hits_main == 5 and hits_clave == 1:
                 jackpot_position = position
                 break
-            if hits_main == 5 and hits_clave == 0:
-                second_positions.append(position)
-            elif hits_main == 4 and hits_clave == 1:
-                third_positions.append(position)
-            elif hits_main == 4 and hits_clave == 0:
-                fourth_positions.append(position)
+            if hits_main == 5 and hits_clave == 0 and first_2nd is None:
+                first_2nd = position
+            elif hits_main == 4 and hits_clave == 1 and first_3rd is None:
+                first_3rd = position
+            elif hits_main == 4 and hits_clave == 0 and first_4th is None:
+                first_4th = position
 
     if jackpot_position is None:
         raise HTTPException(
@@ -4161,20 +4265,21 @@ def _el_gordo_full_wheel_reorder_txt(
             detail="Jackpot (5+clave) not found in El Gordo full wheel file; cannot reorder",
         )
     print(
-        f"[el-gordo-reorder] jackpot_position={jackpot_position} | 2th count={len(second_positions)} 3th={len(third_positions)} 4th={len(fourth_positions)}",
+        f"[el-gordo-reorder] jackpot_position={jackpot_position} | first 2ª={first_2nd} 3ª={first_3rd} 4ª={first_4th}",
         flush=True,
     )
 
-    # If jackpot is already before first_position, skip reorder
-    if jackpot_position < first_position:
+    if jackpot_position in bought_lines:
+        print("[el-gordo-reorder] skip: jackpot line is in bought line positions", flush=True)
+        return
+
+    if jackpot_position <= first_position:
         print(
-            f"[el-gordo-reorder] jackpot_position {jackpot_position} < first_position {first_position}; skipping reorder",
+            f"[el-gordo-reorder] skip: jackpot_position {jackpot_position} <= first_position {first_position}",
             flush=True,
         )
         return
 
-    # Decide which high‑prize tickets to move:
-    # Only move if there is currently NO ticket of that category before first_position.
     import random as rand_module
 
     def range_list_el(lo: float, hi: int) -> List[int]:
@@ -4183,99 +4288,89 @@ def _el_gordo_full_wheel_reorder_txt(
     r_2 = range_list_el(first_position * 0.8, first_position - 1)
     r_3 = range_list_el(first_position * 0.5, first_position - 1)
     r_4 = range_list_el(first_position * 0.3, first_position - 1)
+    used_ranks: set[int] = {first_position}
 
-    used: set[int] = {first_position}
+    def pick_one_rank(available: List[int]) -> Optional[int]:
+        pool = [x for x in available if x not in used_ranks]
+        if not pool:
+            return None
+        chosen = rand_module.choice(pool)
+        used_ranks.add(chosen)
+        return chosen
 
-    def pick_single_move(candidates: List[int], band: List[int]) -> List[Tuple[int, int]]:
-        """
-        Select exactly ONE ticket from `candidates` and assign it to ONE new
-        position in `band`, avoiding collisions with already used positions.
-        Returns [(old_pos, new_pos)] or [].
-        """
-        if not candidates or not band:
-            return []
-        avail = [x for x in band if x not in used]
-        if not avail:
-            return []
-        old_pos = rand_module.choice(candidates)
-        new_pos = rand_module.choice(avail)
-        used.add(new_pos)
-        return [(old_pos, new_pos)]
+    planned: List[Tuple[int, int]] = [(jackpot_position, first_position)]
 
-    # Check if there is already at least one ticket of each category before first_position
-    has_2_before = any(p < first_position for p in second_positions)
-    has_3_before = any(p < first_position for p in third_positions)
-    has_4_before = any(p < first_position for p in fourth_positions)
+    if first_2nd is not None and first_2nd > first_position:
+        nr = pick_one_rank(r_2)
+        if nr is not None:
+            planned.append((first_2nd, nr))
+    if first_3rd is not None and first_3rd > first_position:
+        nr = pick_one_rank(r_3)
+        if nr is not None:
+            planned.append((first_3rd, nr))
+    if first_4th is not None and first_4th > first_position:
+        nr = pick_one_rank(r_4)
+        if nr is not None:
+            planned.append((first_4th, nr))
 
-    cand_2 = [p for p in second_positions if p > first_position]
-    cand_3 = [p for p in third_positions if p > first_position]
-    cand_4 = [p for p in fourth_positions if p > first_position]
+    print(f"[el-gordo-reorder] planned (old, new_rank) before bought filter: {planned}", flush=True)
 
-    moves: List[Tuple[int, int]] = [(jackpot_position, first_position)]
-    used.add(first_position)
-    if not has_2_before:
-        moves.extend(pick_single_move(cand_2, r_2))
-    if not has_3_before:
-        moves.extend(pick_single_move(cand_3, r_3))
-    if not has_4_before:
-        moves.extend(pick_single_move(cand_4, r_4))
-    print(
-        f"[el-gordo-reorder] ranges 2th len={len(r_2)} 3th len={len(r_3)} 4th len={len(r_4)} | moves ({len(moves)}): {moves}",
-        flush=True,
-    )
+    planned_filtered: List[Tuple[int, int]] = []
+    for old_pos, new_rank in planned:
+        if old_pos in bought_lines:
+            print(f"[el-gordo-reorder] drop move: old line {old_pos} is bought", flush=True)
+            continue
+        planned_filtered.append((old_pos, new_rank))
+    planned = planned_filtered
 
-    moved_from: set[int] = set()
-    moved_to: Dict[int, int] = {}
-    for old_pos, new_pos in moves:
-        moved_from.add(old_pos)
-        moved_to[new_pos] = old_pos
-
-    moved_content: Dict[int, Tuple[str, str]] = {}
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            raw = line.rstrip("\n")
-            if not raw:
-                continue
+    if keys:
+        pos_need = {p for p, _ in planned}
+        payloads_keys = _el_gordo_read_line_payloads(path, pos_need)
+        planned_keys: List[Tuple[int, int]] = []
+        for old_pos, new_rank in planned:
+            ms, cs = payloads_keys.get(old_pos, ("", "0"))
+            moved_mains = [int(x) for x in ms.split(",") if x]
             try:
-                pos_str, mains_str, clave_str = raw.split(";")
-                position = int(pos_str)
-            except Exception:
-                continue
-            if position in moved_from:
-                moved_content[position] = (mains_str, clave_str)
-            if position >= jackpot_position and len(moved_content) == len(moved_from):
-                break
-
-    # Skip moves when the moved ticket already exists in bought_tickets.
-    if bought_ticket_keys:
-        moved_to_filtered: Dict[int, int] = {}
-        for new_pos, old_pos in moved_to.items():
-            mains_str2, clave_str2 = moved_content.get(old_pos, ("", "0"))
-            moved_mains = [int(x) for x in mains_str2.split(",") if x]
-            try:
-                moved_clave = int(clave_str2)
+                moved_clave = int(cs)
             except Exception:
                 moved_clave = None
             if len(moved_mains) == 5 and moved_clave is not None:
-                key = (tuple(sorted(moved_mains)), moved_clave)
-                if key in bought_ticket_keys:
+                k = (tuple(sorted(moved_mains)), moved_clave)
+                if k in keys:
+                    print(f"[el-gordo-reorder] drop move: old line {old_pos} matches bought ticket key", flush=True)
                     continue
-            moved_to_filtered[new_pos] = old_pos
-        moved_to = moved_to_filtered
+            planned_keys.append((old_pos, new_rank))
+        planned = planned_keys
 
-    if bought_line_positions:
-        import random as rand_module
+    if not planned:
+        print("[el-gordo-reorder] skip: no moves left after bought filters", flush=True)
+        return
 
-        max_ln = max(jackpot_position, _txt_max_line_index_first_column(path))
-        n_before = len(moved_to)
-        moved_to = _reorder_moved_to_avoid_bought_line_targets(
-            moved_to, bought_line_positions, max_ln, rand_module
-        )
-        if len(moved_to) != n_before:
-            print(
-                f"[el-gordo-reorder] bought-line target adjust: moves {n_before} -> {len(moved_to)} | final moved_to keys={sorted(moved_to.keys())}",
-                flush=True,
-            )
+    max_line = _txt_max_line_index_first_column(path)
+    if max_line < 1:
+        raise HTTPException(400, detail="El Gordo full wheel file has no valid positions")
+
+    resolved, unresolved = _euromillones_resolve_ranks_to_physical(planned, bought_lines, max_line)
+    if unresolved:
+        print(f"[el-gordo-reorder] skip: could not resolve ranks: {unresolved}", flush=True)
+        return
+
+    print(f"[el-gordo-reorder] resolved physical (old, dest): {resolved}", flush=True)
+
+    involved: set[int] = set()
+    for o, d in resolved:
+        involved.add(o)
+        involved.add(d)
+    orig = _el_gordo_read_line_payloads(path, involved)
+    if len(orig) < len(involved):
+        raise HTTPException(400, detail="Could not read all lines for El Gordo reorder swap")
+
+    line_payload: Dict[int, Tuple[str, str]] = {}
+    for o, d in resolved:
+        if o not in orig or d not in orig:
+            raise HTTPException(400, detail="Missing line content for El Gordo reorder swap")
+        line_payload[o] = orig[d]
+        line_payload[d] = orig[o]
 
     dirpath = os.path.dirname(path)
     fd, temp_path = tempfile.mkstemp(suffix=".txt", prefix="el_gordo_reorder_", dir=dirpath if dirpath else ".")
@@ -4288,21 +4383,17 @@ def _el_gordo_full_wheel_reorder_txt(
                         out.write(line)
                         continue
                     try:
-                        pos_str, mains_str, clave_str = raw.split(";")
+                        pos_str, mains_str, clave_str = raw.split(";", 2)
                         position = int(pos_str)
                     except Exception:
-                        out.write(line)
+                        out.write(line if line.endswith("\n") else line + "\n")
                         continue
-                    if position <= jackpot_position and position in moved_to:
-                        old_pos = moved_to[position]
-                        mains_str2, clave_str2 = moved_content.get(old_pos, (mains_str, clave_str))
-                        out.write(f"{position};{mains_str2};{clave_str2}\n")
+                    if position in line_payload:
+                        m2, c2 = line_payload[position]
+                        out.write(f"{position};{m2};{c2}\n")
                     else:
                         out.write(line if line.endswith("\n") else line + "\n")
-        print(
-            f"[el-gordo-reorder] writing swapped lines up to {jackpot_position} and streamed tail to {path}",
-            flush=True,
-        )
+        print(f"[el-gordo-reorder] full file rewrite -> {path}", flush=True)
         os.replace(temp_path, path)
     except Exception:
         try:
@@ -4311,6 +4402,26 @@ def _el_gordo_full_wheel_reorder_txt(
             pass
         raise
     print("[el-gordo-reorder] done.", flush=True)
+
+
+def _la_primitiva_read_line_payloads(path: str, positions: set[int]) -> Dict[int, str]:
+    """Read mains_str for given 1-based line indices (La Primitiva TXT: position;mains)."""
+    found: Dict[int, str] = {}
+    if not positions:
+        return found
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            raw = line.rstrip("\n")
+            if not raw:
+                continue
+            try:
+                pos_str, mains_str = raw.split(";", 1)
+                position = int(pos_str)
+            except Exception:
+                continue
+            if position in positions:
+                found[position] = mains_str
+    return found
 
 
 def _la_primitiva_full_wheel_reorder_txt(
@@ -4322,18 +4433,16 @@ def _la_primitiva_full_wheel_reorder_txt(
     bought_line_positions: Optional[set[int]] = None,
 ) -> None:
     """
-    Reorder La Primitiva full wheel TXT using position_generator_la_primitiva rules.
-
-    - Compute first_position from draw year/month via position_generator_la_primitiva.
-    - First pass: loop TXT until jackpot (6 mains) AND at least one 2nd prize (5 mains + C);
-      collect jackpot position, second_with_C_old (5+C), second_old (5 only), third_old, fourth_old.
-    - 2nd prize (5+C): move one to a random position in [0.9*first_position, 1.1*first_position].
-    - Jackpot: move to first_position.
-    - Second pass: scan until first_position for early winners (3rd/4th).
-    - If no early winner for 3rd/4th, move one from third_old/fourth_old into bands r_3, r_4.
-    - Overwrite the TXT in place via a temporary file, swapping only mains content.
+    La Primitiva reorder (same pipeline as Euromillones/El Gordo; LP-specific tiers):
+    Scan until first jackpot (6) AND, when complementario is set, first 2ª (5+C); along the way
+    record first 3ª/4ª/5ª seen. Skip if jackpot line bought or jackpot_position <= first_position.
+    2ª target ranks in [0.9,1.1]*first_position (only if 5+C line outside that band);
+    3ª/4ª/5ª use 0.8 / 0.6 / 0.4 bands. Ranks map to physical lines skipping bought; full file swap.
     """
     from refer.position import position_generator_la_primitiva
+
+    bought_lines: set[int] = set(bought_line_positions or [])
+    keys = bought_ticket_keys or set()
 
     date_str = (draw_date or "")[:10]
     if not date_str or len(date_str) < 7:
@@ -4351,24 +4460,20 @@ def _la_primitiva_full_wheel_reorder_txt(
         flush=True,
     )
 
-    # 2nd prize = 5 mains in main_set AND the 6th number equals complementario.
     def is_second_prize(mains: List[int]) -> bool:
         if complementario is None:
             return False
         hits = sum(1 for n in mains if n in main_set)
         if hits != 5:
             return False
-        # The one number not in main_set must be the complementario.
         rest = set(mains) - main_set
         return rest == {complementario}
 
-    # First pass: loop TXT until we find BOTH 1st (jackpot) and 2nd (5+C when complementario set).
-    # Categories: 1ª (6), 2ª (5+C), 3ª (5 aciertos), 4ª (4), 5ª (3).
+    first_5c: Optional[int] = None
+    first_5only: Optional[int] = None
+    first_4: Optional[int] = None
+    first_3: Optional[int] = None
     jackpot_position: Optional[int] = None
-    second_with_C_old: List[int] = []   # 2ª: 5 mains + C
-    third_5_old: List[int] = []         # 3ª: 5 mains only (no C)
-    fourth_old: List[int] = []          # 4ª: 4 mains
-    fifth_old: List[int] = []           # 5ª: 3 mains
 
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -4376,7 +4481,7 @@ def _la_primitiva_full_wheel_reorder_txt(
             if not line:
                 continue
             try:
-                pos_str, mains_str = line.split(";")
+                pos_str, mains_str = line.split(";", 1)
                 position = int(pos_str)
                 mains = [int(x) for x in mains_str.split(",") if x]
             except Exception:
@@ -4385,18 +4490,23 @@ def _la_primitiva_full_wheel_reorder_txt(
                 continue
             hits_main = sum(1 for n in mains if n in main_set)
             if hits_main == 6:
-                jackpot_position = position
+                if jackpot_position is None:
+                    jackpot_position = position
             elif hits_main == 5:
                 if is_second_prize(mains):
-                    second_with_C_old.append(position)
+                    if first_5c is None:
+                        first_5c = position
                 else:
-                    third_5_old.append(position)  # 3ª (5 aciertos, no C)
+                    if first_5only is None:
+                        first_5only = position
             elif hits_main == 4:
-                fourth_old.append(position)
+                if first_4 is None:
+                    first_4 = position
             elif hits_main == 3:
-                fifth_old.append(position)
-            # Stop only when we have both 1st and (2nd if complementario set).
-            if jackpot_position is not None and (complementario is None or len(second_with_C_old) >= 1):
+                if first_3 is None:
+                    first_3 = position
+
+            if jackpot_position is not None and (complementario is None or first_5c is not None):
                 break
 
     if jackpot_position is None:
@@ -4404,181 +4514,136 @@ def _la_primitiva_full_wheel_reorder_txt(
             404,
             detail="Jackpot (6 mains) not found in La Primitiva full wheel file; cannot reorder",
         )
-    if complementario is not None and len(second_with_C_old) == 0:
+    if complementario is not None and first_5c is None:
         raise HTTPException(
             404,
             detail="2nd prize (5 mains + complementario) not found in La Primitiva full wheel file; cannot reorder",
         )
     print(
-        f"[la-prim-reorder] jackpot_position={jackpot_position} | 2ª(5+C)_old={len(second_with_C_old)} 3ª_old={len(third_5_old)} 4ª_old={len(fourth_old)} 5ª_old={len(fifth_old)}",
+        f"[la-prim-reorder] jackpot_position={jackpot_position} | first 2ª(5+C)={first_5c} 3ª={first_5only} 4ª={first_4} 5ª={first_3}",
         flush=True,
     )
 
-    jackpot_early = jackpot_position < first_position
-    if jackpot_early:
+    if jackpot_position in bought_lines:
+        print("[la-prim-reorder] skip: jackpot line is in bought line positions", flush=True)
+        return
+
+    if jackpot_position <= first_position:
         print(
-            f"[la-prim-reorder] jackpot_position {jackpot_position} < first_position {first_position}; will move only 2nd (5+C) if outside 90%%-110%% band",
+            f"[la-prim-reorder] skip: jackpot_position {jackpot_position} <= first_position {first_position}",
             flush=True,
         )
-
-    # Second pass: only when we move jackpot; detect early 3ª/4ª/5ª before first_position.
-    third_5_new: List[int] = []   # 3ª (5 aciertos) before fp
-    fourth_new: List[int] = []   # 4ª before fp
-    fifth_new: List[int] = []    # 5ª before fp
-    if not jackpot_early:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    pos_str, mains_str = line.split(";")
-                    position = int(pos_str)
-                    mains = [int(x) for x in mains_str.split(",") if x]
-                except Exception:
-                    continue
-                if position > first_position:
-                    break
-                if len(mains) != 6:
-                    continue
-                hits_main = sum(1 for n in mains if n in main_set)
-                has_c = hits_main == 5 and complementario is not None and (set(mains) - main_set) == {complementario}
-                if hits_main == 5 and not has_c:
-                    third_5_new.append(position)  # 3ª
-                elif hits_main == 4:
-                    fourth_new.append(position)    # 4ª
-                elif hits_main == 3:
-                    fifth_new.append(position)     # 5ª
-
-    has_3_5_before = len(third_5_new) > 0
-    has_4_before = len(fourth_new) > 0
-    has_5_before = len(fifth_new) > 0
+        return
 
     import random as rand_module
 
     def range_list_lp(lo: float, hi: int) -> List[int]:
         return list(range(max(1, int(lo)), hi + 1))
 
-    r_2 = range_list_lp(first_position * 0.8, first_position - 1)   # 3ª (5 aciertos)
-    r_3 = range_list_lp(first_position * 0.6, first_position - 1) # 4ª
-    r_4 = range_list_lp(first_position * 0.4, first_position - 1) # 5ª
+    r_3a = range_list_lp(first_position * 0.8, first_position - 1)
+    r_4a = range_list_lp(first_position * 0.6, first_position - 1)
+    r_5a = range_list_lp(first_position * 0.4, first_position - 1)
 
-    used: set[int] = set()
-    moves: List[Tuple[int, int]] = []
-
-    # Jackpot move only when jackpot is at or after first_position.
-    if not jackpot_early:
-        moves.append((jackpot_position, first_position))
-        used.add(first_position)
-
-    # 2nd prize (5+C): move one to [0.9*fp, 1.1*fp] only if its current position is outside that band.
     band_2nd_lo = max(1, int(0.9 * first_position))
     band_2nd_hi = int(1.1 * first_position)
     band_2nd = [p for p in range(band_2nd_lo, band_2nd_hi + 1) if p != first_position]
-    if second_with_C_old and band_2nd:
-        # Only move 2nd if at least one 2nd position is outside the 90%-110% band.
-        outside_band = [p for p in second_with_C_old if p < band_2nd_lo or p > band_2nd_hi]
-        if outside_band:
-            pool_2nd = outside_band
-            avail_2nd = [x for x in band_2nd if x not in used]
-            if pool_2nd and avail_2nd:
-                src_2nd = rand_module.choice(pool_2nd)
-                tgt_2nd = rand_module.choice(avail_2nd)
-                used.add(tgt_2nd)
-                moves.append((src_2nd, tgt_2nd))
-                print(f"[la-prim-reorder] 2nd prize (5+C) move: {src_2nd} -> {tgt_2nd} (band 90%%-110%% fp)", flush=True)
+
+    used_ranks: set[int] = {first_position}
+
+    def pick_one_rank(available: List[int]) -> Optional[int]:
+        pool = [x for x in available if x not in used_ranks]
+        if not pool:
+            return None
+        chosen = rand_module.choice(pool)
+        used_ranks.add(chosen)
+        return chosen
+
+    planned: List[Tuple[int, int]] = [(jackpot_position, first_position)]
+
+    if first_5c is not None and band_2nd:
+        outside = first_5c < band_2nd_lo or first_5c > band_2nd_hi
+        if outside:
+            nr = pick_one_rank(band_2nd)
+            if nr is not None:
+                planned.append((first_5c, nr))
+                print(
+                    f"[la-prim-reorder] planned 2ª(5+C): line {first_5c} -> rank {nr} (90%-110% band)",
+                    flush=True,
+                )
         else:
-            print(f"[la-prim-reorder] 2nd prize (5+C) already in band [{band_2nd_lo},{band_2nd_hi}]; no move", flush=True)
-
-    # 3ª / 4ª / 5ª moves only when we are doing full reorder (jackpot move).
-    if not jackpot_early:
-        def pick_single_move(candidates: List[int], band: List[int]) -> List[Tuple[int, int]]:
-            if not candidates or not band:
-                return []
-            pool = [p for p in candidates if p > first_position]
-            if not pool:
-                return []
-            avail = [x for x in band if x not in used]
-            if not avail:
-                return []
-            old_pos = rand_module.choice(pool)
-            new_pos = rand_module.choice(avail)
-            used.add(new_pos)
-            return [(old_pos, new_pos)]
-
-        if not has_3_5_before:
-            moves.extend(pick_single_move(third_5_old, r_2))  # 3ª (5 aciertos)
-        if not has_4_before:
-            moves.extend(pick_single_move(fourth_old, r_3))    # 4ª
-        if not has_5_before:
-            moves.extend(pick_single_move(fifth_old, r_4))    # 5ª
-
-    if not moves:
-        print("[la-prim-reorder] no moves to apply; skipping write", flush=True)
-        return
-
-    print(
-        f"[la-prim-reorder] band_2nd=[{band_2nd_lo},{band_2nd_hi}] r_2={len(r_2)} r_3={len(r_3)} r_4={len(r_4)} | moves ({len(moves)}): {moves}",
-        flush=True,
-    )
-
-    # Build mapping: for each new position -> old position (only for moved tickets)
-    moved_from: set[int] = set()
-    moved_to: Dict[int, int] = {}
-    for old_pos, new_pos in moves:
-        moved_from.add(old_pos)
-        moved_to[new_pos] = old_pos
-
-    # Read only the moved tickets' content into memory
-    moved_content: Dict[int, str] = {}
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            raw = line.rstrip("\n")
-            if not raw:
-                continue
-            try:
-                pos_str, mains_str = raw.split(";")
-                position = int(pos_str)
-            except Exception:
-                continue
-            if position in moved_from:
-                moved_content[position] = mains_str
-            if len(moved_content) == len(moved_from):
-                break
-
-    # Skip moves when the moved ticket already exists in bought_tickets.
-    if bought_ticket_keys:
-        moved_to_filtered: Dict[int, int] = {}
-        for new_pos, old_pos in moved_to.items():
-            mains_str2 = moved_content.get(old_pos, "")
-            mains = [int(x) for x in mains_str2.split(",") if x] if mains_str2 else []
-            if len(mains) == 6:
-                key = tuple(sorted(mains))
-                if key in bought_ticket_keys:
-                    continue
-            moved_to_filtered[new_pos] = old_pos
-        moved_to = moved_to_filtered
-
-    if bought_line_positions:
-        import random as rand_module
-
-        max_ln = _txt_max_line_index_first_column(path)
-        if max_ln < 1:
-            cands = [jackpot_position or 0, first_position] + list(moved_to.keys()) + list(moved_to.values())
-            max_ln = max(cands) if cands else 1
-        if max_ln < 1:
-            max_ln = 1
-        n_before = len(moved_to)
-        moved_to = _reorder_moved_to_avoid_bought_line_targets(
-            moved_to, bought_line_positions, max_ln, rand_module
-        )
-        if len(moved_to) != n_before:
             print(
-                f"[la-prim-reorder] bought-line target adjust: moves {n_before} -> {len(moved_to)} | max_line={max_ln} final keys={sorted(moved_to.keys())}",
+                f"[la-prim-reorder] 2ª(5+C) already in band [{band_2nd_lo},{band_2nd_hi}]; no 2ª move",
                 flush=True,
             )
 
-    # Write to temp file, streaming from original; only swapped tickets use moved_content
+    if first_5only is not None and first_5only > first_position:
+        nr = pick_one_rank(r_3a)
+        if nr is not None:
+            planned.append((first_5only, nr))
+    if first_4 is not None and first_4 > first_position:
+        nr = pick_one_rank(r_4a)
+        if nr is not None:
+            planned.append((first_4, nr))
+    if first_3 is not None and first_3 > first_position:
+        nr = pick_one_rank(r_5a)
+        if nr is not None:
+            planned.append((first_3, nr))
+
+    print(f"[la-prim-reorder] planned (old, new_rank) before bought filter: {planned}", flush=True)
+
+    planned_filtered: List[Tuple[int, int]] = []
+    for old_pos, new_rank in planned:
+        if old_pos in bought_lines:
+            print(f"[la-prim-reorder] drop move: old line {old_pos} is bought", flush=True)
+            continue
+        planned_filtered.append((old_pos, new_rank))
+    planned = planned_filtered
+
+    if keys:
+        pos_need = {p for p, _ in planned}
+        payloads_keys = _la_primitiva_read_line_payloads(path, pos_need)
+        planned_keys: List[Tuple[int, int]] = []
+        for old_pos, new_rank in planned:
+            ms = payloads_keys.get(old_pos, "")
+            mains = [int(x) for x in ms.split(",") if x] if ms else []
+            if len(mains) == 6:
+                k = tuple(sorted(mains))
+                if k in keys:
+                    print(f"[la-prim-reorder] drop move: old line {old_pos} matches bought ticket key", flush=True)
+                    continue
+            planned_keys.append((old_pos, new_rank))
+        planned = planned_keys
+
+    if not planned:
+        print("[la-prim-reorder] skip: no moves left after bought filters", flush=True)
+        return
+
+    max_line = _txt_max_line_index_first_column(path)
+    if max_line < 1:
+        raise HTTPException(400, detail="La Primitiva full wheel file has no valid positions")
+
+    resolved, unresolved = _euromillones_resolve_ranks_to_physical(planned, bought_lines, max_line)
+    if unresolved:
+        print(f"[la-prim-reorder] skip: could not resolve ranks: {unresolved}", flush=True)
+        return
+
+    print(f"[la-prim-reorder] resolved physical (old, dest): {resolved}", flush=True)
+
+    involved: set[int] = set()
+    for o, d in resolved:
+        involved.add(o)
+        involved.add(d)
+    orig = _la_primitiva_read_line_payloads(path, involved)
+    if len(orig) < len(involved):
+        raise HTTPException(400, detail="Could not read all lines for La Primitiva reorder swap")
+
+    line_payload: Dict[int, str] = {}
+    for o, d in resolved:
+        if o not in orig or d not in orig:
+            raise HTTPException(400, detail="Missing line content for La Primitiva reorder swap")
+        line_payload[o] = orig[d]
+        line_payload[d] = orig[o]
+
     dirpath = os.path.dirname(path)
     fd, temp_path = tempfile.mkstemp(
         suffix=".txt", prefix="la_primitiva_reorder_", dir=dirpath if dirpath else "."
@@ -4592,21 +4657,16 @@ def _la_primitiva_full_wheel_reorder_txt(
                         out.write(line)
                         continue
                     try:
-                        pos_str, mains_str = raw.split(";")
+                        pos_str, mains_str = raw.split(";", 1)
                         position = int(pos_str)
                     except Exception:
-                        out.write(line)
+                        out.write(line if line.endswith("\n") else line + "\n")
                         continue
-                    if position in moved_to:
-                        old_pos = moved_to[position]
-                        mains_str2 = moved_content.get(old_pos, mains_str)
-                        out.write(f"{position};{mains_str2}\n")
+                    if position in line_payload:
+                        out.write(f"{position};{line_payload[position]}\n")
                     else:
                         out.write(line if line.endswith("\n") else line + "\n")
-        print(
-            f"[la-prim-reorder] writing swapped lines to {path}",
-            flush=True,
-        )
+        print(f"[la-prim-reorder] full file rewrite -> {path}", flush=True)
         os.replace(temp_path, path)
     except Exception:
         try:
@@ -7031,7 +7091,8 @@ EUROMILLONES_BUCKET_SIZE = 5
 async def api_euromillones_betting_enqueue_by_count(request: Request):
     """
     Create buy-queue items by ticket count. Body: { "count": int, "draw_date"?, "cutoff_draw_id"? }.
-    Reads from full_wheel file, splits into buckets of 5 (one queue item per bucket). No max count.
+    Reads from full_wheel file, splits into buckets of 5 (one queue item per bucket).
+    Capped by LOTTERY_MAX_ENQUEUE_BY_COUNT (default 100000). Inserts each bucket immediately to limit memory.
     """
     try:
         body = await request.json() or {}
@@ -7040,6 +7101,12 @@ async def api_euromillones_betting_enqueue_by_count(request: Request):
     count = body.get("count")
     if not isinstance(count, int) or count < 1:
         raise HTTPException(400, detail="Body must contain 'count' (positive integer)")
+    max_n = _lottery_max_enqueue_by_count()
+    if count > max_n:
+        raise HTTPException(
+            400,
+            detail=f"count must be <= {max_n} per request (raise LOTTERY_MAX_ENQUEUE_BY_COUNT or split into multiple requests)",
+        )
     draw_date = (body.get("draw_date") or "").strip()[:10] or None
     cutoff_draw_id = (body.get("cutoff_draw_id") or "").strip() or None
     if db is None:
@@ -7085,11 +7152,14 @@ async def api_euromillones_betting_enqueue_by_count(request: Request):
         stars = t.get("stars")
         if isinstance(mains, list) and len(mains) == 5 and isinstance(stars, list) and len(stars) == 2:
             excluded.add((tuple(sorted(mains)), tuple(sorted(stars))))
-    collected: List[Dict] = []
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    inserted_ids: List[str] = []
+    bucket_buf: List[Dict] = []
+    total_collected = 0
     try:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
-                if len(collected) >= count:
+                if total_collected >= count:
                     break
                 line = line.strip()
                 if not line:
@@ -7107,17 +7177,28 @@ async def api_euromillones_betting_enqueue_by_count(request: Request):
                 if key in excluded:
                     continue
                 excluded.add(key)
-                collected.append({"mains": mains, "stars": stars, "position": position})
-                if len(collected) >= count:
+                bucket_buf.append({"mains": mains, "stars": stars, "position": position})
+                total_collected += 1
+                if len(bucket_buf) >= EUROMILLONES_BUCKET_SIZE:
+                    chunk = bucket_buf[:EUROMILLONES_BUCKET_SIZE]
+                    del bucket_buf[:EUROMILLONES_BUCKET_SIZE]
+                    doc_queue = {
+                        "lottery": "euromillones",
+                        "tickets": chunk,
+                        "tickets_count": len(chunk),
+                        "draw_date": date_str,
+                        "cutoff_draw_id": cutoff,
+                        "status": "waiting",
+                        "created_at": now,
+                    }
+                    ins = coll_queue.insert_one(doc_queue)
+                    inserted_ids.append(str(ins.inserted_id))
+                if total_collected >= count:
                     break
     except FileNotFoundError:
         raise HTTPException(404, detail="Full wheel file not found on disk")
-    if len(collected) == 0:
-        raise HTTPException(400, detail="No tickets available (all already in queue or bought)")
-    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    inserted_ids = []
-    for i in range(0, len(collected), EUROMILLONES_BUCKET_SIZE):
-        chunk = collected[i : i + EUROMILLONES_BUCKET_SIZE]
+    if bucket_buf:
+        chunk = bucket_buf
         doc_queue = {
             "lottery": "euromillones",
             "tickets": chunk,
@@ -7129,12 +7210,14 @@ async def api_euromillones_betting_enqueue_by_count(request: Request):
         }
         ins = coll_queue.insert_one(doc_queue)
         inserted_ids.append(str(ins.inserted_id))
+    if total_collected == 0:
+        raise HTTPException(400, detail="No tickets available (all already in queue or bought)")
     return JSONResponse(
         content={
             "status": "ok",
             "queued": len(inserted_ids),
-            "total_tickets": len(collected),
-            "message": f"{len(inserted_ids)} colas creadas ({len(collected)} boletos).",
+            "total_tickets": total_collected,
+            "message": f"{len(inserted_ids)} colas creadas ({total_collected} boletos).",
         },
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
@@ -8037,7 +8120,7 @@ async def api_la_primitiva_betting_enqueue_by_count(request: Request):
     """
     Create buy-queue items by ticket count. Body: { "count": int, "draw_date"?, "cutoff_draw_id"? }.
     Reads from full_wheel file, splits into buckets of 8 (one queue item per bucket). Each bucket
-    gets a random reintegro (0-9). No max count.
+    gets a random reintegro (0-9). Capped by LOTTERY_MAX_ENQUEUE_BY_COUNT (default 100000).
     Example: count=800 → 100 queue items of 8 tickets each, each queue with a random reintegro.
     """
     try:
@@ -8047,6 +8130,12 @@ async def api_la_primitiva_betting_enqueue_by_count(request: Request):
     count = body.get("count")
     if not isinstance(count, int) or count < 1:
         raise HTTPException(400, detail="Body must contain 'count' (positive integer)")
+    max_n = _lottery_max_enqueue_by_count()
+    if count > max_n:
+        raise HTTPException(
+            400,
+            detail=f"count must be <= {max_n} per request (raise LOTTERY_MAX_ENQUEUE_BY_COUNT or split into multiple requests)",
+        )
     draw_date = (body.get("draw_date") or "").strip()[:10] or None
     cutoff_draw_id = (body.get("cutoff_draw_id") or "").strip() or None
     if db is None:
@@ -8090,11 +8179,15 @@ async def api_la_primitiva_betting_enqueue_by_count(request: Request):
         mains = t.get("mains")
         if isinstance(mains, list) and len(mains) == 6:
             excluded.add(tuple(sorted(mains)))
-    collected: List[Dict] = []
+    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    inserted_ids: List[str] = []
+    items_meta: List[Dict] = []
+    bucket_buf: List[Dict] = []
+    total_collected = 0
     try:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
-                if len(collected) >= count:
+                if total_collected >= count:
                     break
                 line = line.strip()
                 if not line:
@@ -8111,17 +8204,32 @@ async def api_la_primitiva_betting_enqueue_by_count(request: Request):
                 if key in excluded:
                     continue
                 excluded.add(key)
-                collected.append({"mains": mains, "position": position})
-                if len(collected) >= count:
+                bucket_buf.append({"mains": mains, "position": position})
+                total_collected += 1
+                if len(bucket_buf) >= LA_PRIMITIVA_BUCKET_SIZE:
+                    raw_chunk = bucket_buf[:LA_PRIMITIVA_BUCKET_SIZE]
+                    del bucket_buf[:LA_PRIMITIVA_BUCKET_SIZE]
+                    reintegro_bucket = random.randint(0, 9)
+                    chunk = [{"mains": t["mains"], "reintegro": reintegro_bucket, "position": t["position"]} for t in raw_chunk]
+                    doc_queue = {
+                        "lottery": "la-primitiva",
+                        "tickets": chunk,
+                        "tickets_count": len(chunk),
+                        "draw_date": date_str,
+                        "cutoff_draw_id": cutoff,
+                        "status": "waiting",
+                        "created_at": now,
+                    }
+                    ins = coll_queue.insert_one(doc_queue)
+                    qid = str(ins.inserted_id)
+                    inserted_ids.append(qid)
+                    items_meta.append({"id": qid, "tickets_count": len(chunk)})
+                if total_collected >= count:
                     break
     except FileNotFoundError:
         raise HTTPException(404, detail="Full wheel file not found on disk")
-    if len(collected) == 0:
-        raise HTTPException(400, detail="No tickets available (all already in queue or bought)")
-    now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    inserted_ids: List[str] = []
-    for i in range(0, len(collected), LA_PRIMITIVA_BUCKET_SIZE):
-        raw_chunk = collected[i : i + LA_PRIMITIVA_BUCKET_SIZE]
+    if bucket_buf:
+        raw_chunk = bucket_buf
         reintegro_bucket = random.randint(0, 9)
         chunk = [{"mains": t["mains"], "reintegro": reintegro_bucket, "position": t["position"]} for t in raw_chunk]
         doc_queue = {
@@ -8134,14 +8242,18 @@ async def api_la_primitiva_betting_enqueue_by_count(request: Request):
             "created_at": now,
         }
         ins = coll_queue.insert_one(doc_queue)
-        inserted_ids.append(str(ins.inserted_id))
+        qid = str(ins.inserted_id)
+        inserted_ids.append(qid)
+        items_meta.append({"id": qid, "tickets_count": len(chunk)})
+    if total_collected == 0:
+        raise HTTPException(400, detail="No tickets available (all already in queue or bought)")
     return JSONResponse(
         content={
             "status": "ok",
             "queued": len(inserted_ids),
-            "total_tickets": len(collected),
-            "items": [{"id": qid, "tickets_count": min(LA_PRIMITIVA_BUCKET_SIZE, len(collected) - i * LA_PRIMITIVA_BUCKET_SIZE)} for i, qid in enumerate(inserted_ids)],
-            "message": f"{len(inserted_ids)} colas creadas ({len(collected)} boletos).",
+            "total_tickets": total_collected,
+            "items": items_meta,
+            "message": f"{len(inserted_ids)} colas creadas ({total_collected} boletos).",
         },
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
