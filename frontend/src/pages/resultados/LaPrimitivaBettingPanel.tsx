@@ -418,7 +418,7 @@ export function LaPrimitivaBettingPanel() {
         return;
       }
 
-      const { headers, rows } = flattenLaPrimitivaQueue(queueSlice);
+      const { headers, rows } = flattenLaPrimitivaQueue(queueSlice, queueNextDrawDate || queueLastDrawDate);
       if (rows.length === 0) {
         setError('No hay boletos en la cola para exportar.');
         return;
@@ -457,7 +457,7 @@ export function LaPrimitivaBettingPanel() {
         return;
       }
 
-      const { headers, rows } = flattenLaPrimitivaQueue(queueSlice);
+      const { headers, rows } = flattenLaPrimitivaQueue(queueSlice, queueNextDrawDate || queueLastDrawDate);
       if (rows.length === 0) {
         setError('No hay boletos en la cola para exportar.');
         return;
@@ -473,7 +473,7 @@ export function LaPrimitivaBettingPanel() {
 
   const handleExportLaPrimitivaPdf = useCallback(async (printTab: Window | null, selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
     const queueSlice = queueSliceByTicketCount(selection);
-    const { headers, rows } = flattenLaPrimitivaQueue(queueSlice);
+    const { headers, rows } = flattenLaPrimitivaQueue(queueSlice, queueNextDrawDate || queueLastDrawDate);
     if (rows.length === 0) {
       printTab?.close();
       setError('No hay boletos en la cola para exportar.');

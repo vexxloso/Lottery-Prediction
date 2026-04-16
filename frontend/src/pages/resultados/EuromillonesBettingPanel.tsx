@@ -373,7 +373,7 @@ export function EuromillonesBettingPanel() {
         return;
       }
 
-      const { headers, rows } = flattenEuromillonesQueue(queueSlice);
+      const { headers, rows } = flattenEuromillonesQueue(queueSlice, queueNextDrawDate || queueLastDrawDate);
       if (rows.length === 0) {
         setError('No hay boletos en la cola para exportar.');
         return;
@@ -412,7 +412,7 @@ export function EuromillonesBettingPanel() {
         return;
       }
 
-      const { headers, rows } = flattenEuromillonesQueue(queueSlice);
+      const { headers, rows } = flattenEuromillonesQueue(queueSlice, queueNextDrawDate || queueLastDrawDate);
       if (rows.length === 0) {
         setError('No hay boletos en la cola para exportar.');
         return;
@@ -428,7 +428,7 @@ export function EuromillonesBettingPanel() {
 
   const handleExportEuromillonesPdf = useCallback(async (printTab: Window | null, selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
     const queueSlice = queueSliceByTicketCount(selection);
-    const { headers, rows } = flattenEuromillonesQueue(queueSlice);
+    const { headers, rows } = flattenEuromillonesQueue(queueSlice, queueNextDrawDate || queueLastDrawDate);
     if (rows.length === 0) {
       printTab?.close();
       setError('No hay boletos en la cola para exportar.');

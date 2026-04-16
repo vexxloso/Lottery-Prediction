@@ -31,7 +31,7 @@ from datetime import datetime as dt, timedelta
 from bson import ObjectId
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware 
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError, PyMongoError
 from selenium import webdriver
@@ -39,6 +39,9 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
+
+# Full-wheel TXT viewer: safe paging by filename (title)
+from pathlib import Path
 
 # Ensure we can import helper scripts from the project-level `scripts` and `refer` folders.
 _ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -117,18 +120,15 @@ def _lottery_max_enqueue_by_count() -> int:
 
 
 def _txt_max_line_index_first_column(path: str) -> int:
-    """Largest leading position integer in each TXT line (field before first ';')."""
+    """Largest 1-based COMBO position in a full-wheel TXT (supports legacy and id-prefixed lines)."""
     m = 0
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             raw = line.strip()
             if not raw:
                 continue
-            try:
-                p = int(raw.split(";", 1)[0])
-            except Exception:
-                continue
-            if p > m:
+            p = _fw_line_position(raw)
+            if p is not None and p > m:
                 m = p
     return m
 
@@ -337,7 +337,6 @@ from train_la_primitiva_model import (
     compute_la_primitiva_probabilities,
 )
 from itertools import combinations
-from pathlib import Path
 
 
 def build_step4_pool(
@@ -650,7 +649,9 @@ def _euromillones_ticket_tier(mains: Sequence[int]) -> int:
 def _generate_full_wheel_file_from_pool(
     mains_pool: Iterable[int],
     stars_pool: Iterable[int],
-    draw_date: str,
+    draw_date_iso: str,
+    file_date_compact: str,
+    lottery_token: str = "EUROMILLONES",
 ) -> dict:
     """
     Generate full Euromillones wheel from the given pools and save to TXT.
@@ -665,11 +666,12 @@ def _generate_full_wheel_file_from_pool(
     - Within each tier, tickets are buffered in small batches and shuffled
       with a deterministic seed to avoid long runs of identical mains.
     - Positions are 1-based and contiguous across all tiers.
+    - Each line: {LOTTERY}_DRAW_{YYYYMMDD}_COMBO_{position};position;mains;stars
     """
     root = Path(_ROOT_DIR)
     out_dir = root / "euromillones_pools"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"euromillones_{draw_date}.txt"
+    out_path = out_dir / f"euromillones_{file_date_compact}.txt"
 
     # Positions are global across tiers.
     position = 0
@@ -679,7 +681,7 @@ def _generate_full_wheel_file_from_pool(
     with out_path.open("w", encoding="utf-8", buffering=1024 * 1024) as f:
         for tier in range(4):
             # Deterministic shuffling per tier (no cancel support).
-            seed = (hash((draw_date, tier)) & 0xFFFFFFFF)
+            seed = (hash((draw_date_iso, tier)) & 0xFFFFFFFF)
             rng = random.Random(seed)
             buffer: List[tuple[List[int], List[int]]] = []
             buffer_size = 1000
@@ -695,7 +697,8 @@ def _generate_full_wheel_file_from_pool(
                         position += 1
                         mains_str = ",".join(str(n) for n in m)
                         stars_str = ",".join(str(n) for n in s)
-                        f.write(f"{position};{mains_str};{stars_str}\n")
+                        tid = _full_wheel_ticket_id(lottery_token, file_date_compact, position)
+                        f.write(f"{tid};{position};{mains_str};{stars_str}\n")
                         total_by_tier[tier] += 1
                     buffer.clear()
 
@@ -705,7 +708,8 @@ def _generate_full_wheel_file_from_pool(
                     position += 1
                     mains_str = ",".join(str(n) for n in m)
                     stars_str = ",".join(str(n) for n in s)
-                    f.write(f"{position};{mains_str};{stars_str}\n")
+                    tid = _full_wheel_ticket_id(lottery_token, file_date_compact, position)
+                    f.write(f"{tid};{position};{mains_str};{stars_str}\n")
                     total_by_tier[tier] += 1
 
     good_count = total_by_tier[0] + total_by_tier[1] + total_by_tier[2]
@@ -713,7 +717,7 @@ def _generate_full_wheel_file_from_pool(
     total = position
     return {
         "file_path": str(out_path),
-        "draw_date": draw_date,
+        "draw_date": draw_date_iso,
         "good_tickets": good_count,
         "bad_tickets": bad_count,
         "total_tickets": total,
@@ -759,7 +763,9 @@ def _la_primitiva_ticket_tier(mains: Sequence[int]) -> int:
 
 def _generate_la_primitiva_full_wheel_file(
     mains_pool: Iterable[int],
-    draw_date: str,
+    draw_date_iso: str,
+    file_date_compact: str,
+    lottery_token: str = "LA_PRIMITIVA",
 ) -> dict:
     """
     Generate full La Primitiva wheel from the given mains pool and save to TXT.
@@ -768,14 +774,14 @@ def _generate_la_primitiva_full_wheel_file(
       into tiers 0..3.
     - Tickets are written tier by tier (0 → 1 → 2 → 3) so structurally
       weaker patterns are pushed toward the end of the file.
-    - Each line: "position;m1,m2,m3,m4,m5,m6"
+    - Each line: {LOTTERY}_DRAW_{YYYYMMDD}_COMBO_{position};position;m1,...,m6
     """
     root = Path(_ROOT_DIR)
     out_dir = root / "la_primitiva_pools"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"la_primitiva_{draw_date}.txt"
+    out_path = out_dir / f"la_primitiva_{file_date_compact}.txt"
     print(
-        f"[la-prim-fullwheel] start generate TXT draw_date={draw_date!r} mains_pool_len={len(list(dict.fromkeys(int(x) for x in mains_pool)))} path={out_path}",
+        f"[la-prim-fullwheel] start generate TXT draw_date={draw_date_iso!r} mains_pool_len={len(list(dict.fromkeys(int(x) for x in mains_pool)))} path={out_path}",
         flush=True,
     )
 
@@ -784,7 +790,7 @@ def _generate_la_primitiva_full_wheel_file(
 
     with out_path.open("w", encoding="utf-8", buffering=1024 * 1024) as f:
         for tier in range(4):
-            seed = (hash((draw_date, "la-primitiva", tier)) & 0xFFFFFFFF)
+            seed = (hash((draw_date_iso, "la-primitiva", tier)) & 0xFFFFFFFF)
             rng = random.Random(seed)
             buffer: List[List[int]] = []
             buffer_size = 1000
@@ -799,7 +805,8 @@ def _generate_la_primitiva_full_wheel_file(
                     for m in buffer:
                         position += 1
                         mains_str = ",".join(str(n) for n in m)
-                        f.write(f"{position};{mains_str}\n")
+                        tid = _full_wheel_ticket_id(lottery_token, file_date_compact, position)
+                        f.write(f"{tid};{position};{mains_str}\n")
                         total_by_tier[tier] += 1
                     buffer.clear()
 
@@ -808,19 +815,20 @@ def _generate_la_primitiva_full_wheel_file(
                 for m in buffer:
                     position += 1
                     mains_str = ",".join(str(n) for n in m)
-                    f.write(f"{position};{mains_str}\n")
+                    tid = _full_wheel_ticket_id(lottery_token, file_date_compact, position)
+                    f.write(f"{tid};{position};{mains_str}\n")
                     total_by_tier[tier] += 1
 
     good_count = total_by_tier[0] + total_by_tier[1] + total_by_tier[2]
     bad_count = total_by_tier[3]
     total = position
     print(
-        f"[la-prim-fullwheel] finished TXT draw_date={draw_date!r} total={total} good={good_count} bad={bad_count}",
+        f"[la-prim-fullwheel] finished TXT draw_date={draw_date_iso!r} total={total} good={good_count} bad={bad_count}",
         flush=True,
     )
     return {
         "file_path": str(out_path),
-        "draw_date": draw_date,
+        "draw_date": draw_date_iso,
         "good_tickets": good_count,
         "bad_tickets": bad_count,
         "total_tickets": total,
@@ -922,7 +930,9 @@ def _iter_el_gordo_tickets_from_pool(
 def _generate_el_gordo_full_wheel_file(
     mains_pool: Iterable[int],
     clave_pool: Iterable[int],
-    draw_date: str,
+    draw_date_iso: str,
+    file_date_compact: str,
+    lottery_token: str = "ELGORDO",
 ) -> dict:
     """
     Generate full El Gordo wheel TXT from the given pools (mirror Euromillones).
@@ -938,7 +948,7 @@ def _generate_el_gordo_full_wheel_file(
     mains_list_dbg = list(mains_pool)
     clave_list_dbg = list(clave_pool)
     print(
-        f"[el-gordo-fullwheel] START draw_date={draw_date} mains_pool={mains_list_dbg} clave_pool={clave_list_dbg}",
+        f"[el-gordo-fullwheel] START draw_date={draw_date_iso} mains_pool={mains_list_dbg} clave_pool={clave_list_dbg}",
         flush=True,
     )
 
@@ -949,7 +959,7 @@ def _generate_el_gordo_full_wheel_file(
     root = Path(_ROOT_DIR)
     out_dir = root / "el_gordo_pools"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"el_gordo_{draw_date}.txt"
+    out_path = out_dir / f"el_gordo_{file_date_compact}.txt"
 
     position = 0
     total_by_tier = [0, 0, 0, 0]
@@ -957,7 +967,7 @@ def _generate_el_gordo_full_wheel_file(
 
     with out_path.open("w", encoding="utf-8", buffering=1024 * 1024) as f:
         for tier in range(4):
-            seed = (hash(("el_gordo_full_wheel", draw_date, tier)) & 0xFFFFFFFF)
+            seed = (hash(("el_gordo_full_wheel", draw_date_iso, tier)) & 0xFFFFFFFF)
             rng = random.Random(seed)
             buffer: List[Tuple[List[int], int]] = []
             buffer_size = 1000
@@ -972,7 +982,8 @@ def _generate_el_gordo_full_wheel_file(
                     for m, c in buffer:
                         position += 1
                         mains_str = ",".join(str(n) for n in m)
-                        f.write(f"{position};{mains_str};{c}\n")
+                        tid = _full_wheel_ticket_id(lottery_token, file_date_compact, position)
+                        f.write(f"{tid};{position};{mains_str};{c}\n")
                         total_by_tier[tier] += 1
                     buffer.clear()
 
@@ -981,7 +992,8 @@ def _generate_el_gordo_full_wheel_file(
                 for m, c in buffer:
                     position += 1
                     mains_str = ",".join(str(n) for n in m)
-                    f.write(f"{position};{mains_str};{c}\n")
+                    tid = _full_wheel_ticket_id(lottery_token, file_date_compact, position)
+                    f.write(f"{tid};{position};{mains_str};{c}\n")
                     total_by_tier[tier] += 1
 
     # Debug: collect first 30 tickets from the generated file
@@ -995,8 +1007,10 @@ def _generate_el_gordo_full_wheel_file(
                 if not line:
                     continue
                 try:
-                    pos_str, mains_str, clave_str = line.split(";")
-                    pos = int(pos_str)
+                    sp = _fw_split_el_gordo_line(line)
+                    if not sp:
+                        continue
+                    pos, mains_str, clave_str = sp
                     mains = [int(x) for x in mains_str.split(",") if x]
                     clave = int(clave_str)
                     debug_first_tickets.append((mains, clave))
@@ -1012,7 +1026,7 @@ def _generate_el_gordo_full_wheel_file(
     total = position
     return {
         "file_path": str(out_path),
-        "draw_date": draw_date,
+        "draw_date": draw_date_iso,
         "good_tickets": total_by_tier[0] + total_by_tier[1] + total_by_tier[2],
         "bad_tickets": total_by_tier[3],
         "total_tickets": total,
@@ -1816,6 +1830,463 @@ def _get_next_draw_date(lottery: str) -> str | None:
     return (doc.get("next_draw_date") or "").strip() or None
 
 
+def _fw_normalize_draw_date_to_iso(raw: str) -> str:
+    """Normalize a draw date string to YYYY-MM-DD (first 10 chars if already ISO)."""
+    s = (raw or "").strip()
+    if not s:
+        raise ValueError("empty draw date")
+    s = s.split()[0].replace("/", "-")
+    if len(s) >= 10 and s[4:5] == "-" and s[7:8] == "-":
+        return s[:10]
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if len(digits) >= 8:
+        d8 = digits[:8]
+        return f"{d8[:4]}-{d8[4:6]}-{d8[6:8]}"
+    raise ValueError(f"unrecognized draw date: {raw!r}")
+
+
+def _fw_compact_from_iso(iso_yyyy_mm_dd: str) -> str:
+    return (iso_yyyy_mm_dd or "").replace("-", "").strip()[:8]
+
+
+def _full_wheel_ticket_id(lottery_token: str, date_compact: str, position: int) -> str:
+    return f"{lottery_token}_DRAW_{date_compact}_COMBO_{position}"
+
+
+def _resolve_full_wheel_dates_for_api(lottery_slug: str, draw_date_override: str | None) -> tuple[str, str]:
+    """
+    (iso_yyyy_mm_dd, compact_yyyymmdd) for full wheel TXT filename and COMBO ids.
+    Optional draw_date query overrides; otherwise uses scraper_metadata.next_draw_date.
+    """
+    o = (draw_date_override or "").strip()
+    if o:
+        iso = _fw_normalize_draw_date_to_iso(o)
+        return iso, _fw_compact_from_iso(iso)
+    nd = _get_next_draw_date(lottery_slug)
+    if not nd or not str(nd).strip():
+        raise HTTPException(
+            400,
+            detail=(
+                f"next_draw_date missing in scraper_metadata for {lottery_slug}; "
+                "set it in metadata or pass draw_date=YYYY-MM-DD (or YYYYMMDD)."
+            ),
+        )
+    iso = _fw_normalize_draw_date_to_iso(str(nd))
+    return iso, _fw_compact_from_iso(iso)
+
+
+def _fw_line_position(raw: str) -> Optional[int]:
+    """1-based COMBO position from a full-wheel TXT line (legacy or id-prefixed)."""
+    p = [x.strip() for x in raw.split(";")]
+    if len(p) >= 4:
+        try:
+            return int(p[1])
+        except (TypeError, ValueError):
+            return None
+    if len(p) == 3:
+        if "_COMBO_" in p[0]:
+            try:
+                return int(p[1])
+            except (TypeError, ValueError):
+                return None
+        try:
+            return int(p[0])
+        except (TypeError, ValueError):
+            return None
+    if len(p) == 2:
+        try:
+            return int(p[0])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _fw_split_euromillones_line(raw: str) -> Optional[tuple[int, str, str]]:
+    """Return (position, mains_str, stars_str) or None."""
+    parts = raw.split(";")
+    if len(parts) >= 4:
+        try:
+            return int(parts[1]), parts[2], parts[3]
+        except (TypeError, ValueError):
+            return None
+    if len(parts) >= 3:
+        try:
+            return int(parts[0]), parts[1], parts[2]
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _fw_split_el_gordo_line(raw: str) -> Optional[tuple[int, str, str]]:
+    """Return (position, mains_str, clave_str) or None."""
+    parts = raw.split(";")
+    if len(parts) >= 4:
+        try:
+            return int(parts[1]), parts[2], parts[3]
+        except (TypeError, ValueError):
+            return None
+    if len(parts) >= 3:
+        try:
+            return int(parts[0]), parts[1], parts[2]
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _fw_split_la_primitiva_line(raw: str) -> Optional[tuple[int, str]]:
+    """Return (position, mains_str) or None."""
+    parts = raw.split(";")
+    if len(parts) >= 3 and "_COMBO_" in (parts[0] or ""):
+        try:
+            return int(parts[1]), parts[2]
+        except (TypeError, ValueError):
+            return None
+    if len(parts) >= 2:
+        try:
+            return int(parts[0]), parts[1]
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _fw_token_and_compact_from_path(path: str) -> tuple[str, str]:
+    """Derive {EUROMILLONES|ELGORDO|LA_PRIMITIVA} and YYYYMMDD from pool filename or first line id."""
+    base = os.path.basename(path)
+    m = re.match(r"^(euromillones|el_gordo|la_primitiva)_(\d{8})\.txt$", base, re.I)
+    if m:
+        pref = m.group(1).lower()
+        tok = {"euromillones": "EUROMILLONES", "el_gordo": "ELGORDO", "la_primitiva": "LA_PRIMITIVA"}[pref]
+        return tok, m.group(2)
+    m2 = re.match(r"^(euromillones|el_gordo|la_primitiva)_(\d{4}-\d{2}-\d{2})\.txt$", base, re.I)
+    if m2:
+        pref = m2.group(1).lower()
+        tok = {"euromillones": "EUROMILLONES", "el_gordo": "ELGORDO", "la_primitiva": "LA_PRIMITIVA"}[pref]
+        return tok, m2.group(2).replace("-", "")
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            raw = line.strip()
+            if not raw:
+                continue
+            parts = raw.split(";")
+            if len(parts) >= 4 or (len(parts) >= 3 and "_COMBO_" in (parts[0] or "")):
+                tid = parts[0]
+                m3 = re.match(r"^(.+)_DRAW_(\d{8})_COMBO_\d+$", tid)
+                if m3:
+                    return m3.group(1), m3.group(2)
+            break
+    raise ValueError(f"Cannot derive lottery id prefix / date from {path!r}")
+
+
+def _fw_export_max_lines() -> int:
+    """Upper bound lines per export request (default 200000)."""
+    raw = os.environ.get("FULL_WHEEL_EXPORT_MAX_LINES", "200000").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 200_000
+    return max(1, min(n, 5_000_000))
+
+
+def _fw_export_range(start_position: int, end_position: Optional[int], total: int) -> tuple[int, int]:
+    if start_position < 1:
+        raise HTTPException(400, detail="start_position must be >= 1")
+    if total > 0 and start_position > total:
+        raise HTTPException(400, detail=f"start_position must be <= total tickets ({total})")
+    max_lines = _fw_export_max_lines()
+    if end_position is None or end_position <= 0:
+        end = start_position + max_lines - 1
+        if total > 0:
+            end = min(end, total)
+        return start_position, end
+    if end_position < start_position:
+        raise HTTPException(400, detail="end_position must be >= start_position")
+    if total > 0 and end_position > total:
+        raise HTTPException(400, detail=f"end_position must be <= total tickets ({total})")
+    if (end_position - start_position + 1) > max_lines:
+        raise HTTPException(
+            400,
+            detail=f"Requested range too large. Max lines per export is {max_lines} (set FULL_WHEEL_EXPORT_MAX_LINES to raise).",
+        )
+    return start_position, end_position
+
+
+def _fw_csv_path_for_full_wheel(txt_path: str) -> str:
+    folder = os.path.dirname(txt_path) or "."
+    base = os.path.splitext(os.path.basename(txt_path))[0]
+    return os.path.join(folder, f"{base}.csv")
+
+
+def _fw_generate_full_csv_if_needed(txt_path: str, lottery_slug: str) -> str:
+    """
+    Create a full CSV file next to the full-wheel TXT (streaming read/write).
+    If already exists and is newer than TXT, reuse it.
+    """
+    csv_path = _fw_csv_path_for_full_wheel(txt_path)
+    try:
+        if os.path.isfile(csv_path) and os.path.getmtime(csv_path) >= os.path.getmtime(txt_path):
+            return csv_path
+    except OSError:
+        pass
+
+    token, compact = _fw_token_and_compact_from_path(txt_path)
+    tmp_path = csv_path + ".tmp"
+    header = (
+        "ticket_id;position;mains;stars\n"
+        if lottery_slug == "euromillones"
+        else "ticket_id;position;mains;clave\n"
+        if lottery_slug == "el-gordo"
+        else "ticket_id;position;mains\n"
+    )
+
+    with open(tmp_path, "w", encoding="utf-8", newline="") as out:
+        out.write(header)
+        with open(txt_path, "r", encoding="utf-8") as f:
+            for line in f:
+                raw = line.rstrip("\n")
+                if not raw:
+                    continue
+                if lottery_slug == "euromillones":
+                    sp = _fw_split_euromillones_line(raw)
+                    if not sp:
+                        continue
+                    p, mains_str, stars_str = sp
+                    tid = raw.split(";", 1)[0]
+                    if "_COMBO_" not in tid:
+                        tid = _full_wheel_ticket_id(token, compact, p)
+                    out.write(f"{tid};{p};{mains_str};{stars_str}\n")
+                elif lottery_slug == "el-gordo":
+                    sp = _fw_split_el_gordo_line(raw)
+                    if not sp:
+                        continue
+                    p, mains_str, clave_str = sp
+                    tid = raw.split(";", 1)[0]
+                    if "_COMBO_" not in tid:
+                        tid = _full_wheel_ticket_id(token, compact, p)
+                    out.write(f"{tid};{p};{mains_str};{clave_str}\n")
+                else:
+                    sp = _fw_split_la_primitiva_line(raw)
+                    if not sp:
+                        continue
+                    p, mains_str = sp
+                    tid = raw.split(";", 1)[0]
+                    if "_COMBO_" not in tid:
+                        tid = _full_wheel_ticket_id(token, compact, p)
+                    out.write(f"{tid};{p};{mains_str}\n")
+
+    os.replace(tmp_path, csv_path)
+    return csv_path
+
+
+def _fw_safe_title_to_fullwheel_path(title: str) -> str:
+    """
+    Resolve a *filename only* (no directories) to a full-wheel TXT path inside known folders.
+    Prevents path traversal. Title examples: 'el_gordo_20260308.txt'
+    """
+    t = (title or "").strip()
+    if not t:
+        raise HTTPException(400, detail="title is required")
+    if len(t) > 200:
+        raise HTTPException(400, detail="title too long")
+    # Disallow any path separators or traversal.
+    if any(x in t for x in ("/", "\\", ":", "..")):
+        raise HTTPException(400, detail="invalid title")
+    if not re.match(r"^[A-Za-z0-9_.-]+\.txt$", t):
+        raise HTTPException(400, detail="invalid title")
+
+    root = Path(_ROOT_DIR)
+    allowed_dirs = [
+        root / "euromillones_pools",
+        root / "el_gordo_pools",
+        root / "la_primitiva_pools",
+    ]
+    for d in allowed_dirs:
+        try:
+            p = (d / t).resolve()
+            # Ensure resolved path stays within the directory.
+            d_res = d.resolve()
+            if d_res not in p.parents:
+                continue
+            if p.is_file():
+                return str(p)
+        except Exception:
+            continue
+    raise HTTPException(404, detail="file not found")
+
+
+# --- CSV preparation jobs (for UI progress while server generates CSV) ---
+_csv_prepare_jobs_lock = threading.Lock()
+_csv_prepare_jobs: dict[str, dict] = {}  # job_id -> {status, progress, error, txt_path, csv_path, lottery, started_at, updated_at}
+
+
+def _resolve_full_wheel_txt_path_for_export(lottery_slug: str, cutoff_draw_id: str | None) -> str:
+    """Resolve full-wheel TXT path for latest train_progress (or explicit cutoff_draw_id)."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    slug = (lottery_slug or "").strip().lower()
+    coll_name = (
+        EUROMILLONES_TRAIN_PROGRESS_COLLECTION
+        if slug == "euromillones"
+        else EL_GORDO_TRAIN_PROGRESS_COLLECTION
+        if slug == "el-gordo"
+        else LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION
+        if slug == "la-primitiva"
+        else None
+    )
+    if not coll_name:
+        raise HTTPException(400, detail="Invalid lottery")
+    coll = db[coll_name]
+    cid = (cutoff_draw_id or "").strip()
+    doc = None
+    if cid:
+        doc = coll.find_one({"cutoff_draw_id": cid}) or (coll.find_one({"cutoff_draw_id": int(cid)}) if cid.isdigit() else None)
+    if doc is None:
+        doc = _resolve_latest_train_progress_doc(slug)
+    if not doc:
+        raise HTTPException(404, detail=f"No train_progress found for {slug} (last_draw_date)")
+    path = (doc.get("full_wheel_file_path") or "").strip()
+    if not path or not os.path.isfile(path):
+        raise HTTPException(404, detail="Full wheel file not found on disk")
+    return path
+
+
+def _csv_prepare_job_worker(job_id: str) -> None:
+    """Background worker to generate CSV with progress updates."""
+    with _csv_prepare_jobs_lock:
+        job = dict(_csv_prepare_jobs.get(job_id) or {})
+    if not job:
+        return
+    txt_path = job["txt_path"]
+    lottery = job["lottery"]
+    try:
+        size = os.path.getsize(txt_path) if os.path.isfile(txt_path) else 0
+        with _csv_prepare_jobs_lock:
+            _csv_prepare_jobs[job_id]["status"] = "running"
+            _csv_prepare_jobs[job_id]["progress"] = 1
+            _csv_prepare_jobs[job_id]["updated_at"] = time.time()
+
+        csv_path = _fw_csv_path_for_full_wheel(txt_path)
+        token, compact = _fw_token_and_compact_from_path(txt_path)
+        tmp_path = csv_path + ".tmp"
+        header = (
+            "ticket_id;position;mains;stars\n"
+            if lottery == "euromillones"
+            else "ticket_id;position;mains;clave\n"
+            if lottery == "el-gordo"
+            else "ticket_id;position;mains\n"
+        )
+
+        last_update = 0.0
+        with open(tmp_path, "w", encoding="utf-8", newline="") as out:
+            out.write(header)
+            with open(txt_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    with _csv_prepare_jobs_lock:
+                        if _csv_prepare_jobs.get(job_id, {}).get("cancel_requested"):
+                            raise RuntimeError("__CANCELLED__")
+                    raw = line.rstrip("\n")
+                    if not raw:
+                        continue
+                    if lottery == "euromillones":
+                        sp = _fw_split_euromillones_line(raw)
+                        if not sp:
+                            continue
+                        p, mains_str, stars_str = sp
+                        tid = raw.split(";", 1)[0]
+                        if "_COMBO_" not in tid:
+                            tid = _full_wheel_ticket_id(token, compact, p)
+                        out.write(f"{tid};{p};{mains_str};{stars_str}\n")
+                    elif lottery == "el-gordo":
+                        sp = _fw_split_el_gordo_line(raw)
+                        if not sp:
+                            continue
+                        p, mains_str, clave_str = sp
+                        tid = raw.split(";", 1)[0]
+                        if "_COMBO_" not in tid:
+                            tid = _full_wheel_ticket_id(token, compact, p)
+                        out.write(f"{tid};{p};{mains_str};{clave_str}\n")
+                    else:
+                        sp = _fw_split_la_primitiva_line(raw)
+                        if not sp:
+                            continue
+                        p, mains_str = sp
+                        tid = raw.split(";", 1)[0]
+                        if "_COMBO_" not in tid:
+                            tid = _full_wheel_ticket_id(token, compact, p)
+                        out.write(f"{tid};{p};{mains_str}\n")
+
+                    # Progress update (based on bytes read)
+                    now = time.time()
+                    if now - last_update >= 0.2:
+                        last_update = now
+                        try:
+                            read_bytes = f.tell()
+                        except Exception:
+                            read_bytes = 0
+                        pct = 1
+                        if size > 0 and read_bytes > 0:
+                            pct = int((read_bytes / size) * 100)
+                            pct = max(1, min(pct, 99))
+                        with _csv_prepare_jobs_lock:
+                            if job_id in _csv_prepare_jobs:
+                                _csv_prepare_jobs[job_id]["progress"] = pct
+                                _csv_prepare_jobs[job_id]["updated_at"] = now
+
+        os.replace(tmp_path, csv_path)
+        with _csv_prepare_jobs_lock:
+            if job_id in _csv_prepare_jobs:
+                _csv_prepare_jobs[job_id]["status"] = "done"
+                _csv_prepare_jobs[job_id]["progress"] = 100
+                _csv_prepare_jobs[job_id]["csv_path"] = csv_path
+                _csv_prepare_jobs[job_id]["updated_at"] = time.time()
+    except Exception as e:
+        if str(e) == "__CANCELLED__":
+            try:
+                if os.path.isfile(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            with _csv_prepare_jobs_lock:
+                if job_id in _csv_prepare_jobs:
+                    _csv_prepare_jobs[job_id]["status"] = "cancelled"
+                    _csv_prepare_jobs[job_id]["error"] = ""
+                    _csv_prepare_jobs[job_id]["updated_at"] = time.time()
+            return
+        with _csv_prepare_jobs_lock:
+            if job_id in _csv_prepare_jobs:
+                _csv_prepare_jobs[job_id]["status"] = "error"
+                _csv_prepare_jobs[job_id]["error"] = str(e)
+                _csv_prepare_jobs[job_id]["updated_at"] = time.time()
+
+
+def _resolve_latest_train_progress_doc(lottery_slug: str):
+    """
+    Resolve the latest train_progress document for a lottery for scraper_metadata.last_draw_date.
+    Primary lookup uses probs_fecha_sorteo == last_draw_date[:10]. Fallback: newest by pipeline_started_at.
+    """
+    if db is None:
+        return None
+    slug = (lottery_slug or "").strip().lower()
+    coll_name = (
+        EUROMILLONES_TRAIN_PROGRESS_COLLECTION
+        if slug == "euromillones"
+        else EL_GORDO_TRAIN_PROGRESS_COLLECTION
+        if slug == "el-gordo"
+        else LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION
+        if slug == "la-primitiva"
+        else None
+    )
+    if not coll_name:
+        return None
+    coll = db[coll_name]
+    last = (_get_last_draw_date(slug) or "").strip()[:10]
+    doc = None
+    if last:
+        doc = coll.find_one({"probs_fecha_sorteo": last}) or coll.find_one({"full_wheel_draw_date": last})
+    if doc is None:
+        doc = coll.find_one(sort=[("pipeline_started_at", -1)]) or coll.find_one(sort=[("full_wheel_started_at", -1)])
+    return doc
+
+
 @app.get("/api/metadata/next-draws")
 def get_next_draws_metadata():
     """
@@ -1870,6 +2341,46 @@ def get_next_draws_metadata():
     return JSONResponse(content={"items": items})
 
 
+@app.get("/api/fullwheel/page")
+def api_fullwheel_page(
+    title: str = Query(..., description="Full-wheel TXT filename only, e.g. el_gordo_20260308.txt"),
+    skip: int = Query(0, ge=0, description="0-based number of non-empty lines to skip"),
+    limit: int = Query(200, ge=1, le=2000, description="Max lines to return (1..2000)"),
+):
+    """
+    Simple paging for very large full-wheel TXT files.
+    The desktop app sends only the file title (filename), plus skip/limit.
+    """
+    path = _fw_safe_title_to_fullwheel_path(title)
+    items: list[dict] = []
+    idx = 0
+    has_more = False
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            raw = line.rstrip("\n")
+            if not raw.strip():
+                continue
+            if idx < skip:
+                idx += 1
+                continue
+            if len(items) >= limit:
+                has_more = True
+                break
+            items.append({"line_no": idx + 1, "raw": raw})
+            idx += 1
+
+    return JSONResponse(
+        content={
+            "title": os.path.basename(path),
+            "skip": skip,
+            "limit": limit,
+            "count": len(items),
+            "items": items,
+            "has_more": has_more,
+        }
+    )
+
+
 # --- Bot credentials (DB-stored username/password for lottery site; bot fetches active one) ---
 BOT_CREDENTIALS_SECRET = (os.getenv("BOT_CREDENTIALS_SECRET") or "").strip() or None
 
@@ -1908,6 +2419,21 @@ _PUBLIC_API_PATHS = {
     "/api/euromillones/compare/full-wheel/reorder",
     "/api/el-gordo/compare/full-wheel/reorder",
     "/api/la-primitiva/compare/full-wheel/reorder",
+    # Public download endpoints for native browser download (Chrome progress UI).
+    "/api/euromillones/full-wheel/export",
+    "/api/el-gordo/full-wheel/export",
+    "/api/la-primitiva/full-wheel/export",
+    "/api/euromillones/full-wheel/prepare-csv",
+    "/api/el-gordo/full-wheel/prepare-csv",
+    "/api/la-primitiva/full-wheel/prepare-csv",
+    "/api/euromillones/full-wheel/prepare-csv/status",
+    "/api/el-gordo/full-wheel/prepare-csv/status",
+    "/api/la-primitiva/full-wheel/prepare-csv/status",
+    "/api/euromillones/full-wheel/prepare-csv/cancel",
+    "/api/el-gordo/full-wheel/prepare-csv/cancel",
+    "/api/la-primitiva/full-wheel/prepare-csv/cancel",
+    # Public TXT viewer paging endpoint (desktop app)
+    "/api/fullwheel/page",
     # Dev-only helper to seed test bought tickets for Euromillones. Do NOT expose in production.
     "/api/dev/euromillones/betting/seed-test-bought",
     # Dev-only helper to seed test bought tickets for El Gordo. Do NOT expose in production.
@@ -2851,14 +3377,21 @@ def api_el_gordo_betting_pool_from_file(
                 line = line.strip()
                 if not line:
                     continue
+                sp = _fw_split_el_gordo_line(line)
+                if not sp:
+                    continue
+                position, mains_str, clave_str = sp
                 try:
-                    pos_str, mains_str, clave_str = line.split(";")
-                    position = int(pos_str)
                     mains = [int(x) for x in mains_str.split(",") if x]
                     clave = int(clave_str)
                 except Exception:
                     continue
-                tickets_list.append({"position": position, "mains": mains, "clave": clave})
+                parts = line.split(";")
+                tid = parts[0] if len(parts) >= 4 and "_COMBO_" in (parts[0] or "") else None
+                row: Dict[str, Any] = {"position": position, "mains": mains, "clave": clave}
+                if tid:
+                    row["ticket_id"] = tid
+                tickets_list.append(row)
     except FileNotFoundError:
         raise HTTPException(404, detail="Full wheel file not found on disk")
 
@@ -3115,7 +3648,7 @@ async def api_el_gordo_betting_enqueue_by_count(request: Request):
     total_in_file = int(doc.get("full_wheel_total_tickets") or 0)
     if not path or total_in_file <= 0:
         raise HTTPException(404, detail="Full wheel file not found or empty for this draw")
-    date_str = (doc.get("probs_fecha_sorteo") or doc.get("full_wheel_draw_date") or date_str or "").strip()[:10] or None
+    date_str = (doc.get("full_wheel_draw_date") or doc.get("probs_fecha_sorteo") or date_str or "").strip()[:10] or None
     cutoff = str(doc.get("cutoff_draw_id") or "") or cutoff
     excluded: set = set()
     for d in coll_queue.find({"status": {"$in": ["waiting", "in_progress"]}}, projection={"tickets": 1}):
@@ -3145,9 +3678,11 @@ async def api_el_gordo_betting_enqueue_by_count(request: Request):
                 line = line.strip()
                 if not line:
                     continue
+                sp = _fw_split_el_gordo_line(line)
+                if not sp:
+                    continue
+                position, mains_str, clave_str = sp
                 try:
-                    pos_str, mains_str, clave_str = line.split(";", 2)
-                    position = int(pos_str)
                     mains = [int(x) for x in mains_str.split(",") if x]
                     clave = int(clave_str)
                 except Exception:
@@ -3298,11 +3833,10 @@ async def api_el_gordo_betting_enqueue_by_range(request: Request):
                 line = line.strip()
                 if not line:
                     continue
-                try:
-                    pos_str, mains_str, clave_str = line.split(";", 2)
-                    position = int(pos_str)
-                except Exception:
+                sp = _fw_split_el_gordo_line(line)
+                if not sp:
                     continue
+                position, mains_str, clave_str = sp
 
                 if position < start_position:
                     continue
@@ -3839,14 +4373,21 @@ def api_euromillones_betting_pool_from_file(
                 line = line.strip()
                 if not line:
                     continue
+                sp = _fw_split_euromillones_line(line)
+                if not sp:
+                    continue
+                position, mains_str, stars_str = sp
                 try:
-                    pos_str, mains_str, stars_str = line.split(";")
-                    position = int(pos_str)
                     mains = [int(x) for x in mains_str.split(",") if x]
                     stars = [int(x) for x in stars_str.split(",") if x]
                 except Exception:
                     continue
-                tickets.append({"position": position, "mains": mains, "stars": stars})
+                parts = line.split(";")
+                tid = parts[0] if len(parts) >= 4 and "_COMBO_" in (parts[0] or "") else None
+                row: Dict[str, Any] = {"position": position, "mains": mains, "stars": stars}
+                if tid:
+                    row["ticket_id"] = tid
+                tickets.append(row)
     except FileNotFoundError:
         raise HTTPException(404, detail="Full wheel file not found on disk")
 
@@ -3929,11 +4470,10 @@ def _euromillones_read_line_payloads(path: str, positions: set[int]) -> Dict[int
             raw = line.rstrip("\n")
             if not raw:
                 continue
-            try:
-                pos_str, mains_str, stars_str = raw.split(";", 2)
-                position = int(pos_str)
-            except Exception:
+            sp = _fw_split_euromillones_line(raw)
+            if not sp:
                 continue
+            position, mains_str, stars_str = sp
             if position in positions:
                 found[position] = (mains_str, stars_str)
     return found
@@ -3979,11 +4519,10 @@ def _el_gordo_read_line_payloads(path: str, positions: set[int]) -> Dict[int, Tu
             raw = line.rstrip("\n")
             if not raw:
                 continue
-            try:
-                pos_str, mains_str, clave_str = raw.split(";", 2)
-                position = int(pos_str)
-            except Exception:
+            sp = _fw_split_el_gordo_line(raw)
+            if not sp:
                 continue
+            position, mains_str, clave_str = sp
             if position in positions:
                 found[position] = (mains_str, clave_str)
     return found
@@ -4032,9 +4571,11 @@ def _euromillones_full_wheel_reorder_txt(
             line = line.strip()
             if not line:
                 continue
+            sp = _fw_split_euromillones_line(line)
+            if not sp:
+                continue
+            position, mains_str, stars_str = sp
             try:
-                pos_str, mains_str, stars_str = line.split(";", 2)
-                position = int(pos_str)
                 mains = [int(x) for x in mains_str.split(",") if x]
                 stars = [int(x) for x in stars_str.split(",") if x]
             except Exception:
@@ -4166,6 +4707,11 @@ def _euromillones_full_wheel_reorder_txt(
     dirpath = os.path.dirname(path)
     fd, temp_path = tempfile.mkstemp(suffix=".txt", prefix="euromillones_reorder_", dir=dirpath if dirpath else ".")
     try:
+        try:
+            fw_tok, fw_compact = _fw_token_and_compact_from_path(path)
+        except Exception:
+            ds = (draw_date or "").strip().replace("-", "")[:8]
+            fw_tok, fw_compact = ("EUROMILLONES", ds if len(ds) == 8 else "00000000")
         with os.fdopen(fd, "w", encoding="utf-8") as out:
             with open(path, "r", encoding="utf-8") as src:
                 for line in src:
@@ -4173,15 +4719,15 @@ def _euromillones_full_wheel_reorder_txt(
                     if not raw:
                         out.write(line)
                         continue
-                    try:
-                        pos_str, mains_str, stars_str = raw.split(";", 2)
-                        position = int(pos_str)
-                    except Exception:
+                    sp = _fw_split_euromillones_line(raw)
+                    if not sp:
                         out.write(line if line.endswith("\n") else line + "\n")
                         continue
+                    position, _ms, _ss = sp
                     if position in line_payload:
                         m2, s2 = line_payload[position]
-                        out.write(f"{position};{m2};{s2}\n")
+                        tid = _full_wheel_ticket_id(fw_tok, fw_compact, position)
+                        out.write(f"{tid};{position};{m2};{s2}\n")
                     else:
                         out.write(line if line.endswith("\n") else line + "\n")
         print(f"[reorder] full file rewrite -> {path}", flush=True)
@@ -4238,9 +4784,11 @@ def _el_gordo_full_wheel_reorder_txt(
             line = line.strip()
             if not line:
                 continue
+            sp = _fw_split_el_gordo_line(line)
+            if not sp:
+                continue
+            position, mains_str, clave_str = sp
             try:
-                pos_str, mains_str, clave_str = line.split(";", 2)
-                position = int(pos_str)
                 mains = [int(x) for x in mains_str.split(",") if x]
                 clave = int(clave_str)
             except Exception:
@@ -4375,6 +4923,11 @@ def _el_gordo_full_wheel_reorder_txt(
     dirpath = os.path.dirname(path)
     fd, temp_path = tempfile.mkstemp(suffix=".txt", prefix="el_gordo_reorder_", dir=dirpath if dirpath else ".")
     try:
+        try:
+            fw_tok, fw_compact = _fw_token_and_compact_from_path(path)
+        except Exception:
+            ds = (draw_date or "").strip().replace("-", "")[:8]
+            fw_tok, fw_compact = ("ELGORDO", ds if len(ds) == 8 else "00000000")
         with os.fdopen(fd, "w", encoding="utf-8") as out:
             with open(path, "r", encoding="utf-8") as src:
                 for line in src:
@@ -4382,15 +4935,15 @@ def _el_gordo_full_wheel_reorder_txt(
                     if not raw:
                         out.write(line)
                         continue
-                    try:
-                        pos_str, mains_str, clave_str = raw.split(";", 2)
-                        position = int(pos_str)
-                    except Exception:
+                    sp = _fw_split_el_gordo_line(raw)
+                    if not sp:
                         out.write(line if line.endswith("\n") else line + "\n")
                         continue
+                    position, _m, _c = sp
                     if position in line_payload:
                         m2, c2 = line_payload[position]
-                        out.write(f"{position};{m2};{c2}\n")
+                        tid = _full_wheel_ticket_id(fw_tok, fw_compact, position)
+                        out.write(f"{tid};{position};{m2};{c2}\n")
                     else:
                         out.write(line if line.endswith("\n") else line + "\n")
         print(f"[el-gordo-reorder] full file rewrite -> {path}", flush=True)
@@ -4405,7 +4958,7 @@ def _el_gordo_full_wheel_reorder_txt(
 
 
 def _la_primitiva_read_line_payloads(path: str, positions: set[int]) -> Dict[int, str]:
-    """Read mains_str for given 1-based line indices (La Primitiva TXT: position;mains)."""
+    """Read mains_str for given 1-based line indices (La Primitiva TXT: position;mains or id;position;mains)."""
     found: Dict[int, str] = {}
     if not positions:
         return found
@@ -4414,11 +4967,10 @@ def _la_primitiva_read_line_payloads(path: str, positions: set[int]) -> Dict[int
             raw = line.rstrip("\n")
             if not raw:
                 continue
-            try:
-                pos_str, mains_str = raw.split(";", 1)
-                position = int(pos_str)
-            except Exception:
+            sp = _fw_split_la_primitiva_line(raw)
+            if not sp:
                 continue
+            position, mains_str = sp
             if position in positions:
                 found[position] = mains_str
     return found
@@ -4480,9 +5032,11 @@ def _la_primitiva_full_wheel_reorder_txt(
             line = line.strip()
             if not line:
                 continue
+            sp = _fw_split_la_primitiva_line(line)
+            if not sp:
+                continue
+            position, mains_str = sp
             try:
-                pos_str, mains_str = line.split(";", 1)
-                position = int(pos_str)
                 mains = [int(x) for x in mains_str.split(",") if x]
             except Exception:
                 continue
@@ -4649,6 +5203,11 @@ def _la_primitiva_full_wheel_reorder_txt(
         suffix=".txt", prefix="la_primitiva_reorder_", dir=dirpath if dirpath else "."
     )
     try:
+        try:
+            fw_tok, fw_compact = _fw_token_and_compact_from_path(path)
+        except Exception:
+            ds = (draw_date or "").strip().replace("-", "")[:8]
+            fw_tok, fw_compact = ("LA_PRIMITIVA", ds if len(ds) == 8 else "00000000")
         with os.fdopen(fd, "w", encoding="utf-8") as out:
             with open(path, "r", encoding="utf-8") as src:
                 for line in src:
@@ -4656,14 +5215,14 @@ def _la_primitiva_full_wheel_reorder_txt(
                     if not raw:
                         out.write(line)
                         continue
-                    try:
-                        pos_str, mains_str = raw.split(";", 1)
-                        position = int(pos_str)
-                    except Exception:
+                    sp = _fw_split_la_primitiva_line(raw)
+                    if not sp:
                         out.write(line if line.endswith("\n") else line + "\n")
                         continue
+                    position, _ms = sp
                     if position in line_payload:
-                        out.write(f"{position};{line_payload[position]}\n")
+                        tid = _full_wheel_ticket_id(fw_tok, fw_compact, position)
+                        out.write(f"{tid};{position};{line_payload[position]}\n")
                     else:
                         out.write(line if line.endswith("\n") else line + "\n")
         print(f"[la-prim-reorder] full file rewrite -> {path}", flush=True)
@@ -4754,9 +5313,11 @@ def _euromillones_full_wheel_compare(
                 if not line:
                     continue
                 lines_read += 1
+                sp = _fw_split_euromillones_line(line)
+                if not sp:
+                    continue
+                position, mains_str, stars_str = sp
                 try:
-                    pos_str, mains_str, stars_str = line.split(";")
-                    position = int(pos_str)
                     mains = [int(x) for x in mains_str.split(",") if x]
                     stars = [int(x) for x in stars_str.split(",") if x]
                 except Exception:
@@ -4940,9 +5501,11 @@ def _el_gordo_full_wheel_compare(
             line = line.strip()
             if not line:
                 continue
+            sp = _fw_split_el_gordo_line(line)
+            if not sp:
+                continue
+            position, mains_str, clave_str = sp
             try:
-                pos_str, mains_str, clave_str = line.split(";")
-                position = int(pos_str)
                 mains = [int(x) for x in mains_str.split(",") if x]
                 clave = int(clave_str)
             except Exception:
@@ -5113,9 +5676,11 @@ def _la_primitiva_full_wheel_compare(
             line = line.strip()
             if not line:
                 continue
+            sp = _fw_split_la_primitiva_line(line)
+            if not sp:
+                continue
+            position, mains_str = sp
             try:
-                pos_str, mains_str = line.split(";")
-                position = int(pos_str)
                 mains = [int(x) for x in mains_str.split(",") if x]
             except Exception:
                 continue
@@ -6126,13 +6691,9 @@ def api_euromillones_compare_full_wheel_tickets(
                 line = line.strip()
                 if not line:
                     continue
-                try:
-                    pos_str, _m, _s = line.split(";")
-                    p = int(pos_str)
-                    if p > last_pos:
-                        last_pos = p
-                except Exception:
-                    continue
+                p = _fw_line_position(line)
+                if p is not None and p > last_pos:
+                    last_pos = p
         total_tickets = last_pos
 
     # Map (hm, hs) -> 1th..13th label
@@ -6157,11 +6718,10 @@ def api_euromillones_compare_full_wheel_tickets(
             line = line.strip()
             if not line:
                 continue
-            try:
-                pos_str, mains_str, stars_str = line.split(";")
-                position = int(pos_str)
-            except Exception:
+            sp = _fw_split_euromillones_line(line)
+            if not sp:
                 continue
+            position, mains_str, stars_str = sp
             if position < start_pos:
                 continue
             if position > end_pos:
@@ -6172,17 +6732,20 @@ def api_euromillones_compare_full_wheel_tickets(
                 continue
             hits_main = sum(1 for n in mains if n in main_set)
             hits_star = sum(1 for n in stars if n in star_set)
-            items.append(
-                {
-                    "position": position,
-                    "mains": mains,
-                    "stars": stars,
-                    "first_main": mains[0],
-                    "category": label_for(hits_main, hits_star),
-                    "main_hits": hits_main,
-                    "star_hits": hits_star,
-                }
-            )
+            parts = line.split(";")
+            tid = parts[0] if len(parts) >= 4 and "_COMBO_" in (parts[0] or "") else None
+            row: Dict[str, Any] = {
+                "position": position,
+                "mains": mains,
+                "stars": stars,
+                "first_main": mains[0],
+                "category": label_for(hits_main, hits_star),
+                "main_hits": hits_main,
+                "star_hits": hits_star,
+            }
+            if tid:
+                row["ticket_id"] = tid
+            items.append(row)
             if len(items) >= limit:
                 break
 
@@ -6267,13 +6830,9 @@ def api_el_gordo_compare_full_wheel_tickets(
             line = line.strip()
             if not line:
                 continue
-            try:
-                pos_str, _m, _c = line.split(";")
-                p = int(pos_str)
-                if p > last_pos:
-                    last_pos = p
-            except Exception:
-                continue
+            p = _fw_line_position(line)
+            if p is not None and p > last_pos:
+                last_pos = p
     total_tickets = last_pos
 
     # Map (hm, hc) -> label like "1ª (5 + 1)" etc.
@@ -6301,11 +6860,10 @@ def api_el_gordo_compare_full_wheel_tickets(
             line = line.strip()
             if not line:
                 continue
-            try:
-                pos_str, mains_str, clave_str = line.split(";")
-                position = int(pos_str)
-            except Exception:
+            sp = _fw_split_el_gordo_line(line)
+            if not sp:
                 continue
+            position, mains_str, clave_str = sp
             if position < start_pos:
                 continue
             if position > end_pos:
@@ -6319,17 +6877,20 @@ def api_el_gordo_compare_full_wheel_tickets(
                 continue
             hits_main = sum(1 for n in mains if n in main_set)
             hits_clave = 1 if clave in clave_set else 0
-            items.append(
-                {
-                    "position": position,
-                    "mains": mains,
-                    "clave": clave,
-                    "first_main": mains[0],
-                    "category": label_for_el_gordo(hits_main, hits_clave),
-                    "main_hits": hits_main,
-                    "clave_hit": hits_clave,
-                }
-            )
+            parts = line.split(";")
+            tid = parts[0] if len(parts) >= 4 and "_COMBO_" in (parts[0] or "") else None
+            row: Dict[str, Any] = {
+                "position": position,
+                "mains": mains,
+                "clave": clave,
+                "first_main": mains[0],
+                "category": label_for_el_gordo(hits_main, hits_clave),
+                "main_hits": hits_main,
+                "clave_hit": hits_clave,
+            }
+            if tid:
+                row["ticket_id"] = tid
+            items.append(row)
             if len(items) >= limit:
                 break
 
@@ -6387,13 +6948,9 @@ def api_la_primitiva_compare_full_wheel_tickets(
             line = line.strip()
             if not line:
                 continue
-            try:
-                pos_str, _m = line.split(";")
-                p = int(pos_str)
-                if p > last_pos:
-                    last_pos = p
-            except Exception:
-                continue
+            p = _fw_line_position(line)
+            if p is not None and p > last_pos:
+                last_pos = p
     total_tickets = last_pos
 
     # Stream TXT and collect only tickets in [skip, skip+limit)
@@ -6405,11 +6962,10 @@ def api_la_primitiva_compare_full_wheel_tickets(
             line = line.strip()
             if not line:
                 continue
-            try:
-                pos_str, mains_str = line.split(";")
-                position = int(pos_str)
-            except Exception:
+            sp = _fw_split_la_primitiva_line(line)
+            if not sp:
                 continue
+            position, mains_str = sp
             if position < start_pos:
                 continue
             if position > end_pos:
@@ -6417,12 +6973,12 @@ def api_la_primitiva_compare_full_wheel_tickets(
             mains = [int(x) for x in mains_str.split(",") if x]
             if len(mains) != 6:
                 continue
-            items.append(
-                {
-                    "position": position,
-                    "mains": mains,
-                }
-            )
+            parts = line.split(";")
+            tid = parts[0] if len(parts) >= 3 and "_COMBO_" in (parts[0] or "") else None
+            row: Dict[str, Any] = {"position": position, "mains": mains}
+            if tid:
+                row["ticket_id"] = tid
+            items.append(row)
             if len(items) >= limit:
                 break
 
@@ -6436,6 +6992,369 @@ def api_la_primitiva_compare_full_wheel_tickets(
             "tickets": items,
         }
     )
+
+
+@app.get("/api/euromillones/full-wheel/export")
+def api_euromillones_full_wheel_export(
+    cutoff_draw_id: str | None = Query(None, description="cutoff_draw_id that generated the full wheel file (optional)."),
+    fmt: str = Query("txt", description="txt or csv"),
+):
+    """
+    Export Euromillones full wheel:
+    - fmt=txt: download the full TXT file already generated.
+    - fmt=csv: generate a full CSV file on server (if needed) then download it.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    coll = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    cid = (cutoff_draw_id or "").strip()
+    doc = None
+    if cid:
+        doc = coll.find_one({"cutoff_draw_id": cid}) or (coll.find_one({"cutoff_draw_id": int(cid)}) if cid.isdigit() else None)
+    if doc is None:
+        doc = _resolve_latest_train_progress_doc("euromillones")
+    if not doc:
+        raise HTTPException(404, detail="No train_progress found for euromillones (last_draw_date)")
+    path = (doc.get("full_wheel_file_path") or "").strip()
+    total = int(doc.get("full_wheel_total_tickets") or 0)
+    if not path or not os.path.isfile(path):
+        raise HTTPException(404, detail="Full wheel file not found on disk")
+
+    fmt2 = (fmt or "txt").strip().lower()
+
+    if fmt2 not in ("txt", "csv"):
+        raise HTTPException(400, detail="fmt must be txt or csv")
+
+    if fmt2 == "txt":
+        base = os.path.basename(path)
+        return FileResponse(path, media_type="text/plain", filename=base)
+
+    csv_path = _fw_generate_full_csv_if_needed(path, "euromillones")
+    base = os.path.basename(csv_path)
+    return FileResponse(csv_path, media_type="text/csv", filename=base)
+
+
+@app.get("/api/el-gordo/full-wheel/export")
+def api_el_gordo_full_wheel_export(
+    cutoff_draw_id: str | None = Query(None, description="cutoff_draw_id that generated the full wheel file (optional)."),
+    fmt: str = Query("txt", description="txt or csv"),
+):
+    """Export El Gordo full wheel: txt downloads existing file; csv generated server-side if needed."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    coll = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    cid = (cutoff_draw_id or "").strip()
+    doc = None
+    if cid:
+        doc = coll.find_one({"cutoff_draw_id": cid}) or (coll.find_one({"cutoff_draw_id": int(cid)}) if cid.isdigit() else None)
+    if doc is None:
+        doc = _resolve_latest_train_progress_doc("el-gordo")
+    if not doc:
+        raise HTTPException(404, detail="No train_progress found for el-gordo (last_draw_date)")
+    path = (doc.get("full_wheel_file_path") or "").strip()
+    total = int(doc.get("full_wheel_total_tickets") or 0)
+    if not path or not os.path.isfile(path):
+        raise HTTPException(404, detail="Full wheel file not found on disk")
+
+    fmt2 = (fmt or "txt").strip().lower()
+
+    if fmt2 not in ("txt", "csv"):
+        raise HTTPException(400, detail="fmt must be txt or csv")
+
+    if fmt2 == "txt":
+        base = os.path.basename(path)
+        return FileResponse(path, media_type="text/plain", filename=base)
+
+    csv_path = _fw_generate_full_csv_if_needed(path, "el-gordo")
+    base = os.path.basename(csv_path)
+    return FileResponse(csv_path, media_type="text/csv", filename=base)
+
+
+@app.get("/api/la-primitiva/full-wheel/export")
+def api_la_primitiva_full_wheel_export(
+    cutoff_draw_id: str | None = Query(None, description="cutoff_draw_id that generated the full wheel file (optional)."),
+    fmt: str = Query("txt", description="txt or csv"),
+):
+    """Export La Primitiva full wheel: txt downloads existing file; csv generated server-side if needed."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    coll = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+    cid = (cutoff_draw_id or "").strip()
+    doc = None
+    if cid:
+        doc = coll.find_one({"cutoff_draw_id": cid}) or (coll.find_one({"cutoff_draw_id": int(cid)}) if cid.isdigit() else None)
+    if doc is None:
+        doc = _resolve_latest_train_progress_doc("la-primitiva")
+    if not doc:
+        raise HTTPException(404, detail="No train_progress found for la-primitiva (last_draw_date)")
+    path = (doc.get("full_wheel_file_path") or "").strip()
+    total = int(doc.get("full_wheel_total_tickets") or 0)
+    if not path or not os.path.isfile(path):
+        raise HTTPException(404, detail="Full wheel file not found on disk")
+
+    fmt2 = (fmt or "txt").strip().lower()
+
+    if fmt2 not in ("txt", "csv"):
+        raise HTTPException(400, detail="fmt must be txt or csv")
+
+    if fmt2 == "txt":
+        base = os.path.basename(path)
+        return FileResponse(path, media_type="text/plain", filename=base)
+
+    csv_path = _fw_generate_full_csv_if_needed(path, "la-primitiva")
+    base = os.path.basename(csv_path)
+    return FileResponse(csv_path, media_type="text/csv", filename=base)
+
+
+def _prepare_csv_job(lottery_slug: str, cutoff_draw_id: str | None) -> dict:
+    """Create or reuse a CSV preparation job for the current TXT."""
+    txt_path = _resolve_full_wheel_txt_path_for_export(lottery_slug, cutoff_draw_id)
+    csv_path = _fw_csv_path_for_full_wheel(txt_path)
+    try:
+        if os.path.isfile(csv_path) and os.path.getmtime(csv_path) >= os.path.getmtime(txt_path):
+            return {"status": "done", "progress": 100, "job_id": None}
+    except OSError:
+        pass
+
+    sig = f"{lottery_slug}:{txt_path}:{os.path.getmtime(txt_path) if os.path.isfile(txt_path) else 0}"
+    with _csv_prepare_jobs_lock:
+        # Reuse existing running job with same signature
+        for jid, job in _csv_prepare_jobs.items():
+            if job.get("signature") == sig and job.get("status") in ("queued", "running"):
+                return {"status": job.get("status"), "progress": int(job.get("progress") or 0), "job_id": jid}
+
+        job_id = secrets.token_urlsafe(12)
+        _csv_prepare_jobs[job_id] = {
+            "signature": sig,
+            "status": "queued",
+            "progress": 0,
+            "error": "",
+            "cancel_requested": False,
+            "txt_path": txt_path,
+            "csv_path": "",
+            "lottery": lottery_slug,
+            "started_at": time.time(),
+            "updated_at": time.time(),
+        }
+
+    t = threading.Thread(target=_csv_prepare_job_worker, args=(job_id,), daemon=True)
+    t.start()
+    return {"status": "queued", "progress": 0, "job_id": job_id}
+
+
+@app.post("/api/euromillones/full-wheel/prepare-csv")
+def api_euromillones_prepare_csv(
+    cutoff_draw_id: str | None = Query(None, description="Optional cutoff_draw_id to prepare CSV for."),
+):
+    """Public: prepare CSV on server and report job_id for progress polling."""
+    out = _prepare_csv_job("euromillones", cutoff_draw_id)
+    return JSONResponse(content=out)
+
+
+@app.post("/api/el-gordo/full-wheel/prepare-csv")
+def api_el_gordo_prepare_csv(
+    cutoff_draw_id: str | None = Query(None, description="Optional cutoff_draw_id to prepare CSV for."),
+):
+    """Public: prepare CSV on server and report job_id for progress polling."""
+    out = _prepare_csv_job("el-gordo", cutoff_draw_id)
+    return JSONResponse(content=out)
+
+
+@app.post("/api/la-primitiva/full-wheel/prepare-csv")
+def api_la_primitiva_prepare_csv(
+    cutoff_draw_id: str | None = Query(None, description="Optional cutoff_draw_id to prepare CSV for."),
+):
+    """Public: prepare CSV on server and report job_id for progress polling."""
+    out = _prepare_csv_job("la-primitiva", cutoff_draw_id)
+    return JSONResponse(content=out)
+
+
+@app.get("/api/euromillones/full-wheel/prepare-csv/status")
+def api_euromillones_prepare_csv_status(job_id: str = Query(..., description="Job id from prepare-csv.")):
+    with _csv_prepare_jobs_lock:
+        job = dict(_csv_prepare_jobs.get(job_id) or {})
+    if not job:
+        raise HTTPException(404, detail="Job not found")
+    return JSONResponse(
+        content={
+            "status": job.get("status"),
+            "progress": int(job.get("progress") or 0),
+            "error": job.get("error") or "",
+        }
+    )
+
+
+@app.get("/api/el-gordo/full-wheel/prepare-csv/status")
+def api_el_gordo_prepare_csv_status(job_id: str = Query(..., description="Job id from prepare-csv.")):
+    with _csv_prepare_jobs_lock:
+        job = dict(_csv_prepare_jobs.get(job_id) or {})
+    if not job:
+        raise HTTPException(404, detail="Job not found")
+    return JSONResponse(
+        content={
+            "status": job.get("status"),
+            "progress": int(job.get("progress") or 0),
+            "error": job.get("error") or "",
+        }
+    )
+
+
+@app.get("/api/la-primitiva/full-wheel/prepare-csv/status")
+def api_la_primitiva_prepare_csv_status(job_id: str = Query(..., description="Job id from prepare-csv.")):
+    with _csv_prepare_jobs_lock:
+        job = dict(_csv_prepare_jobs.get(job_id) or {})
+    if not job:
+        raise HTTPException(404, detail="Job not found")
+    return JSONResponse(
+        content={
+            "status": job.get("status"),
+            "progress": int(job.get("progress") or 0),
+            "error": job.get("error") or "",
+        }
+    )
+
+
+def _cancel_csv_job(job_id: str) -> dict:
+    with _csv_prepare_jobs_lock:
+        job = _csv_prepare_jobs.get(job_id)
+        if not job:
+            raise HTTPException(404, detail="Job not found")
+        st = job.get("status")
+        if st in ("done", "error", "cancelled"):
+            return {"status": st, "progress": int(job.get("progress") or 0)}
+        job["cancel_requested"] = True
+        job["updated_at"] = time.time()
+        return {"status": "cancelling", "progress": int(job.get("progress") or 0)}
+
+
+@app.post("/api/euromillones/full-wheel/prepare-csv/cancel")
+def api_euromillones_prepare_csv_cancel(job_id: str = Query(..., description="Job id to cancel.")):
+    """Public: request cancellation of a CSV preparation job."""
+    return JSONResponse(content=_cancel_csv_job(job_id))
+
+
+@app.post("/api/el-gordo/full-wheel/prepare-csv/cancel")
+def api_el_gordo_prepare_csv_cancel(job_id: str = Query(..., description="Job id to cancel.")):
+    """Public: request cancellation of a CSV preparation job."""
+    return JSONResponse(content=_cancel_csv_job(job_id))
+
+
+@app.post("/api/la-primitiva/full-wheel/prepare-csv/cancel")
+def api_la_primitiva_prepare_csv_cancel(job_id: str = Query(..., description="Job id to cancel.")):
+    """Public: request cancellation of a CSV preparation job."""
+    return JSONResponse(content=_cancel_csv_job(job_id))
+
+
+@app.post("/api/train/reset")
+def api_train_reset(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    cutoff_draw_id: str | None = Query(None, description="cutoff_draw_id to delete from train_progress (optional; defaults to last_draw_date run)"),
+    delete_files: bool = Query(True, description="Delete generated full-wheel TXT/CSV files on disk when possible."),
+    delete_compare: bool = Query(True, description="Delete cached compare results for this pre_id (cutoff_draw_id)."),
+):
+    """
+    Reset training state so the user can retrain/regenerate.
+
+    This deletes the corresponding *_train_progress document for cutoff_draw_id.
+    Optionally deletes generated full-wheel files and cached compare results rows that use pre_id.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    lot = (lottery or "").strip().lower()
+    cid = (cutoff_draw_id or "").strip()
+    if lot not in ("euromillones", "el-gordo", "la-primitiva"):
+        raise HTTPException(400, detail="lottery must be one of: euromillones, el-gordo, la-primitiva")
+
+    progress_coll_name = (
+        EUROMILLONES_TRAIN_PROGRESS_COLLECTION
+        if lot == "euromillones"
+        else EL_GORDO_TRAIN_PROGRESS_COLLECTION
+        if lot == "el-gordo"
+        else LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION
+    )
+    compare_coll_name = (
+        EUROMILLONES_COMPARE_RESULTS_COLLECTION
+        if lot == "euromillones"
+        else EL_GORDO_COMPARE_RESULTS_COLLECTION
+        if lot == "el-gordo"
+        else LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION
+    )
+
+    coll_progress = db[progress_coll_name]
+    doc = None
+    if cid:
+        doc = coll_progress.find_one({"cutoff_draw_id": cid}) or (
+            coll_progress.find_one({"cutoff_draw_id": int(cid)}) if cid.isdigit() else None
+        )
+    if doc is None:
+        doc = _resolve_latest_train_progress_doc(lot)
+        cid = str((doc or {}).get("cutoff_draw_id") or "").strip() or cid
+    if not doc:
+        return JSONResponse(content={"status": "ok", "deleted": 0, "message": "No train_progress document found for this lottery/last_draw_date."})
+
+    deleted_files: List[str] = []
+    file_errors: List[str] = []
+    if delete_files:
+        txt_path = (doc.get("full_wheel_file_path") or "").strip()
+        paths = []
+        if txt_path:
+            paths.append(txt_path)
+            paths.append(_fw_csv_path_for_full_wheel(txt_path))
+        for p in paths:
+            try:
+                if p and os.path.isfile(p):
+                    os.unlink(p)
+                    deleted_files.append(p)
+            except Exception as e:
+                file_errors.append(f"{p}: {e}")
+
+    deleted_compare = 0
+    if delete_compare:
+        try:
+            deleted_compare = int(db[compare_coll_name].delete_many({"pre_id": cid}).deleted_count)
+        except Exception:
+            deleted_compare = 0
+
+    res = coll_progress.delete_one({"_id": doc.get("_id")})
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "lottery": lot,
+            "cutoff_draw_id": cid,
+            "deleted": int(res.deleted_count or 0),
+            "deleted_compare": deleted_compare,
+            "deleted_files": deleted_files,
+            "file_errors": file_errors[:10],
+        }
+    )
+
+
+@app.get("/api/train/latest")
+def api_train_latest(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+):
+    """Return latest train_progress for scraper_metadata.last_draw_date (if any)."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    lot = (lottery or "").strip().lower()
+    if lot not in ("euromillones", "el-gordo", "la-primitiva"):
+        raise HTTPException(400, detail="lottery must be one of: euromillones, el-gordo, la-primitiva")
+    last = (_get_last_draw_date(lot) or "").strip()[:10] or None
+    doc = _resolve_latest_train_progress_doc(lot)
+    if not doc:
+        return JSONResponse(content={"lottery": lot, "last_draw_date": last, "exists": False, "progress": None})
+    progress = {
+        "cutoff_draw_id": str(doc.get("cutoff_draw_id") or ""),
+        "probs_fecha_sorteo": (doc.get("probs_fecha_sorteo") or ""),
+        "pipeline_status": doc.get("pipeline_status"),
+        "rules_applied": doc.get("rules_applied"),
+        "full_wheel_status": doc.get("full_wheel_status"),
+        "full_wheel_file_path": doc.get("full_wheel_file_path"),
+        "full_wheel_total_tickets": doc.get("full_wheel_total_tickets"),
+        "full_wheel_draw_date": doc.get("full_wheel_draw_date"),
+    }
+    return JSONResponse(content={"lottery": lot, "last_draw_date": last, "exists": True, "progress": progress})
 
 
 @app.post("/api/euromillones/compare/full-wheel/reorder")
@@ -7134,7 +8053,7 @@ async def api_euromillones_betting_enqueue_by_count(request: Request):
     total_in_file = int(doc.get("full_wheel_total_tickets") or 0)
     if not path or total_in_file <= 0:
         raise HTTPException(404, detail="Full wheel file not found or empty for this draw")
-    date_str = (doc.get("probs_fecha_sorteo") or doc.get("full_wheel_draw_date") or date_str or "").strip()[:10] or None
+    date_str = (doc.get("full_wheel_draw_date") or doc.get("probs_fecha_sorteo") or date_str or "").strip()[:10] or None
     cutoff = str(doc.get("cutoff_draw_id") or "") or cutoff
     excluded: set = set()
     for d in coll_queue.find({"status": {"$in": ["waiting", "in_progress"]}}, projection={"tickets": 1}):
@@ -7164,9 +8083,11 @@ async def api_euromillones_betting_enqueue_by_count(request: Request):
                 line = line.strip()
                 if not line:
                     continue
+                sp = _fw_split_euromillones_line(line)
+                if not sp:
+                    continue
+                position, mains_str, stars_str = sp
                 try:
-                    pos_str, mains_str, stars_str = line.split(";", 2)
-                    position = int(pos_str)
                     mains = [int(x) for x in mains_str.split(",") if x]
                     stars = [int(x) for x in stars_str.split(",") if x]
                 except Exception:
@@ -7320,11 +8241,10 @@ async def api_euromillones_betting_enqueue_by_range(request: Request):
                 line = line.strip()
                 if not line:
                     continue
-                try:
-                    pos_str, mains_str, stars_str = line.split(";", 2)
-                    position = int(pos_str)
-                except Exception:
+                sp = _fw_split_euromillones_line(line)
+                if not sp:
                     continue
+                position, mains_str, stars_str = sp
 
                 # Position range: inclusive start and end
                 if position < start_position:
@@ -7978,13 +8898,20 @@ def api_la_primitiva_betting_pool_from_file(
                 line = line.strip()
                 if not line:
                     continue
+                sp = _fw_split_la_primitiva_line(line)
+                if not sp:
+                    continue
+                position, mains_str = sp
                 try:
-                    pos_str, mains_str = line.split(";")
-                    position = int(pos_str)
                     mains = [int(x) for x in mains_str.split(",") if x]
                 except Exception:
                     continue
-                tickets_list.append({"position": position, "mains": mains})
+                parts = line.split(";")
+                tid = parts[0] if len(parts) >= 3 and "_COMBO_" in (parts[0] or "") else None
+                row: Dict[str, Any] = {"position": position, "mains": mains}
+                if tid:
+                    row["ticket_id"] = tid
+                tickets_list.append(row)
     except FileNotFoundError:
         raise HTTPException(404, detail="Full wheel file not found on disk")
 
@@ -8162,7 +9089,7 @@ async def api_la_primitiva_betting_enqueue_by_count(request: Request):
     total_in_file = int(doc.get("full_wheel_total_tickets") or 0)
     if not path or total_in_file <= 0:
         raise HTTPException(404, detail="Full wheel file not found or empty for this draw")
-    date_str = (doc.get("probs_fecha_sorteo") or doc.get("full_wheel_draw_date") or date_str or "").strip()[:10] or None
+    date_str = (doc.get("full_wheel_draw_date") or doc.get("probs_fecha_sorteo") or date_str or "").strip()[:10] or None
     cutoff = str(doc.get("cutoff_draw_id") or "") or cutoff
     excluded: set = set()
     q_filter: dict = {"status": {"$in": ["waiting", "in_progress"]}}
@@ -8192,9 +9119,11 @@ async def api_la_primitiva_betting_enqueue_by_count(request: Request):
                 line = line.strip()
                 if not line:
                     continue
+                sp = _fw_split_la_primitiva_line(line)
+                if not sp:
+                    continue
+                position, mains_str = sp
                 try:
-                    pos_str, mains_str = line.split(";", 1)
-                    position = int(pos_str)
                     mains = [int(x) for x in mains_str.split(",") if x]
                 except Exception:
                     continue
@@ -8350,11 +9279,10 @@ async def api_la_primitiva_betting_enqueue_by_range(request: Request):
                 line = line.strip()
                 if not line:
                     continue
-                try:
-                    pos_str, mains_str = line.split(";", 1)
-                    position = int(pos_str)
-                except Exception:
+                sp = _fw_split_la_primitiva_line(line)
+                if not sp:
                     continue
+                position, mains_str = sp
 
                 if position < start_position:
                     continue
@@ -9586,7 +10514,7 @@ def api_la_primitiva_full_wheel(
     ),
     draw_date: str | None = Query(
         None,
-        description="Optional draw date YYYY-MM-DD for the TXT filename; falls back to probs_fecha_sorteo.",
+        description="Optional YYYY-MM-DD or YYYYMMDD; default is scraper_metadata.next_draw_date for la-primitiva.",
     ),
 ):
     """
@@ -9597,7 +10525,8 @@ def api_la_primitiva_full_wheel(
     - Generates ALL tickets C(49,6) in a manifold order using the pool order.
     - Applies structural rules via _la_primitiva_ticket_tier to group tickets
       into tiers (good → bad) and writes them in that order to TXT.
-    - Saves stats and file path into la_primitiva_train_progress.
+    - Filename la_primitiva_<YYYYMMDD>.txt; lines prefixed with LA_PRIMITIVA_DRAW_<date>_COMBO_<n>.
+    - Default draw date: scraper_metadata.next_draw_date (optional draw_date overrides).
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
@@ -9655,15 +10584,8 @@ def api_la_primitiva_full_wheel(
             detail="Pool too small to build La Primitiva tickets (need at least 6 distinct mains).",
         )
 
-    date_str = (draw_date or "").strip()
-    if not date_str:
-        fecha = (doc.get("probs_fecha_sorteo") or "").strip()
-        date_str = fecha.split(" ")[0] or fecha
-    if not date_str:
-        last_draw_date = _get_last_draw_date("la-primitiva") or ""
-        date_str = last_draw_date.strip()[:10]
-    if not date_str:
-        raise HTTPException(400, detail="Cannot determine draw date for filename.")
+    date_iso, date_compact = _resolve_full_wheel_dates_for_api("la-primitiva", draw_date)
+    date_str = date_iso
 
     now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     # Reserve generation slot atomically: only transition to waiting if not already waiting.
@@ -9701,7 +10623,9 @@ def api_la_primitiva_full_wheel(
         try:
             stats = _generate_la_primitiva_full_wheel_file(
                 mains_pool=mains_pool,
-                draw_date=date_str,
+                draw_date_iso=date_iso,
+                file_date_compact=date_compact,
+                lottery_token="LA_PRIMITIVA",
             )
             finished_at = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
             coll.update_one(
@@ -9738,6 +10662,7 @@ def api_la_primitiva_full_wheel(
             "status": "started",
             "cutoff_draw_id": cid,
             "draw_date": date_str,
+            "file_date_compact": date_compact,
         }
     )
 
@@ -10033,7 +10958,7 @@ def api_euromillones_full_wheel(
     ),
     draw_date: str | None = Query(
         None,
-        description="Optional draw date YYYY-MM-DD for the TXT filename; falls back to probs_fecha_sorteo.",
+        description="Optional YYYY-MM-DD or YYYYMMDD; default is scraper_metadata.next_draw_date for euromillones.",
     ),
 ):
     """
@@ -10047,7 +10972,8 @@ def api_euromillones_full_wheel(
         * All same last digit or same decade
         * All odd or all even
       Good tickets are written first in the file, bad tickets at the end.
-    - Saves to euromillones_<draw_date>.txt under the project-level euromillones_pools directory.
+    - Filename euromillones_<YYYYMMDD>.txt; each line prefixed with EUROMILLONES_DRAW_<date>_COMBO_<n>.
+    - Default draw date: scraper_metadata.next_draw_date (optional draw_date overrides).
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
@@ -10082,15 +11008,8 @@ def api_euromillones_full_wheel(
             detail="Pool too small to build Euromillones tickets (need at least 5 mains and 2 stars).",
         )
 
-    date_str = (draw_date or "").strip()
-    if not date_str:
-        fecha = (doc.get("probs_fecha_sorteo") or "").strip()
-        date_str = fecha.split(" ")[0] or fecha
-    if not date_str:
-        last_draw_date = _get_last_draw_date("euromillones") or ""
-        date_str = last_draw_date.strip()[:10]
-    if not date_str:
-        raise HTTPException(400, detail="Cannot determine draw date for filename.")
+    date_iso, date_compact = _resolve_full_wheel_dates_for_api("euromillones", draw_date)
+    date_str = date_iso
 
     # Mark status as waiting/running and launch background job so it survives UI refresh.
     now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -10116,7 +11035,9 @@ def api_euromillones_full_wheel(
             stats = _generate_full_wheel_file_from_pool(
                 mains_pool=mains_pool,
                 stars_pool=stars_pool,
-                draw_date=date_str,
+                draw_date_iso=date_iso,
+                file_date_compact=date_compact,
+                lottery_token="EUROMILLONES",
             )
             finished_at = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
             coll.update_one(
@@ -10153,6 +11074,7 @@ def api_euromillones_full_wheel(
             "status": "started",
             "cutoff_draw_id": cid,
             "draw_date": date_str,
+            "file_date_compact": date_compact,
         }
     )
 
@@ -10165,7 +11087,7 @@ def api_el_gordo_full_wheel(
     ),
     draw_date: str | None = Query(
         None,
-        description="Optional draw date YYYY-MM-DD for the TXT filename; falls back to probs_fecha_sorteo.",
+        description="Optional YYYY-MM-DD or YYYYMMDD; default is scraper_metadata.next_draw_date for el-gordo.",
     ),
 ):
     """
@@ -10173,7 +11095,8 @@ def api_el_gordo_full_wheel(
 
     - Uses filtered_mains_probs and filtered_stars_probs from Step 4 (54 mains, 10 claves after extend).
     - Generates ALL tickets: C(54,5) * 10 = 31,625,100; classifies by tier (good/bad), writes good first.
-    - Saves to el_gordo_<draw_date>.txt under el_gordo_pools. Persists full_wheel_* to progress.
+    - Filename el_gordo_<YYYYMMDD>.txt; lines prefixed with ELGORDO_DRAW_<date>_COMBO_<n>.
+    - Default draw date: scraper_metadata.next_draw_date (optional draw_date overrides).
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
@@ -10211,15 +11134,8 @@ def api_el_gordo_full_wheel(
             detail="Pool too small to build El Gordo tickets (need at least 5 mains and 1 clave).",
         )
 
-    date_str = (draw_date or "").strip()
-    if not date_str:
-        fecha = (doc.get("probs_fecha_sorteo") or "").strip()
-        date_str = fecha.split(" ")[0] or fecha
-    if not date_str:
-        last_draw_date = _get_last_draw_date("el-gordo") or ""
-        date_str = last_draw_date.strip()[:10]
-    if not date_str:
-        raise HTTPException(400, detail="Cannot determine draw date for filename.")
+    date_iso, date_compact = _resolve_full_wheel_dates_for_api("el-gordo", draw_date)
+    date_str = date_iso
 
     now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     coll.update_one(
@@ -10245,7 +11161,9 @@ def api_el_gordo_full_wheel(
             stats = _generate_el_gordo_full_wheel_file(
                 mains_pool=mains_pool,
                 clave_pool=clave_pool,
-                draw_date=date_str,
+                draw_date_iso=date_iso,
+                file_date_compact=date_compact,
+                lottery_token="ELGORDO",
             )
             finished_at = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
             coll.update_one(
@@ -10282,6 +11200,7 @@ def api_el_gordo_full_wheel(
             "status": "started",
             "cutoff_draw_id": cid,
             "draw_date": date_str,
+            "file_date_compact": date_compact,
         },
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
@@ -10322,20 +11241,21 @@ def api_el_gordo_full_wheel_preview(
                 line = line.strip()
                 if not line:
                     continue
+                sp = _fw_split_el_gordo_line(line)
+                if not sp:
+                    continue
+                position, mains_str, clave_str = sp
                 try:
-                    pos_str, mains_str, clave_str = line.split(";")
-                    position = int(pos_str)
                     mains = [int(x) for x in mains_str.split(",") if x]
                     clave = int(clave_str)
                 except Exception:
                     continue
-                tickets.append(
-                    {
-                        "position": position,
-                        "mains": mains,
-                        "clave": clave,
-                    }
-                )
+                parts = line.split(";")
+                tid = parts[0] if len(parts) >= 4 and "_COMBO_" in (parts[0] or "") else None
+                row: Dict[str, Any] = {"position": position, "mains": mains, "clave": clave}
+                if tid:
+                    row["ticket_id"] = tid
+                tickets.append(row)
         return JSONResponse(
             content={
                 "tickets": tickets,
@@ -10383,20 +11303,21 @@ def api_euromillones_full_wheel_preview(
                 line = line.strip()
                 if not line:
                     continue
+                sp = _fw_split_euromillones_line(line)
+                if not sp:
+                    continue
+                position, mains_str, stars_str = sp
                 try:
-                    pos_str, mains_str, stars_str = line.split(";")
-                    position = int(pos_str)
                     mains = [int(x) for x in mains_str.split(",") if x]
                     stars = [int(x) for x in stars_str.split(",") if x]
                 except Exception:
                     continue
-                tickets.append(
-                    {
-                        "position": position,
-                        "mains": mains,
-                        "stars": stars,
-                    }
-                )
+                parts = line.split(";")
+                tid = parts[0] if len(parts) >= 4 and "_COMBO_" in (parts[0] or "") else None
+                row: Dict[str, Any] = {"position": position, "mains": mains, "stars": stars}
+                if tid:
+                    row["ticket_id"] = tid
+                tickets.append(row)
         return JSONResponse(
             content={
                 "tickets": tickets,
@@ -10468,6 +11389,7 @@ def api_euromillones_candidate_pool(
             }
         },
     )
+    return JSONResponse(content={"status": "ok", "candidate_pool_count": len(tickets)})
 
 
 @app.get("/api/la-primitiva/train/full-wheel-preview")
@@ -10501,13 +11423,20 @@ def api_la_primitiva_full_wheel_preview(
                 line = line.strip()
                 if not line:
                     continue
+                sp = _fw_split_la_primitiva_line(line)
+                if not sp:
+                    continue
+                position, mains_str = sp
                 try:
-                    pos_str, mains_str = line.split(";")
-                    position = int(pos_str)
                     mains = [int(x) for x in mains_str.split(",") if x]
                 except Exception:
                     continue
-                tickets.append({"position": position, "mains": mains})
+                parts = line.split(";")
+                tid = parts[0] if len(parts) >= 3 and "_COMBO_" in (parts[0] or "") else None
+                row: Dict[str, Any] = {"position": position, "mains": mains}
+                if tid:
+                    row["ticket_id"] = tid
+                tickets.append(row)
                 if len(tickets) >= limit:
                     break
     except FileNotFoundError:

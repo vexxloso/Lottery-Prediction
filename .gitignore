@@ -25,3 +25,5 @@ simulation
 scripts/generate_euromillones_analysis.py
 scripts/generate_la_primitiva_analysis.py
 scripts/generate_el_gordo_analysis.py
+dist
+viewer_app

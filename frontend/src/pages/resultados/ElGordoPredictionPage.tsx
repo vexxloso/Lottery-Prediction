@@ -387,6 +387,7 @@ export function ElGordoPredictionPage() {
                     ? 'Generando boletos…'
                     : 'Generar boletos (full wheel)'}
                 </button>
+
               </div>
             </Card>
           )}

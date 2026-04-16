@@ -403,7 +403,7 @@ export function ElGordoBettingPanel() {
         return;
       }
 
-      const { headers, rows } = flattenElGordoQueue(queueSlice);
+      const { headers, rows } = flattenElGordoQueue(queueSlice, queueNextDrawDate || queueLastDrawDate);
       if (rows.length === 0) {
         setError('No hay boletos en la cola para exportar.');
         return;
@@ -442,7 +442,7 @@ export function ElGordoBettingPanel() {
         return;
       }
 
-      const { headers, rows } = flattenElGordoQueue(queueSlice);
+      const { headers, rows } = flattenElGordoQueue(queueSlice, queueNextDrawDate || queueLastDrawDate);
       if (rows.length === 0) {
         setError('No hay boletos en la cola para exportar.');
         return;
@@ -458,7 +458,7 @@ export function ElGordoBettingPanel() {
 
   const handleExportElGordoPdf = useCallback(async (printTab: Window | null, selection: { queueCount: number; requestedTickets: number; selectedTickets: number }) => {
     const queueSlice = queueSliceByTicketCount(selection);
-    const { headers, rows } = flattenElGordoQueue(queueSlice);
+    const { headers, rows } = flattenElGordoQueue(queueSlice, queueNextDrawDate || queueLastDrawDate);
     if (rows.length === 0) {
       printTab?.close();
       setError('No hay boletos en la cola para exportar.');

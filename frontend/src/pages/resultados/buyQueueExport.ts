@@ -1,15 +1,15 @@
 /** Flatten buy-queue API items into table rows for CSV / print (one row per ticket). */
 
 export type EuromillonesQueueItem = {
-  tickets?: { mains?: number[]; stars?: number[]; position?: number }[];
+  tickets?: { mains?: number[]; stars?: number[]; position?: number; ticket_id?: string }[];
 };
 
 export type ElGordoQueueItem = {
-  tickets?: { mains?: number[]; clave?: number; position?: number }[];
+  tickets?: { mains?: number[]; clave?: number; position?: number; ticket_id?: string }[];
 };
 
 export type LaPrimitivaQueueItem = {
-  tickets?: { mains?: number[]; reintegro?: number; position?: number }[];
+  tickets?: { mains?: number[]; reintegro?: number; position?: number; ticket_id?: string }[];
 };
 
 export type ExportTable = {
@@ -36,7 +36,29 @@ function posCell(t: { position?: number }): string {
   return '';
 }
 
-export function flattenEuromillonesQueue(queue: EuromillonesQueueItem[]): ExportTable {
+function compactYyyyMmDd(drawDate: string | null | undefined): string {
+  const d = (drawDate ?? '').toString().trim();
+  if (/^\d{8}$/.test(d)) return d;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d.replace(/-/g, '');
+  return '';
+}
+
+function ticketIdCell(
+  lotterySlug: 'euromillones' | 'el-gordo' | 'la-primitiva',
+  drawDate: string | null | undefined,
+  t: { position?: number; ticket_id?: string },
+): string {
+  if (typeof t.ticket_id === 'string' && t.ticket_id.trim()) return t.ticket_id.trim();
+  if (typeof t.position !== 'number' || !Number.isFinite(t.position) || t.position < 1) return '';
+  const dd = compactYyyyMmDd(drawDate);
+  if (!dd) return '';
+  const pos = Math.floor(t.position);
+  const token =
+    lotterySlug === 'euromillones' ? 'EUROMILLONES' : lotterySlug === 'el-gordo' ? 'ELGORDO' : 'LA_PRIMITIVA';
+  return `${token}_DRAW_${dd}_COMBO_${pos}`;
+}
+
+export function flattenEuromillonesQueue(queue: EuromillonesQueueItem[], drawDate?: string | null): ExportTable {
   const rows: string[][] = [];
   let idx = 0;
   for (const q of queue) {
@@ -48,16 +70,16 @@ export function flattenEuromillonesQueue(queue: EuromillonesQueueItem[]): Export
       const stars = [...(t.stars ?? [])].map(Number);
       const m = formatNumsSlash(mains);
       const s = formatNumsSlash(stars);
-      rows.push([String(idx), posCell(t), m, s]);
+      rows.push([String(idx), ticketIdCell('euromillones', drawDate, t), posCell(t), m, s]);
     }
   }
   return {
-    headers: ['#', 'Posición', 'Principales', 'Estrellas'],
+    headers: ['#', 'ID', 'Posición', 'Principales', 'Estrellas'],
     rows,
   };
 }
 
-export function flattenElGordoQueue(queue: ElGordoQueueItem[]): ExportTable {
+export function flattenElGordoQueue(queue: ElGordoQueueItem[], drawDate?: string | null): ExportTable {
   const rows: string[][] = [];
   let idx = 0;
   for (const q of queue) {
@@ -68,16 +90,16 @@ export function flattenElGordoQueue(queue: ElGordoQueueItem[]): ExportTable {
       const mains = [...(t.mains ?? [])].map(Number);
       const m = formatNumsSlash(mains);
       const c = typeof t.clave === 'number' ? t.clave : Number(t.clave) || 0;
-      rows.push([String(idx), posCell(t), m, pad2(Number(c))]);
+      rows.push([String(idx), ticketIdCell('el-gordo', drawDate, t), posCell(t), m, pad2(Number(c))]);
     }
   }
   return {
-    headers: ['#', 'Posición', 'Números', 'Clave'],
+    headers: ['#', 'ID', 'Posición', 'Números', 'Clave'],
     rows,
   };
 }
 
-export function flattenLaPrimitivaQueue(queue: LaPrimitivaQueueItem[]): ExportTable {
+export function flattenLaPrimitivaQueue(queue: LaPrimitivaQueueItem[], drawDate?: string | null): ExportTable {
   const rows: string[][] = [];
   let idx = 0;
   for (const q of queue) {
@@ -88,11 +110,11 @@ export function flattenLaPrimitivaQueue(queue: LaPrimitivaQueueItem[]): ExportTa
       const mains = [...(t.mains ?? [])].map(Number);
       const m = formatNumsSlash(mains);
       const r = typeof t.reintegro === 'number' ? t.reintegro : Number(t.reintegro) || 0;
-      rows.push([String(idx), posCell(t), m, pad2(Number(r))]);
+      rows.push([String(idx), ticketIdCell('la-primitiva', drawDate, t), posCell(t), m, pad2(Number(r))]);
     }
   }
   return {
-    headers: ['#', 'Posición', 'Números', 'Reintegro'],
+    headers: ['#', 'ID', 'Posición', 'Números', 'Reintegro'],
     rows,
   };
 }

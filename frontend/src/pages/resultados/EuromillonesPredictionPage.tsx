@@ -406,6 +406,7 @@ export function EuromillonesPredictionPage() {
                     ? 'Generando tickets…'
                     : 'Generar tickets (full wheel)'}
                 </button>
+
               </div>
             </Card>
           )}

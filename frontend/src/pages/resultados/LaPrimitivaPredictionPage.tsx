@@ -493,6 +493,7 @@ export function LaPrimitivaPredictionPage() {
                     <span>Generando boletos (full wheel)…</span>
                   </div>
                 )}
+
               </div>
             </Card>
           )}

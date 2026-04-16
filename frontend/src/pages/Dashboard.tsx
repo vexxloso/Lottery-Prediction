@@ -282,6 +282,16 @@ interface SampleTicketsLottery {
 export function Dashboard() {
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [metaItems, setMetaItems] = useState<NextDrawItem[]>([]);
+  const [latestTrain, setLatestTrain] = useState<
+    Record<
+      'euromillones' | 'la-primitiva' | 'el-gordo',
+      { exists: boolean; full_wheel_file_path?: string | null; full_wheel_status?: string | null }
+    >
+  >({
+    euromillones: { exists: false },
+    'la-primitiva': { exists: false },
+    'el-gordo': { exists: false },
+  });
   const [sampleTickets, setSampleTickets] = useState<{
     euromillones: SampleTicketsLottery;
     'la-primitiva': SampleTicketsLottery;
@@ -336,6 +346,38 @@ export function Dashboard() {
       }
     };
     loadNextDraws();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const slugs = ['euromillones', 'la-primitiva', 'el-gordo'] as const;
+        const res = await Promise.all(
+          slugs.map((s) => fetch(`${API_URL}/api/train/latest?lottery=${encodeURIComponent(s)}`, { cache: 'no-store' })),
+        );
+        const data = await Promise.all(res.map((r) => r.json().catch(() => ({}))));
+        if (cancelled) return;
+        const next = { ...latestTrain };
+        for (let i = 0; i < slugs.length; i++) {
+          const slug = slugs[i];
+          const d = data[i] as any;
+          const p = (d?.progress ?? null) as any;
+          next[slug] = {
+            exists: !!d?.exists,
+            full_wheel_file_path: p?.full_wheel_file_path ?? null,
+            full_wheel_status: p?.full_wheel_status ?? null,
+          };
+        }
+        setLatestTrain(next);
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -400,6 +442,37 @@ export function Dashboard() {
     };
   }, [sampleTickets]);
 
+  const downloadFullWheel = async (lottery: 'euromillones' | 'la-primitiva' | 'el-gordo', fmt: 'txt' | 'csv') => {
+    // Use a native browser download (shows progress in Chrome downloads UI).
+    // This calls the public backend endpoint directly.
+    const url = `${API_URL}/api/${lottery}/full-wheel/export?fmt=${fmt}&_t=${Date.now()}`;
+    const a = document.createElement('a');
+    a.href = url;
+    Object.assign(a.style, { position: 'fixed', left: '-9999px', top: '0' });
+    document.body.appendChild(a);
+    a.click();
+    window.setTimeout(() => {
+      a.remove();
+    }, 4000);
+  };
+
+  // CSV export removed: TXT-only download.
+
+  const resetLatestTrain = async (lottery: 'euromillones' | 'la-primitiva' | 'el-gordo') => {
+    const ok = window.confirm(
+      `¿Reiniciar el entrenamiento de ${lottery} (último sorteo)? Esto borrará train_progress y los archivos del full wheel.`,
+    );
+    if (!ok) return;
+    const params = new URLSearchParams({
+      lottery,
+      delete_files: 'true',
+      delete_compare: 'true',
+    });
+    await fetch(`${API_URL}/api/train/reset?${params.toString()}`, { method: 'POST' });
+    // Refresh UI after reset so buttons/status update immediately.
+    window.location.reload();
+  };
+
   return (
     <>
       <section className="dashboard-lottery-cards" aria-label="Próximo bote, premios y muestra del pool">
@@ -427,12 +500,15 @@ export function Dashboard() {
             slug === 'el-gordo'
               ? '/resultados/el-gordo?tab=betting'
               : `/resultados/${slug}?tab=apuestas`;
+          const canDownload = latestTrain[slug]?.exists && !!latestTrain[slug]?.full_wheel_file_path;
+          const canReset = latestTrain[slug]?.exists;
           return (
-            <Link
+            <div
               key={slug}
-              to={bettingHref}
               className="dashboard-lottery-card"
-              aria-label={`${label}, ir a apuestas`}
+              aria-label={`${label}`}
+              role="group"
+              style={{ cursor: 'default' }}
             >
               <div className="dashboard-lottery-card-top">
                 <div className="dashboard-lottery-card-header">
@@ -487,10 +563,68 @@ export function Dashboard() {
                   )}
                 </div>
               </div>
-            </Link>
+
+              <div style={{ display: 'flex', gap: 10, padding: '10px 14px 14px', borderTop: '1px solid var(--color-border)', marginTop: 10 }}>
+                <Link
+                  to={bettingHref}
+                  style={{
+                    flex: 1,
+                    padding: '9px 12px',
+                    borderRadius: 999,
+                    border: '1px solid var(--color-border)',
+                    background: 'transparent',
+                    color: 'var(--color-text)',
+                    fontWeight: 700,
+                    textAlign: 'center',
+                    textDecoration: 'none',
+                  }}
+                  title="Ir a apuestas"
+                >
+                  Abrir
+                </Link>
+                <button
+                  type="button"
+                  disabled={!canDownload}
+                  onClick={() => void downloadFullWheel(slug, 'txt')}
+                  style={{
+                    flex: 1,
+                    padding: '9px 12px',
+                    borderRadius: 999,
+                    border: '1px solid var(--color-border)',
+                    background: canDownload ? 'transparent' : 'rgba(148,163,184,0.25)',
+                    color: canDownload ? 'var(--color-text)' : 'var(--color-text-muted)',
+                    fontWeight: 700,
+                    cursor: canDownload ? 'pointer' : 'not-allowed',
+                  }}
+                  title="Descargar full wheel TXT (último sorteo entrenado)"
+                >
+                  Descargar
+                </button>
+                <button
+                  type="button"
+                  disabled={!canReset}
+                  onClick={() => void resetLatestTrain(slug)}
+                  style={{
+                    flex: 1,
+                    padding: '9px 12px',
+                    borderRadius: 999,
+                    border: '1px solid var(--color-border)',
+                    background: canReset ? 'rgba(239,68,68,0.10)' : 'rgba(148,163,184,0.25)',
+                    color: canReset ? 'var(--color-error)' : 'var(--color-text-muted)',
+                    fontWeight: 700,
+                    cursor: canReset ? 'pointer' : 'not-allowed',
+                  }}
+                  title="Reset entrenamiento (último sorteo entrenado)"
+                >
+                  Reiniciar
+                </button>
+              </div>
+            </div>
           );
         })}
       </section>
+
+      {/* TXT-only download: modal removed */}
 
       <section className="dashboard-graph-section" aria-label="Premios y Bote últimos 2 meses">
         <h2 className="dashboard-graph-heading">Premios y Bote (últimos 2 meses)</h2>
