@@ -180,6 +180,8 @@ export function SimulationPage() {
   const [euromillonesFullWheelTicketsTotal, setEuromillonesFullWheelTicketsTotal] = useState(0);
   const [euromillonesFullWheelTicketsPage, setEuromillonesFullWheelTicketsPage] = useState(1);
   const [euromillonesFullWheelTicketsLoading, setEuromillonesFullWheelTicketsLoading] = useState(false);
+  /** Errors loading paginated full-wheel tickets only (do not reuse aggregate compare error state). */
+  const [euromillonesFullWheelTicketsError, setEuromillonesFullWheelTicketsError] = useState('');
   const [showEuromillonesFullWheelTickets, setShowEuromillonesFullWheelTickets] = useState(false);
   // El Gordo: cached result from full-wheel compare endpoint (el_gordo_compare_results)
   const [elGordoFullWheelLoading, setElGordoFullWheelLoading] = useState(false);
@@ -206,6 +208,7 @@ export function SimulationPage() {
   const [elGordoFullWheelTicketsTotal, setElGordoFullWheelTicketsTotal] = useState(0);
   const [elGordoFullWheelTicketsPage, setElGordoFullWheelTicketsPage] = useState(1);
   const [elGordoFullWheelTicketsLoading, setElGordoFullWheelTicketsLoading] = useState(false);
+  const [elGordoFullWheelTicketsError, setElGordoFullWheelTicketsError] = useState('');
   const [showElGordoFullWheelTickets, setShowElGordoFullWheelTickets] = useState(false);
   const [laPrimitivaFullWheelTickets, setLaPrimitivaFullWheelTickets] = useState<
     { position: number; mains: number[]; reintegro?: number }[]
@@ -213,6 +216,7 @@ export function SimulationPage() {
   const [laPrimitivaFullWheelTicketsTotal, setLaPrimitivaFullWheelTicketsTotal] = useState(0);
   const [laPrimitivaFullWheelTicketsPage, setLaPrimitivaFullWheelTicketsPage] = useState(1);
   const [laPrimitivaFullWheelTicketsLoading, setLaPrimitivaFullWheelTicketsLoading] = useState(false);
+  const [laPrimitivaFullWheelTicketsError, setLaPrimitivaFullWheelTicketsError] = useState('');
   const [showLaPrimitivaFullWheelTickets, setShowLaPrimitivaFullWheelTickets] = useState(false);
   // La Primitiva: cached result from full-wheel compare endpoint (la_primitiva_compare_results)
   const [laPrimitivaFullWheelLoading, setLaPrimitivaFullWheelLoading] = useState(false);
@@ -241,7 +245,7 @@ export function SimulationPage() {
   const TICKET_BUDGET_EUR =
     slug === 'la-primitiva' ? 1 : slug === 'el-gordo' ? 1.5 : 2.5;
 
-  const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
+  const API_URL = (import.meta.env.VITE_API_URL ?? 'http://localhost:8000').replace(/\/$/, '');
 
   // Load latest saved simulation for this draw (if any)
   useEffect(() => {
@@ -892,6 +896,7 @@ export function SimulationPage() {
     const skip = (page - 1) * limit;
     try {
       setEuromillonesFullWheelTicketsLoading(true);
+      setEuromillonesFullWheelTicketsError('');
       const params = new URLSearchParams({
         current_id: drawId,
         pre_id: prevId,
@@ -899,7 +904,7 @@ export function SimulationPage() {
         limit: String(limit),
       });
       const res = await fetch(`${API_URL}/api/euromillones/compare/full-wheel/tickets?${params.toString()}`);
-      const data = await res.json();
+      const data = (await res.json().catch(() => ({}))) as { detail?: string; tickets?: unknown[]; total_tickets?: number };
       if (!res.ok || data.detail) {
         throw new Error(
           typeof data.detail === 'string'
@@ -922,7 +927,8 @@ export function SimulationPage() {
       setShowEuromillonesFullWheelTickets(true);
     } catch (e) {
       console.error(e);
-      setEuromillonesFullWheelError(
+      setEuromillonesFullWheelTickets([]);
+      setEuromillonesFullWheelTicketsError(
         e instanceof Error ? e.message : 'Error al cargar boletos full wheel',
       );
     } finally {
@@ -937,6 +943,7 @@ export function SimulationPage() {
     const skip = (page - 1) * limit;
     try {
       setElGordoFullWheelTicketsLoading(true);
+      setElGordoFullWheelTicketsError('');
       const params = new URLSearchParams({
         current_id: drawId,
         pre_id: prevId,
@@ -944,7 +951,7 @@ export function SimulationPage() {
         limit: String(limit),
       });
       const res = await fetch(`${API_URL}/api/el-gordo/compare/full-wheel/tickets?${params.toString()}`);
-      const data = await res.json();
+      const data = (await res.json().catch(() => ({}))) as { detail?: string; tickets?: unknown[]; total_tickets?: number };
       if (!res.ok || data.detail) {
         throw new Error(
           typeof data.detail === 'string'
@@ -967,7 +974,8 @@ export function SimulationPage() {
       setShowElGordoFullWheelTickets(true);
     } catch (e) {
       console.error(e);
-      setElGordoFullWheelError(
+      setElGordoFullWheelTickets([]);
+      setElGordoFullWheelTicketsError(
         e instanceof Error ? e.message : 'Error al cargar boletos full wheel El Gordo',
       );
     } finally {
@@ -982,6 +990,7 @@ export function SimulationPage() {
     const skip = (page - 1) * limit;
     try {
       setLaPrimitivaFullWheelTicketsLoading(true);
+      setLaPrimitivaFullWheelTicketsError('');
       const params = new URLSearchParams({
         current_id: drawId,
         pre_id: prevId,
@@ -991,7 +1000,11 @@ export function SimulationPage() {
       const res = await fetch(
         `${API_URL}/api/la-primitiva/compare/full-wheel/tickets?${params.toString()}`,
       );
-      const data = await res.json();
+      const data = (await res.json().catch(() => ({}))) as {
+        detail?: string;
+        tickets?: unknown[];
+        total_tickets?: number;
+      };
       if (!res.ok || data.detail) {
         throw new Error(
           typeof data.detail === 'string'
@@ -1000,11 +1013,19 @@ export function SimulationPage() {
         );
       }
       const tickets = Array.isArray(data.tickets) ? (data.tickets as any[]) : [];
+      const parseReintegro = (v: unknown): number | undefined => {
+        if (typeof v === 'number' && Number.isFinite(v)) return Math.floor(Math.max(0, Math.min(9, v)));
+        if (typeof v === 'string' && v.trim() !== '') {
+          const n = Number(v.trim());
+          if (Number.isFinite(n)) return Math.floor(Math.max(0, Math.min(9, n)));
+        }
+        return undefined;
+      };
       setLaPrimitivaFullWheelTickets(
         tickets.map((t) => ({
           position: Number(t.position),
           mains: (t.mains ?? []).map(Number),
-          reintegro: typeof t.reintegro === 'number' ? Number(t.reintegro) : undefined,
+          reintegro: parseReintegro(t.reintegro),
         })),
       );
       setLaPrimitivaFullWheelTicketsTotal(Number(data.total_tickets ?? 0));
@@ -1012,7 +1033,8 @@ export function SimulationPage() {
       setShowLaPrimitivaFullWheelTickets(true);
     } catch (e) {
       console.error(e);
-      setLaPrimitivaFullWheelError(
+      setLaPrimitivaFullWheelTickets([]);
+      setLaPrimitivaFullWheelTicketsError(
         e instanceof Error ? e.message : 'Error al cargar boletos full wheel La Primitiva',
       );
     } finally {
@@ -1774,7 +1796,11 @@ export function SimulationPage() {
                                     overflowY: 'auto',
                                   }}
                                 >
-                                  {euromillonesFullWheelTicketsLoading ? (
+                                  {euromillonesFullWheelTicketsError ? (
+                                    <p style={{ margin: 0, color: 'var(--color-error)' }}>
+                                      {euromillonesFullWheelTicketsError}
+                                    </p>
+                                  ) : euromillonesFullWheelTicketsLoading ? (
                                     <p style={{ margin: 0 }}>Cargando boletos…</p>
                                   ) : euromillonesFullWheelTickets.length === 0 ? (
                                     <p style={{ margin: 0 }}>No hay boletos para mostrar.</p>
@@ -1924,7 +1950,11 @@ export function SimulationPage() {
                                     overflowY: 'auto',
                                   }}
                                 >
-                                  {elGordoFullWheelTicketsLoading ? (
+                                  {elGordoFullWheelTicketsError ? (
+                                    <p style={{ margin: 0, color: 'var(--color-error)' }}>
+                                      {elGordoFullWheelTicketsError}
+                                    </p>
+                                  ) : elGordoFullWheelTicketsLoading ? (
                                     <p style={{ margin: 0 }}>Cargando boletos…</p>
                                   ) : elGordoFullWheelTickets.length === 0 ? (
                                     <p style={{ margin: 0 }}>No hay boletos para mostrar.</p>
@@ -2013,6 +2043,12 @@ export function SimulationPage() {
                           }
                           const r = laPrimitivaFullWheelResult;
                           const mainSetFullWheel = new Set(compareDraw.main.map(Number));
+                          const drawReintegro =
+                            Array.isArray(compareDraw.stars) &&
+                            compareDraw.stars.length > 0 &&
+                            Number.isFinite(Number(compareDraw.stars[0]))
+                              ? Number(compareDraw.stars[0])
+                              : null;
                           const byKey = new Map<string, (typeof r.categories)[number]>();
                           r.categories.forEach((row) => {
                             const key = `${row.main_hits}-${row.reintegro_hit}`;
@@ -2032,12 +2068,27 @@ export function SimulationPage() {
                           ];
                           return (
                             <div style={{ marginTop: 'var(--space-md)' }}>
+                              {drawReintegro != null && (
+                                <p
+                                  style={{
+                                    margin: '0 0 var(--space-sm)',
+                                    fontSize: '0.9rem',
+                                    color: 'var(--color-text-muted)',
+                                  }}
+                                >
+                                  Reintegro del sorteo:{' '}
+                                  <strong style={{ color: 'var(--color-text)' }}>
+                                    {String(Math.floor(drawReintegro)).padStart(2, '0')}
+                                  </strong>
+                                </p>
+                              )}
                               <div className="resultados-features-table-wrap" style={{ marginBottom: 'var(--space-sm)' }}>
                                 <table className="resultados-features-table">
                                   <thead>
                                     <tr>
                                       <th>Categoría</th>
                                       <th>Hits (main)</th>
+                                      <th>Reint.</th>
                                       <th>First position</th>
                                     </tr>
                                   </thead>
@@ -2045,10 +2096,18 @@ export function SimulationPage() {
                                     {orderedKeys.map(({ key, label }) => {
                                       const row = byKey.get(key);
                                       if (!row) return null;
+                                      const rh = row.reintegro_hit;
                                       return (
                                         <tr key={key}>
                                           <td>{label}</td>
                                           <td>{row.main_hits}</td>
+                                          <td>
+                                            {typeof rh === 'number'
+                                              ? rh === 1
+                                                ? '1 (acierto)'
+                                                : '0'
+                                              : '—'}
+                                          </td>
                                           <td>{row.first_position.toLocaleString()}</td>
                                         </tr>
                                       );
@@ -2066,7 +2125,11 @@ export function SimulationPage() {
                                     overflowY: 'auto',
                                   }}
                                 >
-                                  {laPrimitivaFullWheelTicketsLoading ? (
+                                  {laPrimitivaFullWheelTicketsError ? (
+                                    <p style={{ margin: 0, color: 'var(--color-error)' }}>
+                                      {laPrimitivaFullWheelTicketsError}
+                                    </p>
+                                  ) : laPrimitivaFullWheelTicketsLoading ? (
                                     <p style={{ margin: 0 }}>Cargando boletos…</p>
                                   ) : laPrimitivaFullWheelTickets.length === 0 ? (
                                     <p style={{ margin: 0 }}>No hay boletos para mostrar.</p>
@@ -2077,7 +2140,7 @@ export function SimulationPage() {
                                           <tr>
                                             <th>No</th>
                                             <th>Números principales</th>
-                                            <th>Reintegro</th>
+                                            <th>Reintegro (boleto)</th>
                                             <th>Categoría</th>
                                           </tr>
                                         </thead>
@@ -2123,7 +2186,11 @@ export function SimulationPage() {
                                               >
                                                 <td>{t.position.toLocaleString()}</td>
                                                 <td>{t.mains.join(', ')}</td>
-                                                <td>{t.reintegro != null ? String(t.reintegro) : '—'}</td>
+                                                <td>
+                                                  {t.reintegro != null
+                                                    ? String(t.reintegro).padStart(2, '0')
+                                                    : '—'}
+                                                </td>
                                                 <td>{categoryLabel || '—'}</td>
                                               </tr>
                                             );
@@ -2131,7 +2198,7 @@ export function SimulationPage() {
                                         </tbody>
                                         <tfoot>
                                           <tr>
-                                            <td colSpan={2} style={{ textAlign: 'right' }}>
+                                            <td colSpan={4} style={{ textAlign: 'right' }}>
                                               <Pagination
                                                 size="small"
                                                 current={laPrimitivaFullWheelTicketsPage}
