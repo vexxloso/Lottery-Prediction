@@ -18,6 +18,7 @@ type AnalysisRowLaPrimitiva = {
   current_id: string;
   pre_id: string;
   special_position?: number | null;
+  jackpot_position?: number | null;
   pos_1th: number;
   pos_2th: number | null;
   pos_3th: number | null;
@@ -92,7 +93,7 @@ export function LaPrimitivaAnalysisPage() {
         })
         .map((r) => ({
           label: r.date || r.current_id,
-          special_position: r.special_position ?? null,
+          special_position: r.special_position ?? r.jackpot_position ?? null,
           pos_1th: r.pos_1th || null,
           pos_2th: r.pos_2th,
           pos_3th: r.pos_3th,
@@ -224,7 +225,11 @@ export function LaPrimitivaAnalysisPage() {
                 <tr key={`${r.date}-${r.current_id}-${r.pre_id}`}>
                   <td>{r.date || '—'}</td>
                   <td>
-                    {r.special_position != null ? Number(r.special_position).toLocaleString() : '—'}
+                    {r.special_position != null
+                      ? Number(r.special_position).toLocaleString()
+                      : r.jackpot_position != null
+                        ? Number(r.jackpot_position).toLocaleString()
+                        : '—'}
                   </td>
                   <td>{r.pos_1th ? r.pos_1th.toLocaleString() : '—'}</td>
                   <td>{r.pos_2th != null ? r.pos_2th.toLocaleString() : '—'}</td>
