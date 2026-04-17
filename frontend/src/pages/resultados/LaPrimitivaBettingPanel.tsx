@@ -21,7 +21,6 @@ const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
 const CANDIDATE_COUNT_OPTIONS = [100, 200, 300, 400, 500, 1000, 2000, 3000] as const;
 const BUCKET_MAX = 8;
-const REINTEGRO_OPTIONS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 function shuffleArray<T>(arr: T[]): T[] {
   const a = [...arr];
@@ -32,13 +31,18 @@ function shuffleArray<T>(arr: T[]): T[] {
   return a;
 }
 
-/** Ticket with only mains (for candidate selection and bucket). */
-type LaPrimitivaMains = { mains: number[]; position?: number };
+/** Ticket with mains (+ optional reintegro from full-wheel file for display / enqueue). */
+type LaPrimitivaMains = { mains: number[]; position?: number; reintegro?: number };
 /** Full ticket with reintegro (for saved/bought and API). */
 type LaPrimitivaTicket = { mains: number[]; reintegro: number; position?: number };
 
-function mainsKey(t: LaPrimitivaMains): string {
-  return (t.mains ?? []).slice().sort((a, b) => a - b).join(',');
+/** Stable identity: sorted mains + optional reintegro (0–9) when present on the ticket. */
+function primitivaTicketKey(t: { mains: number[]; reintegro?: number }): string {
+  const m = (t.mains ?? []).slice().sort((a, b) => a - b).join(',');
+  if (typeof t.reintegro === 'number' && Number.isFinite(t.reintegro)) {
+    return `${m}|r${Math.floor(Math.max(0, Math.min(9, t.reintegro)))}`;
+  }
+  return m;
 }
 
 function RealPlatformIcon() {
@@ -157,6 +161,9 @@ function TicketCardMains({
           {mains.map((n, i) => (
             <span key={i} className="resultados-ball">{n}</span>
           ))}
+          {typeof ticket.reintegro === 'number' && Number.isFinite(ticket.reintegro) ? (
+            <span className="resultados-ball reintegro">{Math.floor(Math.max(0, Math.min(9, ticket.reintegro)))}</span>
+          ) : null}
         </div>
       </div>
     </div>
@@ -278,13 +285,20 @@ export function LaPrimitivaBettingPanel() {
       }
       const tickets = Array.isArray(data.tickets) ? data.tickets : [];
       setCandidatePool(
-        tickets.map((t: { mains?: unknown; position?: unknown }) => {
+        tickets.map((t: { mains?: unknown; position?: unknown; reintegro?: unknown }) => {
           const row: LaPrimitivaTicket = {
             mains: Array.isArray(t.mains) ? t.mains.map(Number) : [],
             reintegro: 0,
           };
           const p = t.position;
           if (typeof p === 'number' && Number.isFinite(p) && p >= 1) row.position = Math.floor(p);
+          const r = t.reintegro;
+          if (typeof r === 'number' && Number.isFinite(r)) {
+            row.reintegro = Math.floor(Math.max(0, Math.min(9, r)));
+          } else if (r != null && String(r).trim() !== '') {
+            const n = Number(r);
+            if (Number.isFinite(n)) row.reintegro = Math.floor(Math.max(0, Math.min(9, n)));
+          }
           return row;
         }),
       );
@@ -314,12 +328,15 @@ export function LaPrimitivaBettingPanel() {
 
   const addToBucket = (ticket: LaPrimitivaTicket) => {
     if (bucket.length >= BUCKET_MAX) return;
-    const key = mainsKey(ticket);
+    const key = primitivaTicketKey(ticket);
     setBucket((prev) => {
-      if (prev.some((t) => mainsKey(t) === key)) return prev; // already in bucket
+      if (prev.some((t) => primitivaTicketKey(t) === key)) return prev; // already in bucket
       const next: LaPrimitivaMains = { mains: [...(ticket.mains ?? [])] };
       if (typeof ticket.position === 'number' && Number.isFinite(ticket.position) && ticket.position >= 1) {
         next.position = Math.floor(ticket.position);
+      }
+      if (typeof ticket.reintegro === 'number' && Number.isFinite(ticket.reintegro)) {
+        next.reintegro = Math.floor(Math.max(0, Math.min(9, ticket.reintegro)));
       }
       return [...prev, next];
     });
@@ -330,7 +347,6 @@ export function LaPrimitivaBettingPanel() {
   };
 
   const [enqueueLoading, setEnqueueLoading] = useState(false);
-  const [reintegroModalOpen, setReintegroModalOpen] = useState(false);
   const [buyQueue, setBuyQueue] = useState<
     { id: string; status: string; tickets_count: number; tickets?: { mains?: number[]; reintegro?: number; position?: number }[]; draw_date?: string; error?: string }[]
   >([]);
@@ -540,9 +556,8 @@ export function LaPrimitivaBettingPanel() {
     return () => clearInterval(t);
   }, [fetchBuyQueue, fetchBettingPool, saveBoughtFromQueue]);
 
-  const enqueueBuy = async (reintegro: number) => {
+  const enqueueBuyFromBucket = async () => {
     if (bucket.length === 0) return;
-    setReintegroModalOpen(false);
     setEnqueueLoading(true);
     setError('');
     try {
@@ -552,7 +567,11 @@ export function LaPrimitivaBettingPanel() {
         cutoff_draw_id?: string;
       } = {
         tickets: bucket.map((m) => {
-          const row: { mains: number[]; reintegro: number; position?: number } = { mains: m.mains, reintegro };
+          const r =
+            typeof m.reintegro === 'number' && Number.isFinite(m.reintegro)
+              ? Math.floor(Math.max(0, Math.min(9, m.reintegro)))
+              : 0;
+          const row: { mains: number[]; reintegro: number; position?: number } = { mains: m.mains, reintegro: r };
           if (typeof m.position === 'number' && Number.isFinite(m.position) && m.position >= 1) {
             row.position = Math.floor(m.position);
           }
@@ -579,11 +598,6 @@ export function LaPrimitivaBettingPanel() {
     } finally {
       setEnqueueLoading(false);
     }
-  };
-
-  const openEnqueueReintegroModal = () => {
-    if (bucket.length === 0) return;
-    setReintegroModalOpen(true);
   };
 
   const enqueueByCount = async () => {
@@ -679,27 +693,41 @@ export function LaPrimitivaBettingPanel() {
   };
 
   const bucketFull = bucket.length >= BUCKET_MAX;
-  const savedMainsKeys = new Set(realPool.map((t) => mainsKey(t)));
-  const bucketMainsKeys = new Set(bucket.map(mainsKey));
+  const savedMainsKeys = new Set(realPool.map((t) => primitivaTicketKey(t)));
+  const bucketMainsKeys = new Set(bucket.map(primitivaTicketKey));
   const inQueue = new Set<string>();
   for (const q of visibleBuyQueue) {
     const tickets = q?.tickets;
-    if (Array.isArray(tickets)) for (const t of tickets) inQueue.add(mainsKey({ mains: t.mains ?? [] }));
+    if (Array.isArray(tickets)) {
+      for (const t of tickets) {
+        inQueue.add(
+          primitivaTicketKey({
+            mains: t.mains ?? [],
+            reintegro: typeof t.reintegro === 'number' ? t.reintegro : undefined,
+          }),
+        );
+      }
+    }
   }
   const inBucketOrReal = new Set([...bucketMainsKeys, ...savedMainsKeys]);
-  const availableCandidates = candidatePool.filter((t) => !inBucketOrReal.has(mainsKey(t)) && !inQueue.has(mainsKey(t)));
+  const availableCandidates = candidatePool.filter(
+    (t) => !inBucketOrReal.has(primitivaTicketKey(t)) && !inQueue.has(primitivaTicketKey(t)),
+  );
   const addRandomToBucket = () => {
     const need = Math.min(BUCKET_MAX - bucket.length, availableCandidates.length);
     if (need <= 0) return;
     const picked = shuffleArray(availableCandidates).slice(0, need).map((t) => {
       const row: LaPrimitivaMains = { mains: [...(t.mains ?? [])] };
       if (typeof t.position === 'number' && Number.isFinite(t.position) && t.position >= 1) row.position = Math.floor(t.position);
+      if (typeof t.reintegro === 'number' && Number.isFinite(t.reintegro)) {
+        row.reintegro = Math.floor(Math.max(0, Math.min(9, t.reintegro)));
+      }
       return row;
     });
     setBucket((prev) => [...prev, ...picked]);
   };
   const disabledReason = (t: LaPrimitivaMains): string => {
-    const key = mainsKey(t);
+    const key = primitivaTicketKey(t);
     if (bucketMainsKeys.has(key)) return 'En cesta';
     if (savedMainsKeys.has(key)) return 'Guardado';
     if (inQueue.has(key)) return 'En cola';
@@ -785,44 +813,11 @@ export function LaPrimitivaBettingPanel() {
         </p>
       </Modal>
 
-      {reintegroModalOpen && (
-        <div className="el-gordo-betting-reintegro-overlay" role="dialog" aria-modal="true" aria-label="Elegir reintegro">
-          <div className="el-gordo-betting-reintegro-modal">
-            <h3>Elige reintegro (0-9)</h3>
-            <p style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)', marginBottom: 12 }}>
-              Los {bucket.length} boletos de la cesta tendrán el mismo reintegro. Luego se añadirán a la cola de compra.
-            </p>
-            <div className="el-gordo-betting-reintegro-buttons">
-              {REINTEGRO_OPTIONS.map((r) => (
-                <button
-                  key={r}
-                  type="button"
-                  className="resultados-ball reintegro el-gordo-betting-reintegro-btn"
-                  onClick={() => enqueueBuy(r)}
-                  disabled={enqueueLoading}
-                >
-                  {r}
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              className="resultados-features-iconbtn"
-              onClick={() => setReintegroModalOpen(false)}
-              style={{ marginTop: 12 }}
-              disabled={enqueueLoading}
-            >
-              Cancelar
-            </button>
-          </div>
-        </div>
-      )}
-
       <div className="el-gordo-betting-split">
         <div className="el-gordo-betting-left">
           <div className="el-gordo-betting-panel-card" style={{ flex: 1, minHeight: 280 }}>
             <div className="el-gordo-betting-candidate-header">
-              <h3>Candidatos — clic para añadir a la cesta (solo números principales)</h3>
+              <h3>Candidatos — clic para añadir a la cesta (6 + reintegro del archivo)</h3>
               <div className="el-gordo-betting-candidate-actions">
                 <button
                   type="button"
@@ -893,7 +888,7 @@ export function LaPrimitivaBettingPanel() {
                   const disabled = bucketFull || !!reason;
                   return (
                     <TicketCardMains
-                      key={`c-${i}-${mainsKey(t)}`}
+                      key={`c-${i}-${primitivaTicketKey(t)}`}
                       ticket={t}
                       onClick={() => addToBucket(t)}
                       disabled={disabled}
@@ -1040,9 +1035,9 @@ export function LaPrimitivaBettingPanel() {
                   type="button"
                   className="el-gordo-betting-btn-icon"
                   disabled={bucket.length === 0 || enqueueLoading}
-                  onClick={openEnqueueReintegroModal}
-                  aria-label="Comprar en Loterías — elegir reintegro y añadir a la cola"
-                  title="Comprar en Loterías — elegir reintegro y añadir a la cola"
+                  onClick={() => void enqueueBuyFromBucket()}
+                  aria-label="Comprar en Loterías — añadir a la cola con el reintegro de cada boleto"
+                  title="Comprar en Loterías — añadir a la cola con el reintegro de cada boleto"
                 >
                   <RealPlatformIcon />
                 </button>
@@ -1066,7 +1061,7 @@ export function LaPrimitivaBettingPanel() {
               ) : (
                 bucket.map((m, i) => (
                   <TicketCardMains
-                    key={`b-${i}-${mainsKey(m)}`}
+                    key={`b-${i}-${primitivaTicketKey(m)}`}
                     ticket={m}
                     onClick={() => removeFromBucket(i)}
                     onRemove={() => removeFromBucket(i)}
