@@ -36,14 +36,14 @@ def position_generator_el_gordo(year: int, month: int) -> int:
 
 def position_generator_la_primitiva(year: int, month: int) -> int:
     """Return first_position for the given year and month."""
-    year_start = 13983 - (year - 2026) * 10000
+    year_start = 139830 - (year - 2026) * 70000
     if(year_start < 1000):
         year_start = 1000
     # For now divide_number is fixed to 6; keep random line if you want variability later.
     # divide_number = random.randint(1, 2) * 6
     divide_number = 6
 
-    unit = 10000 // 12
+    unit = 70000 // 12
     month_start = (month - 1) * unit
     month_end = month * unit
 

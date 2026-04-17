@@ -17,6 +17,7 @@ type AnalysisRowLaPrimitiva = {
   date: string;
   current_id: string;
   pre_id: string;
+  special_position?: number | null;
   pos_1th: number;
   pos_2th: number | null;
   pos_3th: number | null;
@@ -91,6 +92,7 @@ export function LaPrimitivaAnalysisPage() {
         })
         .map((r) => ({
           label: r.date || r.current_id,
+          special_position: r.special_position ?? null,
           pos_1th: r.pos_1th || null,
           pos_2th: r.pos_2th,
           pos_3th: r.pos_3th,
@@ -209,6 +211,7 @@ export function LaPrimitivaAnalysisPage() {
             <thead>
               <tr>
                 <th>Fecha</th>
+                <th>Especial pos (6 + R)</th>
                 <th>1ª pos (6)</th>
                 <th>2ª pos (5 + C)</th>
                 <th>3ª pos (5)</th>
@@ -220,6 +223,9 @@ export function LaPrimitivaAnalysisPage() {
               {rows.map((r) => (
                 <tr key={`${r.date}-${r.current_id}-${r.pre_id}`}>
                   <td>{r.date || '—'}</td>
+                  <td>
+                    {r.special_position != null ? Number(r.special_position).toLocaleString() : '—'}
+                  </td>
                   <td>{r.pos_1th ? r.pos_1th.toLocaleString() : '—'}</td>
                   <td>{r.pos_2th != null ? r.pos_2th.toLocaleString() : '—'}</td>
                   <td>{r.pos_3th != null ? r.pos_3th.toLocaleString() : '—'}</td>
@@ -246,8 +252,8 @@ export function LaPrimitivaAnalysisPage() {
       <Drawer
         title={
           graphMode === 'range2004'
-            ? 'Gráfico de posiciones (1ª–5ª) — 2004–hoy (máx. 100 sorteos)'
-            : 'Gráfico de posiciones (1ª–5ª) — página actual'
+            ? 'Gráfico de posiciones (Especial, 1ª–5ª) — 2004–hoy (máx. 100 sorteos)'
+            : 'Gráfico de posiciones (Especial, 1ª–5ª) — página actual'
         }
         placement="right"
         width="100%"
@@ -266,6 +272,13 @@ export function LaPrimitivaAnalysisPage() {
                 <YAxis />
                 <Tooltip />
                 <Legend />
+                <Line
+                  type="monotone"
+                  dataKey="special_position"
+                  name="Especial (6 + R)"
+                  stroke="#7c3aed"
+                  dot={false}
+                />
                 <Line
                   type="monotone"
                   dataKey="pos_1th"

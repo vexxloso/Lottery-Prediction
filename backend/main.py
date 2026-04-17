@@ -726,9 +726,10 @@ def _generate_full_wheel_file_from_pool(
 
 def _iter_la_primitiva_tickets_from_pool(
     mains_pool: Iterable[int],
-) -> Iterable[List[int]]:
+) -> Iterable[Tuple[Sequence[int], int]]:
     """
-    Iterate all La Primitiva tickets (6 mains) for the given ordered pool.
+    Iterate all La Primitiva tickets (6 mains + reintegro 0–9) for the given ordered pool
+    in manifold order (mirror El Gordo / Euromillones full wheel).
 
     - mains_pool: ordered mains numbers (expected length 49, already extended
       and prioritized by Step 4).
@@ -736,21 +737,33 @@ def _iter_la_primitiva_tickets_from_pool(
     We:
     - Deduplicate while preserving order.
     - Build all index combinations of length 6.
-    - Deterministically shuffle the combinations using a seed derived from
-      the mains list, so the traversal is "manifold" (not lexicographic) but
-      reproducible.
+    - Deterministically shuffle the mains combo indices and reintegro indices.
+    - Traverse the (main_combo_index × reintegro_index) grid in a diagonal pattern
+      to avoid long runs of identical mains or identical reintegro.
     """
     mains_list = list(dict.fromkeys(int(x) for x in mains_pool))
     if len(mains_list) < 6:
         raise ValueError(f"Need at least 6 mains, got {len(mains_list)}")
 
     main_idx_combos = list(combinations(range(len(mains_list)), 6))
-    seed = (hash(tuple(mains_list)) & 0xFFFFFFFF)
+    reintegro_list = list(range(10))
+    reintegro_indices = list(range(len(reintegro_list)))
+
+    seed = (hash((tuple(mains_list), tuple(reintegro_list))) & 0xFFFFFFFF)
     rng = random.Random(seed)
     rng.shuffle(main_idx_combos)
+    rng.shuffle(reintegro_indices)
 
-    for idxs in main_idx_combos:
-        yield [mains_list[i] for i in idxs]
+    nm = len(main_idx_combos)
+    nr = len(reintegro_list)
+    total = nm * nr
+    for k in range(total):
+        i = k % nm
+        t = k // nm
+        j = (t + i) % nr
+        mains = [mains_list[idx] for idx in main_idx_combos[i]]
+        reintegro = int(reintegro_list[reintegro_indices[j]])
+        yield mains, reintegro
 
 
 def _la_primitiva_ticket_tier(mains: Sequence[int]) -> int:
@@ -774,7 +787,7 @@ def _generate_la_primitiva_full_wheel_file(
       into tiers 0..3.
     - Tickets are written tier by tier (0 → 1 → 2 → 3) so structurally
       weaker patterns are pushed toward the end of the file.
-    - Each line: {LOTTERY}_DRAW_{YYYYMMDD}_COMBO_{position};position;m1,...,m6
+    - Each line: {LOTTERY}_DRAW_{YYYYMMDD}_COMBO_{position};position;m1,...,m6;reintegro
     """
     root = Path(_ROOT_DIR)
     out_dir = root / "la_primitiva_pools"
@@ -792,31 +805,31 @@ def _generate_la_primitiva_full_wheel_file(
         for tier in range(4):
             seed = (hash((draw_date_iso, "la-primitiva", tier)) & 0xFFFFFFFF)
             rng = random.Random(seed)
-            buffer: List[List[int]] = []
+            buffer: List[Tuple[List[int], int]] = []
             buffer_size = 1000
 
-            for mains in _iter_la_primitiva_tickets_from_pool(mains_pool):
+            for mains, reintegro in _iter_la_primitiva_tickets_from_pool(mains_pool):
                 t = _la_primitiva_ticket_tier(mains)
                 if t != tier:
                     continue
-                buffer.append(list(mains))
+                buffer.append((list(mains), int(reintegro)))
                 if len(buffer) >= buffer_size:
                     rng.shuffle(buffer)
-                    for m in buffer:
+                    for m, r in buffer:
                         position += 1
                         mains_str = ",".join(str(n) for n in m)
                         tid = _full_wheel_ticket_id(lottery_token, file_date_compact, position)
-                        f.write(f"{tid};{position};{mains_str}\n")
+                        f.write(f"{tid};{position};{mains_str};{r}\n")
                         total_by_tier[tier] += 1
                     buffer.clear()
 
             if buffer:
                 rng.shuffle(buffer)
-                for m in buffer:
+                for m, r in buffer:
                     position += 1
                     mains_str = ",".join(str(n) for n in m)
                     tid = _full_wheel_ticket_id(lottery_token, file_date_compact, position)
-                    f.write(f"{tid};{position};{mains_str}\n")
+                    f.write(f"{tid};{position};{mains_str};{r}\n")
                     total_by_tier[tier] += 1
 
     good_count = total_by_tier[0] + total_by_tier[1] + total_by_tier[2]
@@ -1933,17 +1946,27 @@ def _fw_split_el_gordo_line(raw: str) -> Optional[tuple[int, str, str]]:
     return None
 
 
-def _fw_split_la_primitiva_line(raw: str) -> Optional[tuple[int, str]]:
-    """Return (position, mains_str) or None."""
+def _fw_split_la_primitiva_line(raw: str) -> Optional[tuple[int, str, Optional[str]]]:
+    """Return (position, mains_str, reintegro_str_or_none) or None."""
     parts = raw.split(";")
+    if len(parts) >= 4 and "_COMBO_" in (parts[0] or ""):
+        try:
+            return int(parts[1]), parts[2], parts[3]
+        except (TypeError, ValueError):
+            return None
     if len(parts) >= 3 and "_COMBO_" in (parts[0] or ""):
         try:
-            return int(parts[1]), parts[2]
+            return int(parts[1]), parts[2], None
+        except (TypeError, ValueError):
+            return None
+    if len(parts) >= 3:
+        try:
+            return int(parts[0]), parts[1], parts[2]
         except (TypeError, ValueError):
             return None
     if len(parts) >= 2:
         try:
-            return int(parts[0]), parts[1]
+            return int(parts[0]), parts[1], None
         except (TypeError, ValueError):
             return None
     return None
@@ -2035,7 +2058,7 @@ def _fw_generate_full_csv_if_needed(txt_path: str, lottery_slug: str) -> str:
         if lottery_slug == "euromillones"
         else "ticket_id;position;mains;clave\n"
         if lottery_slug == "el-gordo"
-        else "ticket_id;position;mains\n"
+        else "ticket_id;position;mains;reintegro\n"
     )
 
     with open(tmp_path, "w", encoding="utf-8", newline="") as out:
@@ -2067,11 +2090,14 @@ def _fw_generate_full_csv_if_needed(txt_path: str, lottery_slug: str) -> str:
                     sp = _fw_split_la_primitiva_line(raw)
                     if not sp:
                         continue
-                    p, mains_str = sp
+                    p, mains_str, rein_str = sp
                     tid = raw.split(";", 1)[0]
                     if "_COMBO_" not in tid:
                         tid = _full_wheel_ticket_id(token, compact, p)
-                    out.write(f"{tid};{p};{mains_str}\n")
+                    r_out = (rein_str or "").strip()
+                    if r_out == "":
+                        r_out = "0"
+                    out.write(f"{tid};{p};{mains_str};{r_out}\n")
 
     os.replace(tmp_path, csv_path)
     return csv_path
@@ -2208,11 +2234,14 @@ def _csv_prepare_job_worker(job_id: str) -> None:
                         sp = _fw_split_la_primitiva_line(raw)
                         if not sp:
                             continue
-                        p, mains_str = sp
+                        p, mains_str, rein_str = sp
                         tid = raw.split(";", 1)[0]
                         if "_COMBO_" not in tid:
                             tid = _full_wheel_ticket_id(token, compact, p)
-                        out.write(f"{tid};{p};{mains_str}\n")
+                        r_out = (rein_str or "").strip()
+                        if r_out == "":
+                            r_out = "0"
+                        out.write(f"{tid};{p};{mains_str};{r_out}\n")
 
                     # Progress update (based on bytes read)
                     now = time.time()
@@ -4958,7 +4987,7 @@ def _el_gordo_full_wheel_reorder_txt(
 
 
 def _la_primitiva_read_line_payloads(path: str, positions: set[int]) -> Dict[int, str]:
-    """Read mains_str for given 1-based line indices (La Primitiva TXT: position;mains or id;position;mains)."""
+    """Read payload for given 1-based line indices (La Primitiva TXT: ...;position;mains[;reintegro])."""
     found: Dict[int, str] = {}
     if not positions:
         return found
@@ -4970,9 +4999,10 @@ def _la_primitiva_read_line_payloads(path: str, positions: set[int]) -> Dict[int
             sp = _fw_split_la_primitiva_line(raw)
             if not sp:
                 continue
-            position, mains_str = sp
+            position, mains_str, rein_str = sp
             if position in positions:
-                found[position] = mains_str
+                r = (rein_str or "").strip()
+                found[position] = f"{mains_str};{r}" if r != "" else mains_str
     return found
 
 
@@ -4981,6 +5011,7 @@ def _la_primitiva_full_wheel_reorder_txt(
     main_set: set,
     draw_date: str,
     complementario: Optional[int] = None,
+    reintegro: Optional[int] = None,
     bought_ticket_keys: Optional[set[Tuple[int, ...]]] = None,
     bought_line_positions: Optional[set[int]] = None,
 ) -> None:
@@ -5004,11 +5035,11 @@ def _la_primitiva_full_wheel_reorder_txt(
         month = int(date_str[5:7])
     except (ValueError, IndexError):
         raise HTTPException(400, detail="Invalid draw date format for reorder (La Primitiva)")
-    first_position = position_generator_la_primitiva(year, month)
-    if first_position < 1:
-        raise HTTPException(400, detail="first_position must be positive (La Primitiva)")
+    special_target_position = position_generator_la_primitiva(year, month)
+    if special_target_position < 1:
+        raise HTTPException(400, detail="special_target_position must be positive (La Primitiva)")
     print(
-        f"[la-prim-reorder] draw_date={date_str} year={year} month={month} first_position={first_position} complementario={complementario}",
+        f"[la-prim-reorder] draw_date={date_str} year={year} month={month} special_target_position={special_target_position} complementario={complementario} reintegro={reintegro}",
         flush=True,
     )
 
@@ -5021,11 +5052,10 @@ def _la_primitiva_full_wheel_reorder_txt(
         rest = set(mains) - main_set
         return rest == {complementario}
 
-    first_5c: Optional[int] = None
-    first_5only: Optional[int] = None
-    first_4: Optional[int] = None
-    first_3: Optional[int] = None
-    jackpot_position: Optional[int] = None
+    special_position: Optional[int] = None  # Especial: 6 mains + reintegro
+    first_6only: Optional[int] = None       # 1ª: 6 mains (any reintegro)
+    first_5c: Optional[int] = None          # 2ª: 5 mains + complementario
+    first_5only: Optional[int] = None       # 3ª: 5 mains (no complementario)
 
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -5035,7 +5065,7 @@ def _la_primitiva_full_wheel_reorder_txt(
             sp = _fw_split_la_primitiva_line(line)
             if not sp:
                 continue
-            position, mains_str = sp
+            position, mains_str, rein_str = sp
             try:
                 mains = [int(x) for x in mains_str.split(",") if x]
             except Exception:
@@ -5043,9 +5073,19 @@ def _la_primitiva_full_wheel_reorder_txt(
             if len(mains) != 6:
                 continue
             hits_main = sum(1 for n in mains if n in main_set)
+            rein_val: Optional[int] = None
+            if rein_str is not None and str(rein_str).strip() != "":
+                try:
+                    rein_val = int(str(rein_str).strip())
+                except Exception:
+                    rein_val = None
+
             if hits_main == 6:
-                if jackpot_position is None:
-                    jackpot_position = position
+                if first_6only is None:
+                    first_6only = position
+                if reintegro is not None and rein_val is not None and rein_val == int(reintegro):
+                    if special_position is None:
+                        special_position = position
             elif hits_main == 5:
                 if is_second_prize(mains):
                     if first_5c is None:
@@ -5053,56 +5093,56 @@ def _la_primitiva_full_wheel_reorder_txt(
                 else:
                     if first_5only is None:
                         first_5only = position
-            elif hits_main == 4:
-                if first_4 is None:
-                    first_4 = position
-            elif hits_main == 3:
-                if first_3 is None:
-                    first_3 = position
 
-            if jackpot_position is not None and (complementario is None or first_5c is not None):
+            # Stop once we found the new jackpot (Especial) and the early prizes we care about.
+            if special_position is not None and first_6only is not None and first_5only is not None and (
+                complementario is None or first_5c is not None
+            ):
                 break
 
-    if jackpot_position is None:
+    if special_position is None:
         raise HTTPException(
             404,
-            detail="Jackpot (6 mains) not found in La Primitiva full wheel file; cannot reorder",
+            detail="Special jackpot (6 mains + reintegro) not found in La Primitiva full wheel file; cannot reorder",
         )
+    if first_6only is None:
+        raise HTTPException(404, detail="1st prize (6 mains) not found in La Primitiva full wheel file; cannot reorder")
+    if first_5only is None:
+        raise HTTPException(404, detail="3rd prize (5 mains) not found in La Primitiva full wheel file; cannot reorder")
     if complementario is not None and first_5c is None:
-        raise HTTPException(
-            404,
-            detail="2nd prize (5 mains + complementario) not found in La Primitiva full wheel file; cannot reorder",
-        )
+        raise HTTPException(404, detail="2nd prize (5 mains + complementario) not found in La Primitiva full wheel file; cannot reorder")
     print(
-        f"[la-prim-reorder] jackpot_position={jackpot_position} | first 2ª(5+C)={first_5c} 3ª={first_5only} 4ª={first_4} 5ª={first_3}",
+        f"[la-prim-reorder] special_position={special_position} | first 1ª(6)={first_6only} 2ª(5+C)={first_5c} 3ª(5)={first_5only}",
         flush=True,
     )
 
-    if jackpot_position in bought_lines:
-        print("[la-prim-reorder] skip: jackpot line is in bought line positions", flush=True)
+    if special_position in bought_lines:
+        print("[la-prim-reorder] skip: special line is in bought line positions", flush=True)
         return
 
-    if jackpot_position <= first_position:
+    if special_position <= special_target_position:
         print(
-            f"[la-prim-reorder] skip: jackpot_position {jackpot_position} <= first_position {first_position}",
+            f"[la-prim-reorder] skip: special_position {special_position} <= special_target_position {special_target_position}",
             flush=True,
         )
         return
 
     import random as rand_module
 
-    def range_list_lp(lo: float, hi: int) -> List[int]:
-        return list(range(max(1, int(lo)), hi + 1))
+    def range_list_lp(lo: float, hi: float) -> List[int]:
+        lo_i = max(1, int(lo))
+        hi_i = max(1, int(hi))
+        if hi_i < lo_i:
+            return []
+        return list(range(lo_i, hi_i + 1))
 
-    r_3a = range_list_lp(first_position * 0.8, first_position - 1)
-    r_4a = range_list_lp(first_position * 0.6, first_position - 1)
-    r_5a = range_list_lp(first_position * 0.4, first_position - 1)
+    # Target rank bands (relative to special_target_position):
+    # - 1st and 2nd: 0.7..0.8
+    # - 3rd: 0.5..0.6
+    band_1st2nd = [p for p in range_list_lp(special_target_position * 0.7, special_target_position * 0.8) if p != special_target_position]
+    band_3rd = [p for p in range_list_lp(special_target_position * 0.5, special_target_position * 0.6) if p != special_target_position]
 
-    band_2nd_lo = max(1, int(0.9 * first_position))
-    band_2nd_hi = int(1.1 * first_position)
-    band_2nd = [p for p in range(band_2nd_lo, band_2nd_hi + 1) if p != first_position]
-
-    used_ranks: set[int] = {first_position}
+    used_ranks: set[int] = {special_target_position}
 
     def pick_one_rank(available: List[int]) -> Optional[int]:
         pool = [x for x in available if x not in used_ranks]
@@ -5112,36 +5152,23 @@ def _la_primitiva_full_wheel_reorder_txt(
         used_ranks.add(chosen)
         return chosen
 
-    planned: List[Tuple[int, int]] = [(jackpot_position, first_position)]
+    planned: List[Tuple[int, int]] = [(special_position, special_target_position)]
 
-    if first_5c is not None and band_2nd:
-        outside = first_5c < band_2nd_lo or first_5c > band_2nd_hi
-        if outside:
-            nr = pick_one_rank(band_2nd)
-            if nr is not None:
-                planned.append((first_5c, nr))
-                print(
-                    f"[la-prim-reorder] planned 2ª(5+C): line {first_5c} -> rank {nr} (90%-110% band)",
-                    flush=True,
-                )
-        else:
-            print(
-                f"[la-prim-reorder] 2ª(5+C) already in band [{band_2nd_lo},{band_2nd_hi}]; no 2ª move",
-                flush=True,
-            )
+    # 1ª (6 mains) and 2ª (5+C) go into the 0.7–0.8 band.
+    if first_6only is not None and first_6only != special_position and first_6only > special_target_position:
+        nr = pick_one_rank(band_1st2nd)
+        if nr is not None:
+            planned.append((first_6only, nr))
+    if first_5c is not None and first_5c > special_target_position:
+        nr = pick_one_rank(band_1st2nd)
+        if nr is not None:
+            planned.append((first_5c, nr))
 
-    if first_5only is not None and first_5only > first_position:
-        nr = pick_one_rank(r_3a)
+    # 3ª (5 mains) goes into the 0.5–0.6 band.
+    if first_5only is not None and first_5only > special_target_position:
+        nr = pick_one_rank(band_3rd)
         if nr is not None:
             planned.append((first_5only, nr))
-    if first_4 is not None and first_4 > first_position:
-        nr = pick_one_rank(r_4a)
-        if nr is not None:
-            planned.append((first_4, nr))
-    if first_3 is not None and first_3 > first_position:
-        nr = pick_one_rank(r_5a)
-        if nr is not None:
-            planned.append((first_3, nr))
 
     print(f"[la-prim-reorder] planned (old, new_rank) before bought filter: {planned}", flush=True)
 
@@ -5159,9 +5186,19 @@ def _la_primitiva_full_wheel_reorder_txt(
         planned_keys: List[Tuple[int, int]] = []
         for old_pos, new_rank in planned:
             ms = payloads_keys.get(old_pos, "")
-            mains = [int(x) for x in ms.split(",") if x] if ms else []
+            mains_part = (ms.split(";", 1)[0] if ms else "").strip()
+            rein_part = ""
+            if ms and ";" in ms:
+                rein_part = (ms.split(";", 1)[1] or "").strip()
+            mains = [int(x) for x in mains_part.split(",") if x] if mains_part else []
             if len(mains) == 6:
-                k = tuple(sorted(mains))
+                r_int = 0
+                if rein_part != "":
+                    try:
+                        r_int = int(rein_part)
+                    except Exception:
+                        r_int = 0
+                k = tuple(sorted(mains) + [100 + max(0, min(9, r_int))])
                 if k in keys:
                     print(f"[la-prim-reorder] drop move: old line {old_pos} matches bought ticket key", flush=True)
                     continue
@@ -5219,7 +5256,7 @@ def _la_primitiva_full_wheel_reorder_txt(
                     if not sp:
                         out.write(line if line.endswith("\n") else line + "\n")
                         continue
-                    position, _ms = sp
+                    position, _ms, _rs = sp
                     if position in line_payload:
                         tid = _full_wheel_ticket_id(fw_tok, fw_compact, position)
                         out.write(f"{tid};{position};{line_payload[position]}\n")
@@ -5583,10 +5620,10 @@ def _la_primitiva_full_wheel_compare(
     - Stream TXT and compute for each (main_hits, reintegro_hit) category:
       * first_position (first time it appears)
       * total count of tickets.
-    - Also record jackpot_position (6 mains), and first positions for
-      2th(5+C), 3th(5 hits), 4th(4 hits), 5th(3 hits).
-    - Stop scanning once both jackpot (1st) and 2nd (5+C) are found
-      (when complementario is set; otherwise stop at jackpot).
+    - Also record special_position (6 mains + reintegro), and first positions for
+      1st(6 hits), 2nd(5+C), 3rd(5 hits), 4th(4 hits), 5th(3 hits).
+    - Stop scanning once special (6+R) and early prizes are found
+      (when complementario is set, wait for 2nd too).
     - Save summary to la_primitiva_compare_results.
 
     NOTE: Existence / fallback logic (real vs synthetic vs no-data) is handled
@@ -5657,7 +5694,8 @@ def _la_primitiva_full_wheel_compare(
     if not os.path.isfile(path):
         raise HTTPException(404, detail="La Primitiva full wheel file not found on disk")
 
-    # We only care about 5 official La Primitiva categories based on mains + complementario:
+    # We care about the official La Primitiva categories plus Especial (6 + R):
+    # Especial: (6,1) -> 6 aciertos + reintegro
     # 1ª: (6,0) -> 6 aciertos
     # 2ª: (5,1) -> 5 + C
     # 3ª: (5,0) -> 5 aciertos
@@ -5665,7 +5703,8 @@ def _la_primitiva_full_wheel_compare(
     # 5ª: (3,0) -> 3 aciertos
     category_first_pos: Dict[Tuple[int, int], int] = {}
     category_counts: Dict[Tuple[int, int], int] = {}
-    jackpot_position: Optional[int] = None
+    special_position: Optional[int] = None  # Especial (6 + R)
+    jackpot_position: Optional[int] = None  # 1ª (6 mains)
     second_first: Optional[int] = None   # 2ª (5+C)
     third_first: Optional[int] = None   # 3ª (5 aciertos)
     fourth_first: Optional[int] = None  # 4ª (4 aciertos)
@@ -5679,13 +5718,19 @@ def _la_primitiva_full_wheel_compare(
             sp = _fw_split_la_primitiva_line(line)
             if not sp:
                 continue
-            position, mains_str = sp
+            position, mains_str, rein_str = sp
             try:
                 mains = [int(x) for x in mains_str.split(",") if x]
             except Exception:
                 continue
             if len(mains) != 6:
                 continue
+            rein_val: Optional[int] = None
+            if rein_str is not None and str(rein_str).strip() != "":
+                try:
+                    rein_val = int(str(rein_str).strip())
+                except Exception:
+                    rein_val = None
             hits_main = sum(1 for n in mains if n in main_set)
             has_complementario = bool(
                 complementario_set and any(n in complementario_set for n in mains)
@@ -5693,7 +5738,9 @@ def _la_primitiva_full_wheel_compare(
 
             # Map to one of the 5 official categories (or ignore if not matching any).
             key: Optional[Tuple[int, int]] = None
-            if hits_main == 6:
+            if hits_main == 6 and reintegro_draw is not None and rein_val is not None and rein_val == int(reintegro_draw):
+                key = (6, 1)  # Especial (6 + R)
+            elif hits_main == 6:
                 key = (6, 0)  # 1ª
             elif hits_main == 5 and has_complementario:
                 key = (5, 1)  # 2ª
@@ -5709,6 +5756,9 @@ def _la_primitiva_full_wheel_compare(
                     category_first_pos[key] = position
                 category_counts[key] = category_counts.get(key, 0) + 1
 
+            if hits_main == 6 and reintegro_draw is not None and rein_val is not None and rein_val == int(reintegro_draw):
+                if special_position is None:
+                    special_position = position
             if hits_main == 6:
                 if jackpot_position is None:
                     jackpot_position = position
@@ -5725,22 +5775,23 @@ def _la_primitiva_full_wheel_compare(
                 if fifth_first is None:
                     fifth_first = position
 
-            # Stop only when we have both jackpot (1st) and 2nd (5+C) when complementario is set.
-            if jackpot_position is not None and (
-                complementario_draw is None or (5, 1) in category_first_pos
+            # Stop once we have special (6+R) and early prizes.
+            if special_position is not None and third_first is not None and (
+                complementario_draw is None or second_first is not None
             ):
                 break
 
-    if jackpot_position is None:
+    if special_position is None:
         raise HTTPException(
             404,
-            detail="Jackpot (6 mains) not found in La Primitiva full wheel file; cannot compute compare result",
+            detail="Special jackpot (6 mains + reintegro) not found in La Primitiva full wheel file; cannot compute compare result",
         )
 
     coll_compare = db_instance[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION]
 
-    # Build categories array in fixed canonical order (exactly 5 entries).
+    # Build categories array in fixed canonical order.
     ordered_keys: List[Tuple[Tuple[int, int], str]] = [
+        ((6, 1), "Especial (6 aciertos + R)"),
         ((6, 0), "1ª (6 aciertos)"),
         ((5, 1), "2ª (5 + C)"),
         ((5, 0), "3ª (5 aciertos)"),
@@ -5766,7 +5817,9 @@ def _la_primitiva_full_wheel_compare(
         "current_id": current_id_clean,
         "date": draw_date,
         "pre_id": pre_id_clean,
-        "jackpot_position": jackpot_position,
+        "jackpot_position": special_position,
+        "special_position": special_position,
+        "pos_1th": jackpot_position,
         "pos_2th": second_first,
         "pos_3th": third_first,
         "pos_4th": fourth_first,
@@ -5780,7 +5833,7 @@ def _la_primitiva_full_wheel_compare(
         upsert=True,
     )
     print(
-        f"[la-prim-compare] saved result for current_id={current_id_clean} pre_id={pre_id_clean} jackpot_position={jackpot_position}",
+        f"[la-prim-compare] saved result for current_id={current_id_clean} pre_id={pre_id_clean} special_position={special_position}",
         flush=True,
     )
     return result
@@ -6965,7 +7018,7 @@ def api_la_primitiva_compare_full_wheel_tickets(
             sp = _fw_split_la_primitiva_line(line)
             if not sp:
                 continue
-            position, mains_str = sp
+            position, mains_str, rein_str = sp
             if position < start_pos:
                 continue
             if position > end_pos:
@@ -6978,6 +7031,11 @@ def api_la_primitiva_compare_full_wheel_tickets(
             row: Dict[str, Any] = {"position": position, "mains": mains}
             if tid:
                 row["ticket_id"] = tid
+            if rein_str is not None and str(rein_str).strip() != "":
+                try:
+                    row["reintegro"] = int(str(rein_str).strip())
+                except Exception:
+                    pass
             items.append(row)
             if len(items) >= limit:
                 break
@@ -7581,21 +7639,37 @@ def api_la_primitiva_compare_full_wheel_reorder(
         bought_ticket_keys: set[Tuple[int, ...]] = set()
         for t in (progress_doc.get("bought_tickets") or []):
             mains = t.get("mains") or []
+            rein = t.get("reintegro")
             if not isinstance(mains, list) or len(mains) != 6:
                 continue
             try:
                 mains_int = [int(x) for x in mains]
             except Exception:
                 continue
-            bought_ticket_keys.add(tuple(sorted(mains_int)))
+            try:
+                r_int = int(rein) if rein is not None and str(rein).strip() != "" else 0
+            except Exception:
+                r_int = 0
+            bought_ticket_keys.add(tuple(sorted(mains_int) + [100 + max(0, min(9, r_int))]))
 
         bought_line_positions = _bought_wheel_line_positions(progress_doc.get("bought_tickets"))
-        print(f"[la-prim-reorder-api] calling _la_primitiva_full_wheel_reorder_txt path={path!r} complementario={complementario}", flush=True)
+        rein_raw = draw.get("reintegro") or doc.get("reintegro")
+        reintegro = None
+        if rein_raw is not None and str(rein_raw).strip() != "":
+            try:
+                reintegro = int(rein_raw)
+            except (ValueError, TypeError):
+                reintegro = None
+        if reintegro is not None and not (0 <= reintegro <= 9):
+            reintegro = None
+
+        print(f"[la-prim-reorder-api] calling _la_primitiva_full_wheel_reorder_txt path={path!r} complementario={complementario} reintegro={reintegro}", flush=True)
         _la_primitiva_full_wheel_reorder_txt(
             path=path,
             main_set=main_set,
             draw_date=draw_date,
             complementario=complementario,
+            reintegro=reintegro,
             bought_ticket_keys=bought_ticket_keys,
             bought_line_positions=bought_line_positions,
         )
@@ -8901,7 +8975,7 @@ def api_la_primitiva_betting_pool_from_file(
                 sp = _fw_split_la_primitiva_line(line)
                 if not sp:
                     continue
-                position, mains_str = sp
+                position, mains_str, rein_str = sp
                 try:
                     mains = [int(x) for x in mains_str.split(",") if x]
                 except Exception:
@@ -8911,6 +8985,11 @@ def api_la_primitiva_betting_pool_from_file(
                 row: Dict[str, Any] = {"position": position, "mains": mains}
                 if tid:
                     row["ticket_id"] = tid
+                if rein_str is not None and str(rein_str).strip() != "":
+                    try:
+                        row["reintegro"] = int(str(rein_str).strip())
+                    except Exception:
+                        pass
                 tickets_list.append(row)
     except FileNotFoundError:
         raise HTTPException(404, detail="Full wheel file not found on disk")
@@ -9101,11 +9180,21 @@ async def api_la_primitiva_betting_enqueue_by_count(request: Request):
         for t in (d.get("tickets") or []):
             mains = t.get("mains")
             if isinstance(mains, list) and len(mains) == 6:
-                excluded.add(tuple(sorted(mains)))
+                r = t.get("reintegro")
+                try:
+                    r_int = int(r)
+                except Exception:
+                    r_int = 0
+                excluded.add(tuple(sorted(mains) + [100 + max(0, min(9, r_int))]))
     for t in (doc.get("bought_tickets") or []):
         mains = t.get("mains")
         if isinstance(mains, list) and len(mains) == 6:
-            excluded.add(tuple(sorted(mains)))
+            r = t.get("reintegro")
+            try:
+                r_int = int(r)
+            except Exception:
+                r_int = 0
+            excluded.add(tuple(sorted(mains) + [100 + max(0, min(9, r_int))]))
     now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     inserted_ids: List[str] = []
     items_meta: List[Dict] = []
@@ -9122,24 +9211,29 @@ async def api_la_primitiva_betting_enqueue_by_count(request: Request):
                 sp = _fw_split_la_primitiva_line(line)
                 if not sp:
                     continue
-                position, mains_str = sp
+                position, mains_str, rein_str = sp
                 try:
                     mains = [int(x) for x in mains_str.split(",") if x]
                 except Exception:
                     continue
                 if len(mains) != 6:
                     continue
-                key = tuple(sorted(mains))
+                r_val = 0
+                if rein_str is not None and str(rein_str).strip() != "":
+                    try:
+                        r_val = int(str(rein_str).strip())
+                    except Exception:
+                        r_val = 0
+                key = tuple(sorted(mains) + [100 + max(0, min(9, r_val))])
                 if key in excluded:
                     continue
                 excluded.add(key)
-                bucket_buf.append({"mains": mains, "position": position})
+                bucket_buf.append({"mains": mains, "position": position, "reintegro": max(0, min(9, r_val))})
                 total_collected += 1
                 if len(bucket_buf) >= LA_PRIMITIVA_BUCKET_SIZE:
                     raw_chunk = bucket_buf[:LA_PRIMITIVA_BUCKET_SIZE]
                     del bucket_buf[:LA_PRIMITIVA_BUCKET_SIZE]
-                    reintegro_bucket = random.randint(0, 9)
-                    chunk = [{"mains": t["mains"], "reintegro": reintegro_bucket, "position": t["position"]} for t in raw_chunk]
+                    chunk = [{"mains": t["mains"], "reintegro": int(t.get("reintegro") or 0), "position": t["position"]} for t in raw_chunk]
                     doc_queue = {
                         "lottery": "la-primitiva",
                         "tickets": chunk,
@@ -9263,12 +9357,22 @@ async def api_la_primitiva_betting_enqueue_by_range(request: Request):
         for t in (d.get("tickets") or []):
             mains = t.get("mains")
             if isinstance(mains, list) and len(mains) == 6:
-                excluded.add(tuple(sorted(mains)))
+                r = t.get("reintegro")
+                try:
+                    r_int = int(r)
+                except Exception:
+                    r_int = 0
+                excluded.add(tuple(sorted(mains) + [100 + max(0, min(9, r_int))]))
 
     for t in (doc.get("bought_tickets") or []):
         mains = t.get("mains")
         if isinstance(mains, list) and len(mains) == 6:
-            excluded.add(tuple(sorted(mains)))
+            r = t.get("reintegro")
+            try:
+                r_int = int(r)
+            except Exception:
+                r_int = 0
+            excluded.add(tuple(sorted(mains) + [100 + max(0, min(9, r_int))]))
 
     collected: List[Dict] = []
     try:
@@ -9282,7 +9386,7 @@ async def api_la_primitiva_betting_enqueue_by_range(request: Request):
                 sp = _fw_split_la_primitiva_line(line)
                 if not sp:
                     continue
-                position, mains_str = sp
+                position, mains_str, rein_str = sp
 
                 if position < start_position:
                     continue
@@ -9299,11 +9403,18 @@ async def api_la_primitiva_betting_enqueue_by_range(request: Request):
                 if len(mains) != 6:
                     continue
 
-                key = tuple(sorted(mains))
+                r_val = 0
+                if rein_str is not None and str(rein_str).strip() != "":
+                    try:
+                        r_val = int(str(rein_str).strip())
+                    except Exception:
+                        r_val = 0
+
+                key = tuple(sorted(mains) + [100 + r_val])
                 if key in excluded:
                     continue
                 excluded.add(key)
-                collected.append({"mains": mains, "position": position})
+                collected.append({"mains": mains, "position": position, "reintegro": r_val})
     except FileNotFoundError:
         raise HTTPException(404, detail="Full wheel file not found on disk")
 
@@ -9314,8 +9425,7 @@ async def api_la_primitiva_betting_enqueue_by_range(request: Request):
     inserted_ids: List[str] = []
     for i in range(0, len(collected), LA_PRIMITIVA_BUCKET_SIZE):
         raw_chunk = collected[i : i + LA_PRIMITIVA_BUCKET_SIZE]
-        reintegro_bucket = random.randint(0, 9)
-        chunk = [{"mains": t["mains"], "reintegro": reintegro_bucket, "position": t["position"]} for t in raw_chunk]
+        chunk = [{"mains": t["mains"], "reintegro": int(t.get("reintegro") or 0), "position": t["position"]} for t in raw_chunk]
         doc_queue = {
             "lottery": "la-primitiva",
             "tickets": chunk,
@@ -11426,7 +11536,7 @@ def api_la_primitiva_full_wheel_preview(
                 sp = _fw_split_la_primitiva_line(line)
                 if not sp:
                     continue
-                position, mains_str = sp
+                position, mains_str, rein_str = sp
                 try:
                     mains = [int(x) for x in mains_str.split(",") if x]
                 except Exception:
@@ -11436,6 +11546,11 @@ def api_la_primitiva_full_wheel_preview(
                 row: Dict[str, Any] = {"position": position, "mains": mains}
                 if tid:
                     row["ticket_id"] = tid
+                if rein_str is not None and str(rein_str).strip() != "":
+                    try:
+                        row["reintegro"] = int(str(rein_str).strip())
+                    except Exception:
+                        pass
                 tickets.append(row)
                 if len(tickets) >= limit:
                     break

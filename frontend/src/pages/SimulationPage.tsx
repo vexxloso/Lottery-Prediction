@@ -208,7 +208,7 @@ export function SimulationPage() {
   const [elGordoFullWheelTicketsLoading, setElGordoFullWheelTicketsLoading] = useState(false);
   const [showElGordoFullWheelTickets, setShowElGordoFullWheelTickets] = useState(false);
   const [laPrimitivaFullWheelTickets, setLaPrimitivaFullWheelTickets] = useState<
-    { position: number; mains: number[] }[]
+    { position: number; mains: number[]; reintegro?: number }[]
   >([]);
   const [laPrimitivaFullWheelTicketsTotal, setLaPrimitivaFullWheelTicketsTotal] = useState(0);
   const [laPrimitivaFullWheelTicketsPage, setLaPrimitivaFullWheelTicketsPage] = useState(1);
@@ -1004,6 +1004,7 @@ export function SimulationPage() {
         tickets.map((t) => ({
           position: Number(t.position),
           mains: (t.mains ?? []).map(Number),
+          reintegro: typeof t.reintegro === 'number' ? Number(t.reintegro) : undefined,
         })),
       );
       setLaPrimitivaFullWheelTicketsTotal(Number(data.total_tickets ?? 0));
@@ -2022,6 +2023,7 @@ export function SimulationPage() {
 
                           // Fixed 1ª–5ª mapping only; hide all other categories (2 aciertos + C, etc.).
                           const orderedKeys: { key: string; label: string }[] = [
+                            { key: '6-1', label: 'Especial (6 aciertos + R)' },
                             { key: '6-0', label: '1ª (6 aciertos)' },
                             { key: '5-1', label: '2ª (5 + C)' },
                             { key: '5-0', label: '3ª (5 aciertos)' },
@@ -2075,6 +2077,7 @@ export function SimulationPage() {
                                           <tr>
                                             <th>No</th>
                                             <th>Números principales</th>
+                                            <th>Reintegro</th>
                                             <th>Categoría</th>
                                           </tr>
                                         </thead>
@@ -2085,15 +2088,27 @@ export function SimulationPage() {
                                               (compareDraw as { complementario?: number | null }).complementario;
                                             const hitsComplementario =
                                               complementario != null && t.mains.includes(complementario) ? 1 : 0;
+                                            const reintegroDraw = Array.isArray(compareDraw.stars) && compareDraw.stars.length > 0
+                                              ? Number(compareDraw.stars[0])
+                                              : null;
+                                            const reintegroTicket = (t as any).reintegro != null ? Number((t as any).reintegro) : null;
+                                            const specialHit =
+                                              hitsMain === 6 &&
+                                              reintegroDraw != null &&
+                                              Number.isFinite(reintegroDraw) &&
+                                              reintegroTicket != null &&
+                                              Number.isFinite(reintegroTicket) &&
+                                              reintegroTicket === reintegroDraw;
                                             // 1ª=6-0, 2ª=5+C, 3ª=5-0, 4ª=4-0, 5ª=3-0 (per update3)
                                             let categoryLabel = '';
-                                            if (hitsMain === 6) categoryLabel = '1ª (6 aciertos)';
+                                            if (specialHit) categoryLabel = 'Especial (6 aciertos + R)';
+                                            else if (hitsMain === 6) categoryLabel = '1ª (6 aciertos)';
                                             else if (hitsMain === 5 && hitsComplementario === 1)
                                               categoryLabel = '2ª (5 + C)';
                                             else if (hitsMain === 5) categoryLabel = '3ª (5 aciertos)';
                                             else if (hitsMain === 4) categoryLabel = '4ª (4 aciertos)';
                                             else if (hitsMain === 3) categoryLabel = '5ª (3 aciertos)';
-                                            const isWinning = hitsMain >= 3;
+                                            const isWinning = hitsMain >= 3 || specialHit;
                                             return (
                                               <tr
                                                 key={t.position}
@@ -2108,6 +2123,7 @@ export function SimulationPage() {
                                               >
                                                 <td>{t.position.toLocaleString()}</td>
                                                 <td>{t.mains.join(', ')}</td>
+                                                <td>{t.reintegro != null ? String(t.reintegro) : '—'}</td>
                                                 <td>{categoryLabel || '—'}</td>
                                               </tr>
                                             );
