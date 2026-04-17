@@ -6473,6 +6473,8 @@ def api_la_primitiva_compare_analysis(
                 "date": 1,
                 "current_id": 1,
                 "pre_id": 1,
+                "jackpot_position": 1,
+                "special_position": 1,
                 "categories": 1,
             },
         )
@@ -6501,6 +6503,8 @@ def api_la_primitiva_compare_analysis(
                 "date": date_str,
                 "current_id": str(doc.get("current_id") or ""),
                 "pre_id": str(doc.get("pre_id") or ""),
+                "jackpot_position": int(doc.get("jackpot_position") or 0) or None,
+                "special_position": int(doc.get("special_position") or 0) or None,
                 "pos_1th": positions[0] if positions[0] is not None and positions[0] > 0 else 0,
                 "pos_2th": positions[1] if positions[1] and positions[1] > 0 else None,
                 "pos_3th": positions[2] if positions[2] and positions[2] > 0 else None,
@@ -6539,6 +6543,8 @@ def api_la_primitiva_compare_analysis_graph(
             "date": 1,
             "current_id": 1,
             "pre_id": 1,
+            "jackpot_position": 1,
+            "special_position": 1,
             "categories": 1,
         },
     ).sort("date", 1)
