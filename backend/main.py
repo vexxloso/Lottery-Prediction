@@ -21,10 +21,10 @@ from itertools import combinations
 
 from dotenv import load_dotenv
 
-# Load .env from backend dir, then from project root (for systemd when cwd is backend)
+# Load .env from project root first, then backend dir (backend/.env can override locals)
 _load_env_dir = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(_load_env_dir, ".env"))
 load_dotenv(os.path.join(os.path.dirname(_load_env_dir), ".env"))
+load_dotenv(os.path.join(_load_env_dir, ".env"))
 
 from datetime import datetime as dt, timedelta
 
@@ -1470,6 +1470,9 @@ logger = logging.getLogger("lottery")
 # MongoDB
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB = os.getenv("MONGO_DB", "lottery")
+
+# Reorder toggle: set ENABLE_REORDER=false to skip the reorder step and run plain compare instead.
+ENABLE_REORDER: bool = os.getenv("ENABLE_REORDER", "true").strip().lower() not in ("false", "0", "no", "off")
 
 client: MongoClient | None = None
 db = None
@@ -7431,11 +7434,18 @@ def api_euromillones_compare_full_wheel_reorder(
     then run compare. Uses draw date from current_id for first_position; all new positions distinct.
     If reorder was already done for this (current_id, pre_id), returns cached result without lock.
     If another reorder is in progress, returns 503.
+    If ENABLE_REORDER=false, skips reorder and runs plain compare directly.
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
     pre_id_clean = pre_id.strip()
     current_id_clean = current_id.strip()
+
+    if not ENABLE_REORDER:
+        print("[euromillones-reorder-api] ENABLE_REORDER=false — skipping reorder, running plain compare", flush=True)
+        result = _euromillones_full_wheel_compare(current_id_clean, pre_id_clean, db)
+        return JSONResponse(content=_item_to_json(result))
+
     coll_compare = db[EUROMILLONES_COMPARE_RESULTS_COLLECTION]
     existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
     if existing and existing.get("reorder_applied") is True:
@@ -7463,12 +7473,18 @@ def api_el_gordo_compare_full_wheel_reorder(
     then run compare. Uses draw date from current_id for first_position via
     position_generator_el_gordo. If result already exists with reorder_applied,
     returns cached result. If another reorder is in progress, returns 503.
+    If ENABLE_REORDER=false, skips reorder and runs plain compare directly.
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
     pre_id_clean = pre_id.strip()
     current_id_clean = current_id.strip()
     print(f"[el-gordo-reorder-api] START current_id={current_id_clean!r} pre_id={pre_id_clean!r}", flush=True)
+
+    if not ENABLE_REORDER:
+        print("[el-gordo-reorder-api] ENABLE_REORDER=false — skipping reorder, running plain compare", flush=True)
+        result = _el_gordo_full_wheel_compare(current_id_clean, pre_id_clean, db)
+        return JSONResponse(content=_item_to_json(result))
     coll_compare = db[EL_GORDO_COMPARE_RESULTS_COLLECTION]
     existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
     if existing and existing.get("reorder_applied") is True:
@@ -7580,12 +7596,18 @@ def api_la_primitiva_compare_full_wheel_reorder(
     then run compare. Uses draw date from current_id for first_position via
     position_generator_la_primitiva. If result already exists with reorder_applied,
     returns cached result. If another reorder is in progress, returns 503.
+    If ENABLE_REORDER=false, skips reorder and runs plain compare directly.
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
     pre_id_clean = pre_id.strip()
     current_id_clean = current_id.strip()
     print(f"[la-prim-reorder-api] START current_id={current_id_clean!r} pre_id={pre_id_clean!r}", flush=True)
+
+    if not ENABLE_REORDER:
+        print("[la-prim-reorder-api] ENABLE_REORDER=false — skipping reorder, running plain compare", flush=True)
+        result = _la_primitiva_full_wheel_compare(current_id_clean, pre_id_clean, db)
+        return JSONResponse(content=_item_to_json(result))
     coll_compare = db[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION]
     existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
     if existing and existing.get("reorder_applied") is True:
