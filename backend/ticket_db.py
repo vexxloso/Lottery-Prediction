@@ -142,14 +142,31 @@ def _bootstrap_tickets(
     batch_size: int = 5000,
     progress_cb: Optional[Callable[[int], None]] = None,
 ) -> Tuple[int, int]:
-    """Insert permanent ticket docs. Returns (total_inserted, total_skipped)."""
+    """
+    Insert permanent ticket docs. Resumes from last inserted position.
+    Returns (total_inserted, total_skipped).
+    """
     coll = db[tickets_collection]
     now  = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    total_inserted = total_skipped = 0
+
+    # Find the highest position already in DB — resume from there
+    last = coll.find_one(
+        {"lottery": lottery_key},
+        sort=[("position", -1)],
+        projection={"position": 1},
+    )
+    resume_from = int(last["position"]) if last else 0
+    logger.info("[%s] resuming from position %d", lottery_key, resume_from)
+
+    total_inserted = 0
+    total_skipped  = resume_from  # already in DB
     batch: List[Dict] = []
 
     for ticket_tuple in ticket_generator:
-        batch.append(doc_builder(ticket_tuple[0], ticket_tuple, now))
+        pos = ticket_tuple[0]
+        if pos <= resume_from:
+            continue  # skip already-inserted — no DB call needed
+        batch.append(doc_builder(pos, ticket_tuple, now))
         if len(batch) >= batch_size:
             try:
                 r = coll.insert_many(batch, ordered=False)
@@ -157,7 +174,6 @@ def _bootstrap_tickets(
             except Exception as e:
                 ins = getattr(getattr(e, "details", None), "get", lambda *a: 0)("nInserted", 0)
                 total_inserted += ins
-                total_skipped  += len(batch) - ins
             batch.clear()
             if progress_cb:
                 progress_cb(total_inserted + total_skipped)
@@ -169,7 +185,6 @@ def _bootstrap_tickets(
         except Exception as e:
             ins = getattr(getattr(e, "details", None), "get", lambda *a: 0)("nInserted", 0)
             total_inserted += ins
-            total_skipped  += len(batch) - ins
 
     logger.info("[%s] tickets stored: inserted=%d skipped=%d",
                 lottery_key, total_inserted, total_skipped)
