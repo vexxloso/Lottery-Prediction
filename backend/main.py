@@ -5335,42 +5335,31 @@ def api_euromillones_compare_reorder(
         prize_map[(5, 2)] = premio_bote
     draw_date = (draw.get("fecha_sorteo") or "")[:10] or None
 
-    # 3) Load probabilities from training progress
-    coll_progress = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
-    progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
-    if not progress_doc:
-        progress_doc = coll_progress.find_one({"probs_draw_id": pre_id_clean})
-    if not progress_doc:
-        # Fall back to TXT-based compare
-        try:
-            result = _euromillones_full_wheel_compare(current_id_clean, pre_id_clean, db)
-            return JSONResponse(content=_item_to_json(result))
-        except Exception as e:
-            raise HTTPException(404, detail=f"Training progress not found and TXT fallback failed: {e}")
+    # 3) Load probabilities — check draw_probs collection first (backfill), then train_progress
+    mains_probs: Dict[str, Any] = {}
+    stars_probs: Dict[str, Any] = {}
 
-    mains_probs = _probs_list_to_dict(progress_doc.get("mains_probs") or [])
-    stars_probs = _probs_list_to_dict(progress_doc.get("stars_probs") or [])
+    draw_probs_doc = db[EUROMILLONES_DRAW_PROBS_COLLECTION].find_one({"draw_id": pre_id_clean})
+    if draw_probs_doc:
+        mains_probs = {int(k): float(v) for k, v in (draw_probs_doc.get("mains_probs") or {}).items()}
+        stars_probs = {int(k): float(v) for k, v in (draw_probs_doc.get("stars_probs") or {}).items()}
+
+    if not mains_probs:
+        # Fall back to train_progress
+        coll_progress = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+        progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+        if not progress_doc:
+            progress_doc = coll_progress.find_one({"probs_draw_id": pre_id_clean})
+        if progress_doc:
+            mains_probs = _probs_list_to_dict(progress_doc.get("mains_probs") or [])
+            stars_probs = _probs_list_to_dict(progress_doc.get("stars_probs") or [])
 
     if not mains_probs or not stars_probs:
-        # No probabilities yet — fall back to TXT
         try:
             result = _euromillones_full_wheel_compare(current_id_clean, pre_id_clean, db)
             return JSONResponse(content=_item_to_json(result))
         except Exception as e:
-            raise HTTPException(400, detail=f"Probabilities not computed and TXT fallback failed: {e}")
-
-    # 4) Get pool from progress doc
-    filtered_mains = progress_doc.get("filtered_mains_probs") or progress_doc.get("mains_probs") or []
-    filtered_stars = progress_doc.get("filtered_stars_probs") or progress_doc.get("stars_probs") or []
-    mains_pool = [int(x["number"]) for x in filtered_mains if x.get("number") is not None]
-    stars_pool = [int(x["number"]) for x in filtered_stars if x.get("number") is not None]
-
-    if len(mains_pool) < 5 or len(stars_pool) < 2:
-        try:
-            result = _euromillones_full_wheel_compare(current_id_clean, pre_id_clean, db)
-            return JSONResponse(content=_item_to_json(result))
-        except Exception as e:
-            raise HTTPException(400, detail=f"Pool too small and TXT fallback failed: {e}")
+            raise HTTPException(400, detail=f"Probabilities not found and TXT fallback failed: {e}")
 
     try:
         tickets_coll = db[EUROMILLONES_TICKETS_COLLECTION]
@@ -5468,38 +5457,30 @@ def api_el_gordo_compare_reorder(
 
     # 3) Load probabilities from training progress
     coll_progress = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
-    progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
-    if not progress_doc:
-        progress_doc = coll_progress.find_one({"probs_draw_id": pre_id_clean})
-    if not progress_doc:
-        try:
-            result = _el_gordo_full_wheel_compare(current_id_clean, pre_id_clean, db)
-            return JSONResponse(content=_item_to_json(result))
-        except Exception as e:
-            raise HTTPException(404, detail=f"Training progress not found and TXT fallback failed: {e}")
+    # 3) Load probabilities — check draw_probs collection first, then train_progress
+    mains_probs: Dict[str, Any] = {}
+    clave_probs: Dict[str, Any] = {}
 
-    mains_probs = _probs_list_to_dict(progress_doc.get("mains_probs") or [])
-    clave_probs = _probs_list_to_dict(progress_doc.get("clave_probs") or [])
+    draw_probs_doc = db[EL_GORDO_DRAW_PROBS_COLLECTION].find_one({"draw_id": pre_id_clean})
+    if draw_probs_doc:
+        mains_probs = {int(k): float(v) for k, v in (draw_probs_doc.get("mains_probs") or {}).items()}
+        clave_probs = {int(k): float(v) for k, v in (draw_probs_doc.get("clave_probs") or {}).items()}
+
+    if not mains_probs:
+        coll_progress = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+        progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+        if not progress_doc:
+            progress_doc = coll_progress.find_one({"probs_draw_id": pre_id_clean})
+        if progress_doc:
+            mains_probs = _probs_list_to_dict(progress_doc.get("mains_probs") or [])
+            clave_probs = _probs_list_to_dict(progress_doc.get("clave_probs") or [])
 
     if not mains_probs:
         try:
             result = _el_gordo_full_wheel_compare(current_id_clean, pre_id_clean, db)
             return JSONResponse(content=_item_to_json(result))
         except Exception as e:
-            raise HTTPException(400, detail=f"Probabilities not computed and TXT fallback failed: {e}")
-
-    # 4) Get pool from progress doc
-    filtered_mains = progress_doc.get("filtered_mains_probs") or progress_doc.get("mains_probs") or []
-    filtered_clave = progress_doc.get("filtered_clave_probs") or progress_doc.get("clave_probs") or []
-    mains_pool = [int(x["number"]) for x in filtered_mains if x.get("number") is not None]
-    clave_pool = [int(x["number"]) for x in filtered_clave if x.get("number") is not None]
-
-    if len(mains_pool) < 5 or not clave_pool:
-        try:
-            result = _el_gordo_full_wheel_compare(current_id_clean, pre_id_clean, db)
-            return JSONResponse(content=_item_to_json(result))
-        except Exception as e:
-            raise HTTPException(400, detail=f"Pool too small and TXT fallback failed: {e}")
+            raise HTTPException(400, detail=f"Probabilities not found and TXT fallback failed: {e}")
 
     try:
         tickets_coll = db[EL_GORDO_TICKETS_COLLECTION]
@@ -5606,35 +5587,30 @@ def api_la_primitiva_compare_reorder(
     # 3) Load probabilities from training progress
     coll_progress = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
     progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
-    if not progress_doc:
-        progress_doc = coll_progress.find_one({"probs_draw_id": pre_id_clean})
-    if not progress_doc:
-        try:
-            result = _la_primitiva_full_wheel_compare(current_id_clean, pre_id_clean, db)
-            return JSONResponse(content=_item_to_json(result))
-        except Exception as e:
-            raise HTTPException(404, detail=f"Training progress not found and TXT fallback failed: {e}")
+    # 3) Load probabilities — check draw_probs collection first, then train_progress
+    mains_probs: Dict[str, Any] = {}
+    reintegro_probs: Dict[str, Any] = {}
 
-    mains_probs = _probs_list_to_dict(progress_doc.get("mains_probs") or [])
-    reintegro_probs = _probs_list_to_dict(progress_doc.get("reintegros_probs") or progress_doc.get("reintegro_probs") or [])
+    draw_probs_doc = db[LA_PRIMITIVA_DRAW_PROBS_COLLECTION].find_one({"draw_id": pre_id_clean})
+    if draw_probs_doc:
+        mains_probs     = {int(k): float(v) for k, v in (draw_probs_doc.get("mains_probs") or {}).items()}
+        reintegro_probs = {int(k): float(v) for k, v in (draw_probs_doc.get("rein_probs") or {}).items()}
+
+    if not mains_probs:
+        coll_progress = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+        progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+        if not progress_doc:
+            progress_doc = coll_progress.find_one({"probs_draw_id": pre_id_clean})
+        if progress_doc:
+            mains_probs     = _probs_list_to_dict(progress_doc.get("mains_probs") or [])
+            reintegro_probs = _probs_list_to_dict(progress_doc.get("reintegros_probs") or progress_doc.get("reintegro_probs") or [])
 
     if not mains_probs:
         try:
             result = _la_primitiva_full_wheel_compare(current_id_clean, pre_id_clean, db)
             return JSONResponse(content=_item_to_json(result))
         except Exception as e:
-            raise HTTPException(400, detail=f"Probabilities not computed and TXT fallback failed: {e}")
-
-    # 4) Get pool from progress doc
-    filtered_mains = progress_doc.get("filtered_mains_probs") or progress_doc.get("mains_probs") or []
-    mains_pool = [int(x["number"]) for x in filtered_mains if x.get("number") is not None]
-
-    if len(mains_pool) < 6:
-        try:
-            result = _la_primitiva_full_wheel_compare(current_id_clean, pre_id_clean, db)
-            return JSONResponse(content=_item_to_json(result))
-        except Exception as e:
-            raise HTTPException(400, detail=f"Pool too small and TXT fallback failed: {e}")
+            raise HTTPException(400, detail=f"Probabilities not found and TXT fallback failed: {e}")
 
     try:
         tickets_coll = db[LA_PRIMITIVA_TICKETS_COLLECTION]
