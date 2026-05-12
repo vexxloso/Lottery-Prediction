@@ -5,9 +5,9 @@ Goal:
 - Run every day at 01:00 local time (or once, on demand).
 - For each lottery:
   1) Read latest feature-model row (id_sorteo + pre_id_sorteo).
-  2) Ensure train pipeline is done for pre_id_sorteo.
-  3) Ensure full-wheel generation is done for pre_id_sorteo.
-  4) Trigger compare reorder for (id_sorteo, pre_id_sorteo).
+  2) Ensure train pipeline is done for current_id (trains model, computes probs, builds pool).
+  3) Trigger compare/reorder for (current_id, pre_id) — saves ranking snapshot to DB.
+     (TXT full-wheel generation is optional and skipped by default in DB mode.)
 
 This script uses backend public endpoints only.
 """
@@ -162,39 +162,48 @@ def _trigger_compare(session: requests.Session, base_url: str, cfg: LotteryConfi
     print(f"[{cfg.name}] Compare done via reorder (current={current_id}, pre={pre_id}, jackpot={jackpot})")
 
 
-def run_once(base_url: str) -> None:
+def run_once(base_url: str, skip_full_wheel: bool = True) -> None:
     session = requests.Session()
-    # Cursor/IDE environments can inject HTTP(S)_PROXY. For localhost automation,
-    # bypass proxies so calls go directly to the local backend.
     if "localhost" in base_url or "127.0.0.1" in base_url:
         session.trust_env = False
-    print(f"[automation] Start cycle base_url={base_url}")
+    print(f"[automation] Start cycle base_url={base_url} skip_full_wheel={skip_full_wheel}")
     for cfg in LOTTERIES:
         try:
             current_id, pre_id, draw_date = _latest_feature_ids(session, base_url, cfg)
             print(f"[{cfg.name}] Feature latest: current_id={current_id}, pre_id={pre_id}, draw_date={draw_date}")
-            # Per updated workflow: run pipeline + full-wheel on current_id.
+
+            # Step 1: run pipeline (train model, compute probs, build pool)
             _ensure_pipeline(session, base_url, cfg, current_id)
-            _ensure_full_wheel(session, base_url, cfg, current_id, draw_date)
+
+            # Step 2: full-wheel TXT (optional — skipped in DB ranking mode)
+            if not skip_full_wheel:
+                _ensure_full_wheel(session, base_url, cfg, current_id, draw_date)
+
+            # Step 3: compare/reorder — updates DB ranking snapshot for this draw
             _trigger_compare(session, base_url, cfg, current_id, pre_id)
+
         except Exception as e:
             print(f"[{cfg.name}] ERROR: {e}")
     print("[automation] Cycle finished")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Daily automation for compare + pipeline + full wheel")
+    parser = argparse.ArgumentParser(description="Daily automation for compare + pipeline + ranking")
     parser.add_argument("--api-url", default="http://localhost:8000", help="Backend base URL")
     parser.add_argument("--once", action="store_true", help="Run one cycle immediately and exit")
+    parser.add_argument("--with-full-wheel", action="store_true",
+                        help="Also generate TXT full-wheel file (legacy; not needed in DB ranking mode)")
     args = parser.parse_args()
 
     base_url = args.api_url.rstrip("/")
+    skip_full_wheel = not args.with_full_wheel
+
     if args.once:
-        run_once(base_url)
+        run_once(base_url, skip_full_wheel=skip_full_wheel)
         return
 
     print("Automation started. Running once now, then every day at 01:00 local time. Ctrl+C to stop.")
-    run_once(base_url)
+    run_once(base_url, skip_full_wheel=skip_full_wheel)
     while True:
         target = _next_01_00()
         wait_seconds = (target - datetime.now()).total_seconds()
@@ -204,7 +213,7 @@ def main() -> None:
         except KeyboardInterrupt:
             print("[automation] Stopped")
             break
-        run_once(base_url)
+        run_once(base_url, skip_full_wheel=skip_full_wheel)
 
 
 if __name__ == "__main__":

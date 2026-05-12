@@ -63,6 +63,25 @@ from train_el_gordo_model import (
     compute_el_gordo_probabilities,
 )
 
+# DB-based ticket pool system (new architecture)
+import sys as _sys
+import os as _os
+_backend_dir = _os.path.dirname(_os.path.abspath(__file__))
+if _backend_dir not in _sys.path:
+    _sys.path.insert(0, _backend_dir)
+from ticket_db import (
+    bootstrap_euromillones_tickets,
+    bootstrap_el_gordo_tickets,
+    bootstrap_la_primitiva_tickets,
+    update_euromillones_ranking,
+    update_el_gordo_ranking,
+    update_la_primitiva_ranking,
+    compare_euromillones_from_db,
+    compare_el_gordo_from_db,
+    compare_la_primitiva_from_db,
+    probs_list_to_dict,
+)
+
 def _optional_wheel_position(t: dict) -> Optional[int]:
     """Parse optional full-wheel line index from a ticket dict (queue / API). Must be >= 1."""
     p = t.get("position")
@@ -1382,6 +1401,16 @@ LA_PRIMITIVA_BUY_QUEUE_COLLECTION = "la_primitiva_buy_queue"
 EUROMILLONES_BUY_QUEUE_COLLECTION = "euromillones_buy_queue"
 BOT_CREDENTIALS_COLLECTION = "bot_credentials"
 
+# ── DB-based ticket pool collections (new architecture) ──────────────────────
+# Permanent ticket combinations (never change after bootstrap)
+EUROMILLONES_TICKETS_COLLECTION = "euromillones_tickets"
+EL_GORDO_TICKETS_COLLECTION     = "el_gordo_tickets"
+LA_PRIMITIVA_TICKETS_COLLECTION = "la_primitiva_tickets"
+# Per-draw ranking snapshots (one document per draw, full ranking history)
+EUROMILLONES_RANKINGS_COLLECTION = "euromillones_rankings"
+EL_GORDO_RANKINGS_COLLECTION     = "el_gordo_rankings"
+LA_PRIMITIVA_RANKINGS_COLLECTION = "la_primitiva_rankings"
+
 logger = logging.getLogger("lottery")
 
 # MongoDB
@@ -1415,6 +1444,14 @@ async def lifespan(app: FastAPI):
         [("current_id", 1), ("pre_id", 1)], unique=True
     )
     db[EL_GORDO_BUY_QUEUE_COLLECTION].create_index([("status", 1), ("created_at", 1)])
+    # DB-based ticket pool indexes (new architecture)
+    for _tc in [EUROMILLONES_TICKETS_COLLECTION, EL_GORDO_TICKETS_COLLECTION, LA_PRIMITIVA_TICKETS_COLLECTION]:
+        db[_tc].create_index([("lottery", 1), ("position", 1)], unique=True)
+        db[_tc].create_index([("lottery", 1), ("tier", 1)])
+    # Per-draw ranking snapshot indexes
+    for _rc in [EUROMILLONES_RANKINGS_COLLECTION, EL_GORDO_RANKINGS_COLLECTION, LA_PRIMITIVA_RANKINGS_COLLECTION]:
+        db[_rc].create_index("draw_id", unique=True)
+        db[_rc].create_index("draw_date")
     # bot_credentials: no index on "order" at startup (optional; avoids conflict if one already exists)
     yield
     if client:
@@ -2362,6 +2399,17 @@ _PUBLIC_API_PATHS = {
     "/api/euromillones/compare/full-wheel",
     "/api/el-gordo/compare/full-wheel",
     "/api/la-primitiva/compare/full-wheel",
+    # DB-based reorder/compare endpoints (new architecture)
+    "/api/euromillones/compare/full-wheel/reorder",
+    "/api/el-gordo/compare/full-wheel/reorder",
+    "/api/la-primitiva/compare/full-wheel/reorder",
+    "/api/euromillones/tickets/status",
+    "/api/el-gordo/tickets/status",
+    "/api/la-primitiva/tickets/status",
+    "/api/euromillones/tickets/bootstrap",
+    "/api/el-gordo/tickets/bootstrap",
+    "/api/la-primitiva/tickets/bootstrap",
+    "/api/tickets/bootstrap-status",
     # Public download endpoints for native browser download (Chrome progress UI).
     "/api/euromillones/full-wheel/export",
     "/api/el-gordo/full-wheel/export",
@@ -5218,6 +5266,627 @@ def api_el_gordo_compare_full_wheel(
     except Exception as e:
         raise HTTPException(500, detail=f"El Gordo compare failed: {e}")
     return JSONResponse(content=_item_to_json(result))
+
+
+# ── DB-based compare/full-wheel/reorder endpoints (new architecture) ─────────
+#
+# Strategy:
+#   1. Check if tickets already exist in DB for this lottery.
+#   2. If YES (not first draw): update scores from latest probabilities, then compare from DB.
+#   3. If NO (first draw): generate ALL tickets, store in DB, then compare from DB.
+#   4. Always save result to compare_results collection for caching.
+#   5. Fall back to TXT-based compare if DB approach fails.
+
+def _probs_list_to_dict(probs: list) -> dict:
+    """Convert [{number: n, p: p}, ...] to {n: p}. Delegates to ticket_db."""
+    return probs_list_to_dict(probs)
+
+
+@app.post("/api/euromillones/compare/full-wheel/reorder")
+def api_euromillones_compare_reorder(
+    current_id: str = Query(..., description="id_sorteo of the draw to evaluate (result)."),
+    pre_id: str = Query(..., description="cutoff_draw_id for the training run used to rank tickets."),
+):
+    """
+    DB-based compare: rank existing tickets by model score, find jackpot position.
+
+    First call (no tickets in DB): generates ALL C(50,5)*C(12,2) tickets and stores them.
+    Subsequent calls: updates scores only — no regeneration.
+    Falls back to TXT-based compare if DB approach fails.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    current_id_clean = current_id.strip()
+    pre_id_clean = pre_id.strip()
+
+    # 1) Return cached result if available
+    coll_compare = db[EUROMILLONES_COMPARE_RESULTS_COLLECTION]
+    existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
+    if existing and existing.get("jackpot_position") is not None:
+        out = {k: v for k, v in existing.items() if k != "_id"}
+        return JSONResponse(content=_item_to_json(out))
+
+    # 2) Load draw result
+    coll_draws = db["euromillones"]
+    draw_doc = coll_draws.find_one({"id_sorteo": current_id_clean})
+    if draw_doc is None and current_id_clean.isdigit():
+        draw_doc = coll_draws.find_one({"id_sorteo": int(current_id_clean)})
+    if not draw_doc:
+        raise HTTPException(404, detail="Draw not found")
+
+    draw = _build_draw(draw_doc, "EMIL")
+    numbers = draw.get("numbers") or []
+    if len(numbers) >= 7:
+        main_draw = [int(x) for x in numbers[:5]]
+        star_draw = [int(x) for x in numbers[5:7]]
+    else:
+        parts = re.split(r"[\s\-]+", str(draw.get("combinacion_acta") or ""))
+        nums = [int(p) for p in parts if p.isdigit()]
+        main_draw = nums[:5] if len(nums) >= 5 else []
+        star_draw = nums[5:7] if len(nums) >= 7 else []
+    if len(main_draw) != 5 or len(star_draw) != 2:
+        raise HTTPException(400, detail="Draw main/star numbers missing or invalid")
+
+    escrutinio = draw.get("escrutinio") or []
+    prize_map = _build_escrutinio_prize_map(escrutinio)
+    premio_bote = _parse_euro_premio(draw.get("premio_bote"))
+    if premio_bote >= 0:
+        prize_map[(5, 2)] = premio_bote
+    draw_date = (draw.get("fecha_sorteo") or "")[:10] or None
+
+    # 3) Load probabilities from training progress
+    coll_progress = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
+    progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+    if not progress_doc:
+        progress_doc = coll_progress.find_one({"probs_draw_id": pre_id_clean})
+    if not progress_doc:
+        # Fall back to TXT-based compare
+        try:
+            result = _euromillones_full_wheel_compare(current_id_clean, pre_id_clean, db)
+            return JSONResponse(content=_item_to_json(result))
+        except Exception as e:
+            raise HTTPException(404, detail=f"Training progress not found and TXT fallback failed: {e}")
+
+    mains_probs = _probs_list_to_dict(progress_doc.get("mains_probs") or [])
+    stars_probs = _probs_list_to_dict(progress_doc.get("stars_probs") or [])
+
+    if not mains_probs or not stars_probs:
+        # No probabilities yet — fall back to TXT
+        try:
+            result = _euromillones_full_wheel_compare(current_id_clean, pre_id_clean, db)
+            return JSONResponse(content=_item_to_json(result))
+        except Exception as e:
+            raise HTTPException(400, detail=f"Probabilities not computed and TXT fallback failed: {e}")
+
+    # 4) Get pool from progress doc
+    filtered_mains = progress_doc.get("filtered_mains_probs") or progress_doc.get("mains_probs") or []
+    filtered_stars = progress_doc.get("filtered_stars_probs") or progress_doc.get("stars_probs") or []
+    mains_pool = [int(x["number"]) for x in filtered_mains if x.get("number") is not None]
+    stars_pool = [int(x["number"]) for x in filtered_stars if x.get("number") is not None]
+
+    if len(mains_pool) < 5 or len(stars_pool) < 2:
+        try:
+            result = _euromillones_full_wheel_compare(current_id_clean, pre_id_clean, db)
+            return JSONResponse(content=_item_to_json(result))
+        except Exception as e:
+            raise HTTPException(400, detail=f"Pool too small and TXT fallback failed: {e}")
+
+    try:
+        tickets_coll = db[EUROMILLONES_TICKETS_COLLECTION]
+        ticket_count = tickets_coll.count_documents({"lottery": "euromillones"})
+
+        if ticket_count == 0:
+            # First draw: generate ALL combinations from full universe (1..50 mains, 1..12 stars)
+            logging.info("[reorder/euromillones] First draw — bootstrapping full ticket universe into DB")
+            bootstrap_euromillones_tickets(db)
+        else:
+            # Subsequent draw: compute new scores, save ranking snapshot for this draw
+            logging.info("[reorder/euromillones] Saving ranking snapshot for draw_id=%s", pre_id_clean)
+            update_euromillones_ranking(db, pre_id_clean, draw_date, mains_probs, stars_probs)
+
+        result = compare_euromillones_from_db(
+            db=db,
+            current_id=current_id_clean,
+            pre_id=pre_id_clean,
+            main_draw=main_draw,
+            star_draw=star_draw,
+            prize_map=prize_map,
+            draw_date=draw_date,
+            ticket_cost_eur=EUROMILLONES_TICKET_COST_EUR,
+        )
+
+        # Cache result
+        coll_compare.replace_one(
+            {"current_id": current_id_clean, "pre_id": pre_id_clean},
+            {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
+            upsert=True,
+        )
+        return JSONResponse(content=_item_to_json(result))
+
+    except Exception as e:
+        logging.exception("[reorder/euromillones] DB approach failed, falling back to TXT: %s", e)
+        try:
+            result = _euromillones_full_wheel_compare(current_id_clean, pre_id_clean, db)
+            return JSONResponse(content=_item_to_json(result))
+        except HTTPException:
+            raise
+        except Exception as e2:
+            raise HTTPException(500, detail=f"Both DB and TXT compare failed: {e2}")
+
+
+@app.post("/api/el-gordo/compare/full-wheel/reorder")
+def api_el_gordo_compare_reorder(
+    current_id: str = Query(..., description="id_sorteo of the El Gordo draw to evaluate (result)."),
+    pre_id: str = Query(..., description="cutoff_draw_id for the training run used to rank tickets."),
+):
+    """
+    DB-based compare for El Gordo: rank existing tickets by model score, find jackpot position.
+
+    First call (no tickets in DB): generates ALL C(54,5)*10 tickets and stores them.
+    Subsequent calls: updates scores only — no regeneration.
+    Falls back to TXT-based compare if DB approach fails.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    current_id_clean = current_id.strip()
+    pre_id_clean = pre_id.strip()
+
+    # 1) Return cached result if available
+    coll_compare = db[EL_GORDO_COMPARE_RESULTS_COLLECTION]
+    existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
+    if existing and existing.get("jackpot_position") is not None:
+        out = {k: v for k, v in existing.items() if k != "_id"}
+        return JSONResponse(content=_item_to_json(out))
+
+    # 2) Load draw result
+    coll_draws = db["el_gordo"]
+    draw_doc = coll_draws.find_one({"id_sorteo": current_id_clean})
+    if draw_doc is None and current_id_clean.isdigit():
+        draw_doc = coll_draws.find_one({"id_sorteo": int(current_id_clean)})
+    if not draw_doc:
+        raise HTTPException(404, detail="El Gordo draw not found")
+
+    draw = _build_draw(draw_doc, "ELGR")
+    numbers = draw.get("numbers") or []
+    combinacion = draw.get("combinacion_acta") or draw.get("combinacion") or ""
+    if len(numbers) >= 6:
+        main_draw = [int(x) for x in numbers[:5]]
+        clave_raw = numbers[5]
+        clave_draw = int(clave_raw) if clave_raw is not None else None
+    else:
+        parts = re.split(r"[\s\-]+", str(combinacion))
+        nums = [int(p) for p in parts if p.isdigit()]
+        main_draw = nums[:5] if len(nums) >= 5 else []
+        clave_draw = nums[5] if len(nums) >= 6 else None
+
+    if len(main_draw) != 5 or clave_draw is None:
+        raise HTTPException(400, detail="El Gordo draw main/clave numbers missing or invalid")
+
+    draw_date = (draw.get("fecha_sorteo") or "")[:10] or None
+
+    # 3) Load probabilities from training progress
+    coll_progress = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
+    progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+    if not progress_doc:
+        progress_doc = coll_progress.find_one({"probs_draw_id": pre_id_clean})
+    if not progress_doc:
+        try:
+            result = _el_gordo_full_wheel_compare(current_id_clean, pre_id_clean, db)
+            return JSONResponse(content=_item_to_json(result))
+        except Exception as e:
+            raise HTTPException(404, detail=f"Training progress not found and TXT fallback failed: {e}")
+
+    mains_probs = _probs_list_to_dict(progress_doc.get("mains_probs") or [])
+    clave_probs = _probs_list_to_dict(progress_doc.get("clave_probs") or [])
+
+    if not mains_probs:
+        try:
+            result = _el_gordo_full_wheel_compare(current_id_clean, pre_id_clean, db)
+            return JSONResponse(content=_item_to_json(result))
+        except Exception as e:
+            raise HTTPException(400, detail=f"Probabilities not computed and TXT fallback failed: {e}")
+
+    # 4) Get pool from progress doc
+    filtered_mains = progress_doc.get("filtered_mains_probs") or progress_doc.get("mains_probs") or []
+    filtered_clave = progress_doc.get("filtered_clave_probs") or progress_doc.get("clave_probs") or []
+    mains_pool = [int(x["number"]) for x in filtered_mains if x.get("number") is not None]
+    clave_pool = [int(x["number"]) for x in filtered_clave if x.get("number") is not None]
+
+    if len(mains_pool) < 5 or not clave_pool:
+        try:
+            result = _el_gordo_full_wheel_compare(current_id_clean, pre_id_clean, db)
+            return JSONResponse(content=_item_to_json(result))
+        except Exception as e:
+            raise HTTPException(400, detail=f"Pool too small and TXT fallback failed: {e}")
+
+    try:
+        tickets_coll = db[EL_GORDO_TICKETS_COLLECTION]
+        ticket_count = tickets_coll.count_documents({"lottery": "el_gordo"})
+
+        if ticket_count == 0:
+            logging.info("[reorder/el-gordo] First draw — bootstrapping full ticket universe into DB")
+            bootstrap_el_gordo_tickets(db)
+        else:
+            logging.info("[reorder/el-gordo] Saving ranking snapshot for draw_id=%s", pre_id_clean)
+            update_el_gordo_ranking(db, pre_id_clean, draw_date, mains_probs, clave_probs)
+
+        result = compare_el_gordo_from_db(
+            db=db,
+            current_id=current_id_clean,
+            pre_id=pre_id_clean,
+            main_draw=main_draw,
+            clave_draw=clave_draw,
+            draw_date=draw_date,
+        )
+
+        coll_compare.replace_one(
+            {"current_id": current_id_clean, "pre_id": pre_id_clean},
+            {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
+            upsert=True,
+        )
+        return JSONResponse(content=_item_to_json(result))
+
+    except Exception as e:
+        logging.exception("[reorder/el-gordo] DB approach failed, falling back to TXT: %s", e)
+        try:
+            result = _el_gordo_full_wheel_compare(current_id_clean, pre_id_clean, db)
+            return JSONResponse(content=_item_to_json(result))
+        except HTTPException:
+            raise
+        except Exception as e2:
+            raise HTTPException(500, detail=f"Both DB and TXT compare failed: {e2}")
+
+
+@app.post("/api/la-primitiva/compare/full-wheel/reorder")
+def api_la_primitiva_compare_reorder(
+    current_id: str = Query(..., description="id_sorteo of the La Primitiva draw to evaluate (result)."),
+    pre_id: str = Query(..., description="cutoff_draw_id for the training run used to rank tickets."),
+):
+    """
+    DB-based compare for La Primitiva: rank existing tickets by model score, find jackpot position.
+
+    First call (no tickets in DB): generates ALL C(49,6)*10 tickets and stores them.
+    Subsequent calls: updates scores only — no regeneration.
+    Falls back to TXT-based compare if DB approach fails.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    current_id_clean = current_id.strip()
+    pre_id_clean = pre_id.strip()
+
+    # 1) Return cached result if available
+    coll_compare = db[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION]
+    existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
+    if existing and existing.get("jackpot_position") is not None:
+        out = {k: v for k, v in existing.items() if k != "_id"}
+        return JSONResponse(content=_item_to_json(out))
+
+    # 2) Load draw result
+    coll_draws = db["la_primitiva"]
+    draw_doc = coll_draws.find_one({"id_sorteo": current_id_clean})
+    if draw_doc is None and current_id_clean.isdigit():
+        draw_doc = coll_draws.find_one({"id_sorteo": int(current_id_clean)})
+    if not draw_doc:
+        raise HTTPException(404, detail="La Primitiva draw not found")
+
+    draw = _build_draw(draw_doc, "LAPR")
+    numbers = draw.get("numbers") or []
+    combinacion = draw.get("combinacion_acta") or draw.get("combinacion") or ""
+    if len(numbers) >= 6:
+        main_draw = [int(x) for x in numbers[:6]]
+        complementario = int(numbers[6]) if len(numbers) >= 7 else None
+        reintegro_raw = numbers[7] if len(numbers) >= 8 else None
+        reintegro_draw = int(reintegro_raw) if reintegro_raw is not None else None
+    else:
+        parts = re.split(r"[\s\-]+", str(combinacion))
+        nums = [int(p) for p in parts if p.isdigit()]
+        main_draw = nums[:6] if len(nums) >= 6 else []
+        complementario = nums[6] if len(nums) >= 7 else None
+        reintegro_draw = nums[7] if len(nums) >= 8 else None
+
+    # Try to get reintegro from dedicated field if not parsed from numbers
+    if reintegro_draw is None:
+        r_raw = draw_doc.get("reintegro") or draw_doc.get("R")
+        if r_raw is not None:
+            try:
+                reintegro_draw = int(r_raw)
+            except (TypeError, ValueError):
+                reintegro_draw = None
+
+    if len(main_draw) != 6:
+        raise HTTPException(400, detail="La Primitiva draw main numbers missing or invalid")
+    if reintegro_draw is None:
+        reintegro_draw = 0  # safe default
+
+    draw_date = (draw.get("fecha_sorteo") or "")[:10] or None
+
+    # 3) Load probabilities from training progress
+    coll_progress = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
+    progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+    if not progress_doc:
+        progress_doc = coll_progress.find_one({"probs_draw_id": pre_id_clean})
+    if not progress_doc:
+        try:
+            result = _la_primitiva_full_wheel_compare(current_id_clean, pre_id_clean, db)
+            return JSONResponse(content=_item_to_json(result))
+        except Exception as e:
+            raise HTTPException(404, detail=f"Training progress not found and TXT fallback failed: {e}")
+
+    mains_probs = _probs_list_to_dict(progress_doc.get("mains_probs") or [])
+    reintegro_probs = _probs_list_to_dict(progress_doc.get("reintegros_probs") or progress_doc.get("reintegro_probs") or [])
+
+    if not mains_probs:
+        try:
+            result = _la_primitiva_full_wheel_compare(current_id_clean, pre_id_clean, db)
+            return JSONResponse(content=_item_to_json(result))
+        except Exception as e:
+            raise HTTPException(400, detail=f"Probabilities not computed and TXT fallback failed: {e}")
+
+    # 4) Get pool from progress doc
+    filtered_mains = progress_doc.get("filtered_mains_probs") or progress_doc.get("mains_probs") or []
+    mains_pool = [int(x["number"]) for x in filtered_mains if x.get("number") is not None]
+
+    if len(mains_pool) < 6:
+        try:
+            result = _la_primitiva_full_wheel_compare(current_id_clean, pre_id_clean, db)
+            return JSONResponse(content=_item_to_json(result))
+        except Exception as e:
+            raise HTTPException(400, detail=f"Pool too small and TXT fallback failed: {e}")
+
+    try:
+        tickets_coll = db[LA_PRIMITIVA_TICKETS_COLLECTION]
+        ticket_count = tickets_coll.count_documents({"lottery": "la_primitiva"})
+
+        if ticket_count == 0:
+            logging.info("[reorder/la-primitiva] First draw — bootstrapping full ticket universe into DB")
+            bootstrap_la_primitiva_tickets(db)
+        else:
+            logging.info("[reorder/la-primitiva] Saving ranking snapshot for draw_id=%s", pre_id_clean)
+            update_la_primitiva_ranking(db, pre_id_clean, draw_date, mains_probs, reintegro_probs)
+
+        result = compare_la_primitiva_from_db(
+            db=db,
+            current_id=current_id_clean,
+            pre_id=pre_id_clean,
+            main_draw=main_draw,
+            reintegro_draw=reintegro_draw,
+            complementario_draw=complementario,
+            draw_date=draw_date,
+        )
+
+        coll_compare.replace_one(
+            {"current_id": current_id_clean, "pre_id": pre_id_clean},
+            {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
+            upsert=True,
+        )
+        return JSONResponse(content=_item_to_json(result))
+
+    except Exception as e:
+        logging.exception("[reorder/la-primitiva] DB approach failed, falling back to TXT: %s", e)
+        try:
+            result = _la_primitiva_full_wheel_compare(current_id_clean, pre_id_clean, db)
+            return JSONResponse(content=_item_to_json(result))
+        except HTTPException:
+            raise
+        except Exception as e2:
+            raise HTTPException(500, detail=f"Both DB and TXT compare failed: {e2}")
+
+
+# ── Ticket pool status endpoints ──────────────────────────────────────────────
+
+@app.get("/api/euromillones/tickets/status")
+def api_euromillones_tickets_status():
+    """Return count and sample of stored Euromillones tickets in DB."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    coll = db[EUROMILLONES_TICKETS_COLLECTION]
+    total = coll.count_documents({"lottery": "euromillones"})
+    sample = list(coll.find(
+        {"lottery": "euromillones"},
+        projection={"_id": 0, "position": 1, "mains": 1, "stars": 1, "tier": 1, "score": 1},
+        sort=[("score", -1)],
+        limit=5,
+    ))
+    return JSONResponse(content={"total_tickets": total, "top_5": sample})
+
+
+@app.get("/api/el-gordo/tickets/status")
+def api_el_gordo_tickets_status():
+    """Return count and sample of stored El Gordo tickets in DB."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    coll = db[EL_GORDO_TICKETS_COLLECTION]
+    total = coll.count_documents({"lottery": "el_gordo"})
+    sample = list(coll.find(
+        {"lottery": "el_gordo"},
+        projection={"_id": 0, "position": 1, "mains": 1, "clave": 1, "tier": 1, "score": 1},
+        sort=[("score", -1)],
+        limit=5,
+    ))
+    return JSONResponse(content={"total_tickets": total, "top_5": sample})
+
+
+@app.get("/api/la-primitiva/tickets/status")
+def api_la_primitiva_tickets_status():
+    """Return count and sample of stored La Primitiva tickets in DB."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    coll = db[LA_PRIMITIVA_TICKETS_COLLECTION]
+    total = coll.count_documents({"lottery": "la_primitiva"})
+    sample = list(coll.find(
+        {"lottery": "la_primitiva"},
+        projection={"_id": 0, "position": 1, "mains": 1, "reintegro": 1, "tier": 1, "score": 1},
+        sort=[("score", -1)],
+        limit=5,
+    ))
+    return JSONResponse(content={"total_tickets": total, "top_5": sample})
+
+
+# ── Bootstrap endpoints (one-time, run once before any draw) ──────────────────
+#
+# Call these ONCE before running any draw pipeline.
+# They generate the complete ticket universe and store it permanently in DB.
+# After that, only scores are updated — no regeneration ever.
+# Safe to call again if interrupted (skips already-inserted tickets).
+
+_bootstrap_status: Dict[str, Any] = {}  # in-memory progress tracker
+
+
+@app.post("/api/euromillones/tickets/bootstrap")
+def api_euromillones_tickets_bootstrap():
+    """
+    One-time: generate ALL C(50,5)×C(12,2) ≈ 139M Euromillones tickets and store in DB.
+    Runs in background. Poll GET /api/euromillones/tickets/status to track progress.
+    Safe to call again if interrupted — already-inserted tickets are skipped.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    lottery = "euromillones"
+    if _bootstrap_status.get(lottery) == "running":
+        return JSONResponse(content={"status": "running", "message": "Bootstrap already in progress."})
+
+    def _run():
+        _bootstrap_status[lottery] = "running"
+        try:
+            def progress_cb(n: int):
+                _bootstrap_status[f"{lottery}_count"] = n
+            result = bootstrap_euromillones_tickets(db, progress_cb=progress_cb)
+            _bootstrap_status[lottery] = "done"
+            _bootstrap_status[f"{lottery}_result"] = result
+            logging.info("[bootstrap/euromillones] done: %s", result)
+        except Exception as e:
+            _bootstrap_status[lottery] = "error"
+            _bootstrap_status[f"{lottery}_error"] = str(e)
+            logging.exception("[bootstrap/euromillones] error: %s", e)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return JSONResponse(content={"status": "started", "message": "Bootstrap running in background. Poll /api/euromillones/tickets/status."})
+
+
+@app.post("/api/el-gordo/tickets/bootstrap")
+def api_el_gordo_tickets_bootstrap():
+    """
+    One-time: generate ALL C(54,5)×10 ≈ 31M El Gordo tickets and store in DB.
+    Runs in background. Poll GET /api/el-gordo/tickets/status to track progress.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    lottery = "el_gordo"
+    if _bootstrap_status.get(lottery) == "running":
+        return JSONResponse(content={"status": "running", "message": "Bootstrap already in progress."})
+
+    def _run():
+        _bootstrap_status[lottery] = "running"
+        try:
+            def progress_cb(n: int):
+                _bootstrap_status[f"{lottery}_count"] = n
+            result = bootstrap_el_gordo_tickets(db, progress_cb=progress_cb)
+            _bootstrap_status[lottery] = "done"
+            _bootstrap_status[f"{lottery}_result"] = result
+            logging.info("[bootstrap/el-gordo] done: %s", result)
+        except Exception as e:
+            _bootstrap_status[lottery] = "error"
+            _bootstrap_status[f"{lottery}_error"] = str(e)
+            logging.exception("[bootstrap/el-gordo] error: %s", e)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return JSONResponse(content={"status": "started", "message": "Bootstrap running in background. Poll /api/el-gordo/tickets/status."})
+
+
+@app.post("/api/la-primitiva/tickets/bootstrap")
+def api_la_primitiva_tickets_bootstrap():
+    """
+    One-time: generate ALL C(49,6)×10 ≈ 139M La Primitiva tickets and store in DB.
+    Runs in background. Poll GET /api/la-primitiva/tickets/status to track progress.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    lottery = "la_primitiva"
+    if _bootstrap_status.get(lottery) == "running":
+        return JSONResponse(content={"status": "running", "message": "Bootstrap already in progress."})
+
+    def _run():
+        _bootstrap_status[lottery] = "running"
+        try:
+            def progress_cb(n: int):
+                _bootstrap_status[f"{lottery}_count"] = n
+            result = bootstrap_la_primitiva_tickets(db, progress_cb=progress_cb)
+            _bootstrap_status[lottery] = "done"
+            _bootstrap_status[f"{lottery}_result"] = result
+            logging.info("[bootstrap/la-primitiva] done: %s", result)
+        except Exception as e:
+            _bootstrap_status[lottery] = "error"
+            _bootstrap_status[f"{lottery}_error"] = str(e)
+            logging.exception("[bootstrap/la-primitiva] error: %s", e)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return JSONResponse(content={"status": "started", "message": "Bootstrap running in background. Poll /api/la-primitiva/tickets/status."})
+
+
+@app.get("/api/tickets/bootstrap-status")
+def api_tickets_bootstrap_status():
+    """Return current bootstrap progress for all lotteries."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    return JSONResponse(content={
+        "euromillones": {
+            "status":         _bootstrap_status.get("euromillones", "idle"),
+            "tickets_so_far": _bootstrap_status.get("euromillones_count", 0),
+            "result":         _bootstrap_status.get("euromillones_result"),
+            "error":          _bootstrap_status.get("euromillones_error"),
+            "db_count":       db[EUROMILLONES_TICKETS_COLLECTION].count_documents({"lottery": "euromillones"}),
+        },
+        "el_gordo": {
+            "status":         _bootstrap_status.get("el_gordo", "idle"),
+            "tickets_so_far": _bootstrap_status.get("el_gordo_count", 0),
+            "result":         _bootstrap_status.get("el_gordo_result"),
+            "error":          _bootstrap_status.get("el_gordo_error"),
+            "db_count":       db[EL_GORDO_TICKETS_COLLECTION].count_documents({"lottery": "el_gordo"}),
+        },
+        "la_primitiva": {
+            "status":         _bootstrap_status.get("la_primitiva", "idle"),
+            "tickets_so_far": _bootstrap_status.get("la_primitiva_count", 0),
+            "result":         _bootstrap_status.get("la_primitiva_result"),
+            "error":          _bootstrap_status.get("la_primitiva_error"),
+            "db_count":       db[LA_PRIMITIVA_TICKETS_COLLECTION].count_documents({"lottery": "la_primitiva"}),
+        },
+    })
+
+
+@app.delete("/api/euromillones/tickets")
+def api_euromillones_tickets_reset():
+    """Delete all stored Euromillones tickets (forces re-bootstrap on next call)."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    result = db[EUROMILLONES_TICKETS_COLLECTION].delete_many({"lottery": "euromillones"})
+    _bootstrap_status.pop("euromillones", None)
+    return JSONResponse(content={"deleted": result.deleted_count})
+
+
+@app.delete("/api/el-gordo/tickets")
+def api_el_gordo_tickets_reset():
+    """Delete all stored El Gordo tickets (forces re-bootstrap on next call)."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    result = db[EL_GORDO_TICKETS_COLLECTION].delete_many({"lottery": "el_gordo"})
+    _bootstrap_status.pop("el_gordo", None)
+    return JSONResponse(content={"deleted": result.deleted_count})
+
+
+@app.delete("/api/la-primitiva/tickets")
+def api_la_primitiva_tickets_reset():
+    """Delete all stored La Primitiva tickets (forces re-bootstrap on next call)."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    result = db[LA_PRIMITIVA_TICKETS_COLLECTION].delete_many({"lottery": "la_primitiva"})
+    _bootstrap_status.pop("la_primitiva", None)
+    return JSONResponse(content={"deleted": result.deleted_count})
 
 
 @app.get("/api/euromillones/compare/analysis")
