@@ -142,31 +142,14 @@ def _bootstrap_tickets(
     batch_size: int = 5000,
     progress_cb: Optional[Callable[[int], None]] = None,
 ) -> Tuple[int, int]:
-    """
-    Insert permanent ticket docs. Resumes from last inserted position.
-    Returns (total_inserted, total_skipped).
-    """
+    """Insert permanent ticket docs. Returns (total_inserted, total_skipped)."""
     coll = db[tickets_collection]
     now  = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    # Find the highest position already in DB — resume from there
-    last = coll.find_one(
-        {"lottery": lottery_key},
-        sort=[("position", -1)],
-        projection={"position": 1},
-    )
-    resume_from = int(last["position"]) if last else 0
-    logger.info("[%s] resuming from position %d", lottery_key, resume_from)
-
-    total_inserted = 0
-    total_skipped  = resume_from  # already in DB
+    total_inserted = total_skipped = 0
     batch: List[Dict] = []
 
     for ticket_tuple in ticket_generator:
-        pos = ticket_tuple[0]
-        if pos <= resume_from:
-            continue  # skip already-inserted — no DB call needed
-        batch.append(doc_builder(pos, ticket_tuple, now))
+        batch.append(doc_builder(ticket_tuple[0], ticket_tuple, now))
         if len(batch) >= batch_size:
             try:
                 r = coll.insert_many(batch, ordered=False)
@@ -517,11 +500,20 @@ def compare_el_gordo_from_db(
     }
 
 # ── La Primitiva ──────────────────────────────────────────────────────────────
-def _la_primitiva_ticket_gen() -> Generator[Tuple, None, None]:
+def _la_primitiva_ticket_gen(resume_from: int = 0) -> Generator[Tuple, None, None]:
+    """Yield (position, mains_tuple, reintegro). Skips positions <= resume_from."""
     pos = 0
     for mains in combinations(LA_PRIMITIVA_MAINS, 6):
+        block_start = pos + 1
+        block_end   = pos + len(LA_PRIMITIVA_REINS)
+        # Skip entire mains block if all reintegros already inserted
+        if block_end <= resume_from:
+            pos = block_end
+            continue
         for reintegro in LA_PRIMITIVA_REINS:
             pos += 1
+            if pos <= resume_from:
+                continue
             yield pos, mains, reintegro
 
 def bootstrap_la_primitiva_tickets(
@@ -538,9 +530,20 @@ def bootstrap_la_primitiva_tickets(
             "tier":      _ticket_tier_mains(list(mains)),
         }
 
+    # Find resume point before starting generator
+    coll = db["la_primitiva_tickets"]
+    last = coll.find_one(
+        {"lottery": "la_primitiva"},
+        sort=[("position", -1)],
+        projection={"position": 1},
+    )
+    resume_from = int(last["position"]) if last else 0
+    logger.info("[la_primitiva] resuming from position %d", resume_from)
+
     inserted, skipped = _bootstrap_tickets(
         db, "la_primitiva_tickets", "la_primitiva",
-        _la_primitiva_ticket_gen(), doc_builder, progress_cb=progress_cb,
+        _la_primitiva_ticket_gen(resume_from=resume_from),
+        doc_builder, progress_cb=progress_cb,
     )
     mains_probs, reintegro_probs = _initial_scores_from_feature(
         db, "la_primitiva_feature", 49, 10, 98,
