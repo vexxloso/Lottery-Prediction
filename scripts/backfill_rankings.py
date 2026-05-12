@@ -29,6 +29,7 @@ import argparse
 import os
 import sys
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -54,19 +55,31 @@ COMPARE_TIMEOUT_SECONDS  = 10 * 60   # 10 min per compare
 
 LOTTERY_CONFIGS = {
     "euromillones": {
-        "feature_collection":  "euromillones_feature",
-        "rankings_collection": "euromillones_rankings",
-        "api_slug":            "euromillones",
+        "feature_collection":   "euromillones_feature",
+        "draw_probs_collection": "euromillones_draw_probs",
+        "api_slug":             "euromillones",
+        "secondary_field":      "stars_probs",
+        "mains_count":          50,
+        "secondary_count":      12,
+        "secondary_offset":     50,
     },
     "el_gordo": {
-        "feature_collection":  "el_gordo_feature",
-        "rankings_collection": "el_gordo_rankings",
-        "api_slug":            "el-gordo",
+        "feature_collection":   "el_gordo_feature",
+        "draw_probs_collection": "el_gordo_draw_probs",
+        "api_slug":             "el-gordo",
+        "secondary_field":      "clave_probs",
+        "mains_count":          54,
+        "secondary_count":      10,
+        "secondary_offset":     54,
     },
     "la_primitiva": {
-        "feature_collection":  "la_primitiva_feature",
-        "rankings_collection": "la_primitiva_rankings",
-        "api_slug":            "la-primitiva",
+        "feature_collection":   "la_primitiva_feature",
+        "draw_probs_collection": "la_primitiva_draw_probs",
+        "api_slug":             "la-primitiva",
+        "secondary_field":      "rein_probs",
+        "mains_count":          49,
+        "secondary_count":      10,
+        "secondary_offset":     98,
     },
 }
 
@@ -178,6 +191,101 @@ def _ranking_exists(db, rankings_collection: str, draw_id: str) -> bool:
     return db[rankings_collection].count_documents({"draw_id": draw_id}) > 0
 
 
+def _save_freq_gap_probs(
+    db, lottery_key: str, feature_collection: str,
+    draw_probs_collection: str, draw_id: str, fecha: str, source_idx: int,
+) -> None:
+    """
+    For early draws (not enough data for ML), compute probs from frequency+gap
+    of the feature row itself and save to draw_probs collection.
+    """
+    cfg = LOTTERY_CONFIGS[lottery_key]
+    doc = db[feature_collection].find_one({"id_sorteo": draw_id})
+    if not doc:
+        raise RuntimeError(f"Feature row not found for draw_id={draw_id}")
+
+    frequency = list(doc.get("frequency") or [])
+    gap       = list(doc.get("gap") or [])
+    total     = max(source_idx + 1, 1)
+
+    def _build(offset: int, count: int, base: int) -> dict:
+        freqs = [int(frequency[offset+i]) if offset+i < len(frequency) else 0 for i in range(count)]
+        gaps  = [gap[offset+i] if offset+i < len(gap) else None for i in range(count)]
+        mf = max(freqs) if any(f > 0 for f in freqs) else 1
+        vg = [g for g in gaps if g is not None]
+        mg = max(vg) + 1 if vg else 1
+        return {
+            str(base + i): max(0.4 * freqs[i]/mf + 0.6 * (0.0 if gaps[i] is None else 1.0 - gaps[i]/mg), 1e-6)
+            for i in range(count)
+        }
+
+    mains_probs = _build(0, cfg["mains_count"], 1)
+    sec_probs   = _build(cfg["secondary_offset"], cfg["secondary_count"],
+                         0 if cfg["secondary_offset"] >= cfg["mains_count"] else 1)
+
+    db[draw_probs_collection].replace_one(
+        {"draw_id": draw_id},
+        {
+            "draw_id":              draw_id,
+            "draw_date":            fecha,
+            "saved_at":             datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "mains_probs":          mains_probs,
+            cfg["secondary_field"]: sec_probs,
+            "source":               "freq_gap",
+        },
+        upsert=True,
+    )
+
+
+def _save_probs_from_progress(
+    db, lottery_key: str, draw_probs_collection: str, draw_id: str, fecha: str,
+) -> None:
+    """
+    After pipeline runs, copy mains_probs + secondary_probs from train_progress
+    into the draw_probs collection.
+    """
+    cfg = LOTTERY_CONFIGS[lottery_key]
+    progress_coll_map = {
+        "euromillones": "euromillones_train_progress",
+        "el_gordo":     "el_gordo_train_progress",
+        "la_primitiva": "la_primitiva_train_progress",
+    }
+    progress_coll = db[progress_coll_map[lottery_key]]
+    doc = progress_coll.find_one({"cutoff_draw_id": draw_id})
+    if not doc:
+        raise RuntimeError(f"train_progress not found for draw_id={draw_id}")
+
+    # Get probs — field names differ per lottery
+    if lottery_key == "euromillones":
+        mains_raw = doc.get("mains_probs") or []
+        sec_raw   = doc.get("stars_probs") or []
+    elif lottery_key == "el_gordo":
+        mains_raw = doc.get("mains_probs") or []
+        sec_raw   = doc.get("clave_probs") or []
+    else:  # la_primitiva
+        mains_raw = doc.get("mains_probs") or []
+        sec_raw   = doc.get("reintegro_probs") or []
+
+    if not mains_raw:
+        raise RuntimeError(f"No mains_probs in train_progress for draw_id={draw_id}")
+
+    mains_probs = {str(int(x["number"])): float(x.get("p", 0.0)) for x in mains_raw if x.get("number") is not None}
+    sec_probs   = {str(int(x["number"])): float(x.get("p", 0.0)) for x in sec_raw   if x.get("number") is not None}
+
+    db[draw_probs_collection].replace_one(
+        {"draw_id": draw_id},
+        {
+            "draw_id":              draw_id,
+            "draw_date":            fecha,
+            "saved_at":             datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "mains_probs":          mains_probs,
+            cfg["secondary_field"]: sec_probs,
+            "source":               "ml_model",
+        },
+        upsert=True,
+    )
+
+
 # ── Main backfill logic ───────────────────────────────────────────────────────
 
 def backfill_lottery(
@@ -190,7 +298,7 @@ def backfill_lottery(
 ) -> Dict[str, Any]:
     cfg                = LOTTERY_CONFIGS[lottery_key]
     feature_collection = cfg["feature_collection"]
-    rankings_collection = cfg["rankings_collection"]
+    draw_probs_collection = cfg["draw_probs_collection"]
     api_slug           = cfg["api_slug"]
 
     rows = _load_all_feature_rows(db, feature_collection)
@@ -200,6 +308,9 @@ def backfill_lottery(
     if total == 0:
         print(f"[{lottery_key}] No draws — skipping. Run build_{lottery_key}_feature.py first.")
         return {"lottery": lottery_key, "total": 0, "processed": 0, "skipped": 0, "errors": 0}
+
+    # Minimum draws needed before ML training is reliable
+    MIN_DRAWS_FOR_ML = 10
 
     processed = 0
     skipped   = 0
@@ -212,60 +323,60 @@ def backfill_lottery(
         source_idx = int(row.get("source_index",  i))
 
         if not current_id:
-            print(f"  [{i+1}/{total}] SKIP — missing id_sorteo")
             skipped += 1
             continue
 
-        # First draw has no pre_id — we can still run the pipeline but can't compare
-        if not pre_id:
-            print(f"  [{i+1}/{total}] draw={current_id} ({fecha}) — first draw, no pre_id, pipeline only")
+        # Skip if prob snapshot already saved for this draw
+        if skip_existing and db[draw_probs_collection].count_documents({"draw_id": current_id}) > 0:
+            print(f"  [{i+1}/{total}] draw={current_id} ({fecha}) — probs already saved, skip")
+            skipped += 1
+            continue
+
+        # Not enough history for ML — save freq/gap probs directly from feature row
+        if source_idx < MIN_DRAWS_FOR_ML:
+            print(f"  [{i+1}/{total}] draw={current_id} ({fecha}) — early draw (idx={source_idx}), using freq/gap probs")
             if not dry_run:
                 try:
-                    _ensure_pipeline(session, base_url, api_slug, current_id)
+                    _save_freq_gap_probs(db, lottery_key, feature_collection, draw_probs_collection, current_id, fecha, source_idx)
                     processed += 1
                 except Exception as e:
-                    print(f"    ERROR pipeline: {e}")
+                    print(f"    ERROR freq/gap probs: {e}")
                     errors += 1
             continue
 
-        # Skip if ranking already saved
-        if skip_existing and _ranking_exists(db, rankings_collection, pre_id):
-            print(f"  [{i+1}/{total}] draw={current_id} ({fecha}) — ranking for pre_id={pre_id} already exists, skip")
+        if not pre_id:
+            print(f"  [{i+1}/{total}] draw={current_id} ({fecha}) — no pre_id, skip compare")
             skipped += 1
             continue
 
-        print(f"  [{i+1}/{total}] draw={current_id} ({fecha}) pre_id={pre_id} source_index={source_idx}")
+        print(f"  [{i+1}/{total}] draw={current_id} ({fecha}) pre_id={pre_id} idx={source_idx}")
 
         if dry_run:
             processed += 1
             continue
 
         try:
-            # 1. Run pipeline for current_id (trains model up to this draw)
+            # Run pipeline — saves probs to train_progress
             _ensure_pipeline(session, base_url, api_slug, current_id)
 
-            # 2. Save ranking snapshot + compare result
-            jackpot = _trigger_reorder(session, base_url, api_slug, current_id, pre_id)
-            print(f"    ✓ ranking saved, jackpot_position={jackpot}")
+            # Save prob snapshot to draw_probs collection
+            _save_probs_from_progress(db, lottery_key, draw_probs_collection, current_id, fecha)
+
+            # Compare if we have a pre_id with probs
+            if db[draw_probs_collection].count_documents({"draw_id": pre_id}) > 0:
+                jackpot = _trigger_reorder(session, base_url, api_slug, current_id, pre_id)
+                print(f"    ✓ probs saved + compare done, jackpot_position={jackpot}")
+            else:
+                print(f"    ✓ probs saved (no compare — pre_id probs missing)")
             processed += 1
 
         except Exception as e:
             print(f"    ERROR: {e}")
             errors += 1
-            # Continue with next draw — don't abort the whole backfill
             continue
 
-    print(
-        f"\n[{lottery_key}] Done — total={total} processed={processed} "
-        f"skipped={skipped} errors={errors}"
-    )
-    return {
-        "lottery":   lottery_key,
-        "total":     total,
-        "processed": processed,
-        "skipped":   skipped,
-        "errors":    errors,
-    }
+    print(f"\n[{lottery_key}] Done — total={total} processed={processed} skipped={skipped} errors={errors}")
+    return {"lottery": lottery_key, "total": total, "processed": processed, "skipped": skipped, "errors": errors}
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
