@@ -1406,10 +1406,10 @@ BOT_CREDENTIALS_COLLECTION = "bot_credentials"
 EUROMILLONES_TICKETS_COLLECTION = "euromillones_tickets"
 EL_GORDO_TICKETS_COLLECTION     = "el_gordo_tickets"
 LA_PRIMITIVA_TICKETS_COLLECTION = "la_primitiva_tickets"
-# Per-draw ranking snapshots (one document per draw, full ranking history)
-EUROMILLONES_RANKINGS_COLLECTION = "euromillones_rankings"
-EL_GORDO_RANKINGS_COLLECTION     = "el_gordo_rankings"
-LA_PRIMITIVA_RANKINGS_COLLECTION = "la_primitiva_rankings"
+# Per-draw probability snapshots (tiny — ~2KB per draw)
+EUROMILLONES_DRAW_PROBS_COLLECTION = "euromillones_draw_probs"
+EL_GORDO_DRAW_PROBS_COLLECTION     = "el_gordo_draw_probs"
+LA_PRIMITIVA_DRAW_PROBS_COLLECTION = "la_primitiva_draw_probs"
 
 logger = logging.getLogger("lottery")
 
@@ -1448,8 +1448,8 @@ async def lifespan(app: FastAPI):
     for _tc in [EUROMILLONES_TICKETS_COLLECTION, EL_GORDO_TICKETS_COLLECTION, LA_PRIMITIVA_TICKETS_COLLECTION]:
         db[_tc].create_index([("lottery", 1), ("position", 1)], unique=True)
         db[_tc].create_index([("lottery", 1), ("tier", 1)])
-    # Per-draw ranking snapshot indexes
-    for _rc in [EUROMILLONES_RANKINGS_COLLECTION, EL_GORDO_RANKINGS_COLLECTION, LA_PRIMITIVA_RANKINGS_COLLECTION]:
+    # Per-draw probability snapshot indexes (tiny — ~2KB per draw)
+    for _rc in [EUROMILLONES_DRAW_PROBS_COLLECTION, EL_GORDO_DRAW_PROBS_COLLECTION, LA_PRIMITIVA_DRAW_PROBS_COLLECTION]:
         db[_rc].create_index("draw_id", unique=True)
         db[_rc].create_index("draw_date")
     # bot_credentials: no index on "order" at startup (optional; avoids conflict if one already exists)
