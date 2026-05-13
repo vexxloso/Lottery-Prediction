@@ -5369,47 +5369,42 @@ def api_euromillones_compare_reorder(
         except Exception as e:
             raise HTTPException(400, detail=f"Probabilities not found and TXT fallback failed: {e}")
 
-    try:
-        tickets_coll = db[EUROMILLONES_TICKETS_COLLECTION]
-        ticket_count = tickets_coll.count_documents({"lottery": "euromillones"})
-
-        if ticket_count == 0:
-            # First draw: generate ALL combinations from full universe (1..50 mains, 1..12 stars)
-            logging.info("[reorder/euromillones] First draw — bootstrapping full ticket universe into DB")
-            bootstrap_euromillones_tickets(db)
-        else:
-            # Subsequent draw: compute new scores, save ranking snapshot for this draw
-            logging.info("[reorder/euromillones] Saving ranking snapshot for draw_id=%s", pre_id_clean)
-            update_euromillones_ranking(db, pre_id_clean, draw_date, mains_probs, stars_probs)
-
-        result = compare_euromillones_from_db(
-            db=db,
-            current_id=current_id_clean,
-            pre_id=pre_id_clean,
-            main_draw=main_draw,
-            star_draw=star_draw,
-            prize_map=prize_map,
-            draw_date=draw_date,
-            ticket_cost_eur=EUROMILLONES_TICKET_COST_EUR,
-        )
-
-        # Cache result
-        coll_compare.replace_one(
-            {"current_id": current_id_clean, "pre_id": pre_id_clean},
-            {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
-            upsert=True,
-        )
-        return JSONResponse(content=_item_to_json(result))
-
-    except Exception as e:
-        logging.exception("[reorder/euromillones] DB approach failed, falling back to TXT: %s", e)
+    # Run compare in background thread — returns 202 immediately so HTTP doesn't time out.
+    # Automation script polls GET /compare/full-wheel until result appears.
+    def _run_compare():
         try:
-            result = _euromillones_full_wheel_compare(current_id_clean, pre_id_clean, db)
-            return JSONResponse(content=_item_to_json(result))
-        except HTTPException:
-            raise
-        except Exception as e2:
-            raise HTTPException(500, detail=f"Both DB and TXT compare failed: {e2}")
+            tickets_coll = db[EUROMILLONES_TICKETS_COLLECTION]
+            ticket_count = tickets_coll.count_documents({"lottery": "euromillones"})
+            if ticket_count == 0:
+                logging.info("[reorder/euromillones] bootstrapping tickets")
+                bootstrap_euromillones_tickets(db)
+            else:
+                update_euromillones_ranking(db, pre_id_clean, draw_date, mains_probs, stars_probs)
+            result = compare_euromillones_from_db(
+                db=db, current_id=current_id_clean, pre_id=pre_id_clean,
+                main_draw=main_draw, star_draw=star_draw, prize_map=prize_map,
+                draw_date=draw_date, ticket_cost_eur=EUROMILLONES_TICKET_COST_EUR,
+            )
+            coll_compare.replace_one(
+                {"current_id": current_id_clean, "pre_id": pre_id_clean},
+                {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
+                upsert=True,
+            )
+            logging.info("[reorder/euromillones] done jackpot_position=%s", result.get("jackpot_position"))
+        except Exception as e:
+            logging.exception("[reorder/euromillones] background compare failed: %s", e)
+            # Try TXT fallback
+            try:
+                _euromillones_full_wheel_compare(current_id_clean, pre_id_clean, db)
+            except Exception:
+                pass
+
+    threading.Thread(target=_run_compare, daemon=True).start()
+    return JSONResponse(
+        status_code=202,
+        content={"status": "started", "current_id": current_id_clean, "pre_id": pre_id_clean,
+                 "message": "Compare running in background. Poll GET /compare/full-wheel for result."},
+    )
 
 
 @app.post("/api/el-gordo/compare/full-wheel/reorder")
@@ -5490,42 +5485,39 @@ def api_el_gordo_compare_reorder(
         except Exception as e:
             raise HTTPException(400, detail=f"Probabilities not found and TXT fallback failed: {e}")
 
-    try:
-        tickets_coll = db[EL_GORDO_TICKETS_COLLECTION]
-        ticket_count = tickets_coll.count_documents({"lottery": "el_gordo"})
-
-        if ticket_count == 0:
-            logging.info("[reorder/el-gordo] First draw — bootstrapping full ticket universe into DB")
-            bootstrap_el_gordo_tickets(db)
-        else:
-            logging.info("[reorder/el-gordo] Saving ranking snapshot for draw_id=%s", pre_id_clean)
-            update_el_gordo_ranking(db, pre_id_clean, draw_date, mains_probs, clave_probs)
-
-        result = compare_el_gordo_from_db(
-            db=db,
-            current_id=current_id_clean,
-            pre_id=pre_id_clean,
-            main_draw=main_draw,
-            clave_draw=clave_draw,
-            draw_date=draw_date,
-        )
-
-        coll_compare.replace_one(
-            {"current_id": current_id_clean, "pre_id": pre_id_clean},
-            {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
-            upsert=True,
-        )
-        return JSONResponse(content=_item_to_json(result))
-
-    except Exception as e:
-        logging.exception("[reorder/el-gordo] DB approach failed, falling back to TXT: %s", e)
+    # Run in background thread — returns 202 immediately
+    def _run_compare():
         try:
-            result = _el_gordo_full_wheel_compare(current_id_clean, pre_id_clean, db)
-            return JSONResponse(content=_item_to_json(result))
-        except HTTPException:
-            raise
-        except Exception as e2:
-            raise HTTPException(500, detail=f"Both DB and TXT compare failed: {e2}")
+            tickets_coll = db[EL_GORDO_TICKETS_COLLECTION]
+            ticket_count = tickets_coll.count_documents({"lottery": "el_gordo"})
+            if ticket_count == 0:
+                logging.info("[reorder/el-gordo] bootstrapping tickets")
+                bootstrap_el_gordo_tickets(db)
+            else:
+                update_el_gordo_ranking(db, pre_id_clean, draw_date, mains_probs, clave_probs)
+            result = compare_el_gordo_from_db(
+                db=db, current_id=current_id_clean, pre_id=pre_id_clean,
+                main_draw=main_draw, clave_draw=clave_draw, draw_date=draw_date,
+            )
+            coll_compare.replace_one(
+                {"current_id": current_id_clean, "pre_id": pre_id_clean},
+                {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
+                upsert=True,
+            )
+            logging.info("[reorder/el-gordo] done jackpot_position=%s", result.get("jackpot_position"))
+        except Exception as e:
+            logging.exception("[reorder/el-gordo] background compare failed: %s", e)
+            try:
+                _el_gordo_full_wheel_compare(current_id_clean, pre_id_clean, db)
+            except Exception:
+                pass
+
+    threading.Thread(target=_run_compare, daemon=True).start()
+    return JSONResponse(
+        status_code=202,
+        content={"status": "started", "current_id": current_id_clean, "pre_id": pre_id_clean,
+                 "message": "Compare running in background. Poll GET /compare/full-wheel for result."},
+    )
 
 
 @app.post("/api/la-primitiva/compare/full-wheel/reorder")
@@ -5620,43 +5612,40 @@ def api_la_primitiva_compare_reorder(
         except Exception as e:
             raise HTTPException(400, detail=f"Probabilities not found and TXT fallback failed: {e}")
 
-    try:
-        tickets_coll = db[LA_PRIMITIVA_TICKETS_COLLECTION]
-        ticket_count = tickets_coll.count_documents({"lottery": "la_primitiva"})
-
-        if ticket_count == 0:
-            logging.info("[reorder/la-primitiva] First draw — bootstrapping full ticket universe into DB")
-            bootstrap_la_primitiva_tickets(db)
-        else:
-            logging.info("[reorder/la-primitiva] Saving ranking snapshot for draw_id=%s", pre_id_clean)
-            update_la_primitiva_ranking(db, pre_id_clean, draw_date, mains_probs, reintegro_probs)
-
-        result = compare_la_primitiva_from_db(
-            db=db,
-            current_id=current_id_clean,
-            pre_id=pre_id_clean,
-            main_draw=main_draw,
-            reintegro_draw=reintegro_draw,
-            complementario_draw=complementario,
-            draw_date=draw_date,
-        )
-
-        coll_compare.replace_one(
-            {"current_id": current_id_clean, "pre_id": pre_id_clean},
-            {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
-            upsert=True,
-        )
-        return JSONResponse(content=_item_to_json(result))
-
-    except Exception as e:
-        logging.exception("[reorder/la-primitiva] DB approach failed, falling back to TXT: %s", e)
+    # Run in background thread — returns 202 immediately
+    def _run_compare():
         try:
-            result = _la_primitiva_full_wheel_compare(current_id_clean, pre_id_clean, db)
-            return JSONResponse(content=_item_to_json(result))
-        except HTTPException:
-            raise
-        except Exception as e2:
-            raise HTTPException(500, detail=f"Both DB and TXT compare failed: {e2}")
+            tickets_coll = db[LA_PRIMITIVA_TICKETS_COLLECTION]
+            ticket_count = tickets_coll.count_documents({"lottery": "la_primitiva"})
+            if ticket_count == 0:
+                logging.info("[reorder/la-primitiva] bootstrapping tickets")
+                bootstrap_la_primitiva_tickets(db)
+            else:
+                update_la_primitiva_ranking(db, pre_id_clean, draw_date, mains_probs, reintegro_probs)
+            result = compare_la_primitiva_from_db(
+                db=db, current_id=current_id_clean, pre_id=pre_id_clean,
+                main_draw=main_draw, reintegro_draw=reintegro_draw,
+                complementario_draw=complementario, draw_date=draw_date,
+            )
+            coll_compare.replace_one(
+                {"current_id": current_id_clean, "pre_id": pre_id_clean},
+                {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
+                upsert=True,
+            )
+            logging.info("[reorder/la-primitiva] done jackpot_position=%s", result.get("jackpot_position"))
+        except Exception as e:
+            logging.exception("[reorder/la-primitiva] background compare failed: %s", e)
+            try:
+                _la_primitiva_full_wheel_compare(current_id_clean, pre_id_clean, db)
+            except Exception:
+                pass
+
+    threading.Thread(target=_run_compare, daemon=True).start()
+    return JSONResponse(
+        status_code=202,
+        content={"status": "started", "current_id": current_id_clean, "pre_id": pre_id_clean,
+                 "message": "Compare running in background. Poll GET /compare/full-wheel for result."},
+    )
 
 
 # ── Ticket pool status endpoints ──────────────────────────────────────────────

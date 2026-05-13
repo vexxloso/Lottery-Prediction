@@ -166,10 +166,35 @@ def _save_draw_probs(session: requests.Session, base_url: str, cfg: LotteryConfi
 
 
 def _trigger_compare(session: requests.Session, base_url: str, cfg: LotteryConfig, current_id: str, pre_id: str) -> None:
+    """Trigger compare and poll until result is saved. Handles long-running compares."""
     url = f"{base_url}/api/{cfg.api_slug}/compare/full-wheel/reorder?current_id={current_id}&pre_id={pre_id}"
-    data = _request_json(session, "POST", url, timeout=120)
-    jackpot = data.get("jackpot_position")
-    print(f"[{cfg.name}] Compare done via reorder (current={current_id}, pre={pre_id}, jackpot={jackpot})")
+    # First call — may return immediately (cached) or take a long time (scoring 139M tickets)
+    try:
+        data = _request_json(session, "POST", url, timeout=1800)
+        jackpot = data.get("jackpot_position")
+        print(f"[{cfg.name}] Compare done (current={current_id}, pre={pre_id}, jackpot={jackpot})")
+        return
+    except RuntimeError as e:
+        if "timed out" in str(e).lower() or "timeout" in str(e).lower():
+            print(f"[{cfg.name}] Compare timed out — polling for result...")
+        else:
+            raise
+
+    # Poll compare_results collection directly via API until result appears
+    poll_url = f"{base_url}/api/{cfg.api_slug}/compare/full-wheel?current_id={current_id}&pre_id={pre_id}"
+    start = time.time()
+    while time.time() - start < 3600:  # poll up to 1 hour
+        time.sleep(30)
+        try:
+            data = _request_json(session, "GET", poll_url, timeout=30)
+            jackpot = data.get("jackpot_position")
+            if jackpot is not None:
+                print(f"[{cfg.name}] Compare result found (current={current_id}, pre={pre_id}, jackpot={jackpot})")
+                return
+            print(f"[{cfg.name}] Still waiting for compare result...")
+        except Exception as e:
+            print(f"[{cfg.name}] Poll error: {e}")
+    print(f"[{cfg.name}] WARNING: Compare did not finish within 1 hour")
 
 
 def run_once(base_url: str, skip_full_wheel: bool = True) -> None:
