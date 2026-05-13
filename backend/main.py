@@ -2417,6 +2417,7 @@ _PUBLIC_API_PATHS = {
     "/api/ranking/compute-top-tickets",
     "/api/ranking/study-progress",
     "/api/ranking/study-summary",
+    "/api/ranking/save-draw-probs",
     # Public download endpoints for native browser download (Chrome progress UI).
     "/api/euromillones/full-wheel/export",
     "/api/el-gordo/full-wheel/export",
@@ -13051,4 +13052,98 @@ def api_ranking_study_summary(
         "first_draw":    {"id": str(first.get("draw_id") or ""), "date": str(first.get("draw_date") or ""), "source": str(first.get("source") or "")} if first else None,
         "latest_draw":   {"id": str(latest.get("draw_id") or ""), "date": str(latest.get("draw_date") or ""), "source": str(latest.get("source") or "")} if latest else None,
         "top_numbers_latest": top_numbers,
+    })
+
+
+@app.post("/api/ranking/save-draw-probs")
+def api_ranking_save_draw_probs(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    draw_id: str = Query(..., description="id_sorteo to save probs for"),
+):
+    """
+    Save probability snapshot for a specific draw_id to draw_probs collection.
+    Reads from train_progress (ML model probs if available, else freq/gap from feature row).
+    Called by daily automation after pipeline runs.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    cfg = _RANKING_LOTTERY_MAP.get(lottery)
+    if not cfg:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    draw_id_clean = draw_id.strip()
+    probs_coll = db[cfg["draw_probs"]]
+
+    # Map lottery slug to progress collection and field names
+    progress_map = {
+        "euromillones": ("euromillones_train_progress", "stars_probs",      "euromillones_feature", 50, 12, 50, 1),
+        "el-gordo":     ("el_gordo_train_progress",     "clave_probs",      "el_gordo_feature",     54, 10, 54, 0),
+        "la-primitiva": ("la_primitiva_train_progress", "reintegro_probs",  "la_primitiva_feature", 49, 10, 98, 0),
+    }
+    prog_coll_name, sec_field_ml, feat_coll_name, mc, sc, so, sb = progress_map[lottery]
+
+    # Get draw date from feature collection
+    feat_doc = db[feat_coll_name].find_one({"id_sorteo": draw_id_clean})
+    if not feat_doc:
+        # Try int id
+        if draw_id_clean.isdigit():
+            feat_doc = db[feat_coll_name].find_one({"id_sorteo": int(draw_id_clean)})
+    draw_date = str(feat_doc.get("fecha_sorteo") or "").split(" ")[0] if feat_doc else ""
+    source = "freq_gap"
+    mains_probs: dict = {}
+    sec_probs: dict = {}
+
+    # Try ML probs from train_progress first
+    prog_doc = db[prog_coll_name].find_one({"cutoff_draw_id": draw_id_clean})
+    if prog_doc and prog_doc.get("mains_probs"):
+        mains_raw = prog_doc.get("mains_probs") or []
+        sec_raw   = prog_doc.get(sec_field_ml) or []
+        mains_probs = {str(int(x["number"])): float(x.get("p", 0.0)) for x in mains_raw if x.get("number") is not None}
+        sec_probs   = {str(int(x["number"])): float(x.get("p", 0.0)) for x in sec_raw   if x.get("number") is not None}
+        if mains_probs:
+            source = "ml_model"
+
+    # Fall back to freq/gap from feature row
+    if not mains_probs and feat_doc:
+        frequency = list(feat_doc.get("frequency") or [])
+        gap       = list(feat_doc.get("gap") or [])
+        src_idx   = int(feat_doc.get("source_index", 0))
+
+        def _build(offset: int, count: int, base: int) -> dict:
+            freqs = [int(frequency[offset+i]) if offset+i < len(frequency) else 0 for i in range(count)]
+            gaps  = [gap[offset+i] if offset+i < len(gap) else None for i in range(count)]
+            mf = max(freqs) if any(f > 0 for f in freqs) else 1
+            vg = [g for g in gaps if g is not None]
+            mg = max(vg) + 1 if vg else 1
+            return {
+                str(base + i): max(0.4 * freqs[i]/mf + 0.6*(0.0 if gaps[i] is None else 1.0 - gaps[i]/mg), 1e-6)
+                for i in range(count)
+            }
+
+        mains_probs = _build(0, mc, 1)
+        sec_probs   = _build(so, sc, sb)
+        source = "freq_gap"
+
+    if not mains_probs:
+        raise HTTPException(404, detail=f"No probs available for draw_id={draw_id_clean}")
+
+    probs_coll.replace_one(
+        {"draw_id": draw_id_clean},
+        {
+            "draw_id":              draw_id_clean,
+            "draw_date":            draw_date,
+            "saved_at":             dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "mains_probs":          mains_probs,
+            cfg["secondary_key"]:   sec_probs,
+            "source":               source,
+        },
+        upsert=True,
+    )
+
+    return JSONResponse(content={
+        "draw_id":   draw_id_clean,
+        "draw_date": draw_date,
+        "source":    source,
+        "mains_count": len(mains_probs),
+        "sec_count":   len(sec_probs),
     })

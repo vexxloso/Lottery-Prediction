@@ -155,6 +155,16 @@ def _ensure_full_wheel(
     print(f"[{cfg.name}] Full wheel done")
 
 
+def _save_draw_probs(session: requests.Session, base_url: str, cfg: LotteryConfig, draw_id: str) -> None:
+    """Save probability snapshot for draw_id to draw_probs collection via backfill endpoint."""
+    url = f"{base_url}/api/ranking/save-draw-probs?lottery={cfg.api_slug}&draw_id={draw_id}"
+    try:
+        data = _request_json(session, "POST", url, timeout=30)
+        print(f"[{cfg.name}] draw_probs saved for draw_id={draw_id} source={data.get('source','?')}")
+    except Exception as e:
+        print(f"[{cfg.name}] WARNING: could not save draw_probs for {draw_id}: {e}")
+
+
 def _trigger_compare(session: requests.Session, base_url: str, cfg: LotteryConfig, current_id: str, pre_id: str) -> None:
     url = f"{base_url}/api/{cfg.api_slug}/compare/full-wheel/reorder?current_id={current_id}&pre_id={pre_id}"
     data = _request_json(session, "POST", url, timeout=120)
@@ -175,11 +185,14 @@ def run_once(base_url: str, skip_full_wheel: bool = True) -> None:
             # Step 1: run pipeline (train model, compute probs, build pool)
             _ensure_pipeline(session, base_url, cfg, current_id)
 
-            # Step 2: full-wheel TXT (optional — skipped in DB ranking mode)
+            # Step 2: save probability snapshot for current_id to draw_probs collection
+            _save_draw_probs(session, base_url, cfg, current_id)
+
+            # Step 3: full-wheel TXT (optional — skipped in DB ranking mode)
             if not skip_full_wheel:
                 _ensure_full_wheel(session, base_url, cfg, current_id, draw_date)
 
-            # Step 3: compare/reorder — updates DB ranking snapshot for this draw
+            # Step 4: compare/reorder — saves probs for pre_id + compare result
             _trigger_compare(session, base_url, cfg, current_id, pre_id)
 
         except Exception as e:
