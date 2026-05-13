@@ -166,42 +166,18 @@ def _save_draw_probs(session: requests.Session, base_url: str, cfg: LotteryConfi
 
 
 def _trigger_compare(session: requests.Session, base_url: str, cfg: LotteryConfig, current_id: str, pre_id: str) -> None:
-    """Trigger compare and poll until result is saved. Handles long-running compares."""
-    url = f"{base_url}/api/{cfg.api_slug}/compare/full-wheel/reorder?current_id={current_id}&pre_id={pre_id}"
-    # First call — may return immediately (cached) or take a long time (scoring 139M tickets)
-    try:
-        data = _request_json(session, "POST", url, timeout=1800)
-        jackpot = data.get("jackpot_position")
-        print(f"[{cfg.name}] Compare done (current={current_id}, pre={pre_id}, jackpot={jackpot})")
-        return
-    except RuntimeError as e:
-        if "timed out" in str(e).lower() or "timeout" in str(e).lower():
-            print(f"[{cfg.name}] Compare timed out — polling for result...")
-        else:
-            raise
-
-    # Poll compare_results collection directly via API until result appears
-    poll_url = f"{base_url}/api/{cfg.api_slug}/compare/full-wheel?current_id={current_id}&pre_id={pre_id}"
-    start = time.time()
-    while time.time() - start < 3600:  # poll up to 1 hour
-        time.sleep(30)
-        try:
-            data = _request_json(session, "GET", poll_url, timeout=30)
-            jackpot = data.get("jackpot_position")
-            if jackpot is not None:
-                print(f"[{cfg.name}] Compare result found (current={current_id}, pre={pre_id}, jackpot={jackpot})")
-                return
-            print(f"[{cfg.name}] Still waiting for compare result...")
-        except Exception as e:
-            print(f"[{cfg.name}] Poll error: {e}")
-    print(f"[{cfg.name}] WARNING: Compare did not finish within 1 hour")
+    """Trigger TXT-based compare. Fast — reads file sequentially until jackpot found."""
+    url = f"{base_url}/api/{cfg.api_slug}/compare/full-wheel?current_id={current_id}&pre_id={pre_id}"
+    data = _request_json(session, "GET", url, timeout=600)
+    jackpot = data.get("jackpot_position")
+    print(f"[{cfg.name}] Compare done (current={current_id}, pre={pre_id}, jackpot={jackpot})")
 
 
-def run_once(base_url: str, skip_full_wheel: bool = True) -> None:
+def run_once(base_url: str) -> None:
     session = requests.Session()
     if "localhost" in base_url or "127.0.0.1" in base_url:
         session.trust_env = False
-    print(f"[automation] Start cycle base_url={base_url} skip_full_wheel={skip_full_wheel}")
+    print(f"[automation] Start cycle base_url={base_url}")
     for cfg in LOTTERIES:
         try:
             current_id, pre_id, draw_date = _latest_feature_ids(session, base_url, cfg)
@@ -211,13 +187,13 @@ def run_once(base_url: str, skip_full_wheel: bool = True) -> None:
             _ensure_pipeline(session, base_url, cfg, current_id)
 
             # Step 2: save probability snapshot for current_id to draw_probs collection
+            # (used by Study Progress Dashboard — lightweight, instant)
             _save_draw_probs(session, base_url, cfg, current_id)
 
-            # Step 3: full-wheel TXT (optional — skipped in DB ranking mode)
-            if not skip_full_wheel:
-                _ensure_full_wheel(session, base_url, cfg, current_id, draw_date)
+            # Step 3: generate TXT full wheel file (original system)
+            _ensure_full_wheel(session, base_url, cfg, current_id, draw_date)
 
-            # Step 4: compare/reorder — saves probs for pre_id + compare result
+            # Step 4: compare using TXT file — fast sequential read
             _trigger_compare(session, base_url, cfg, current_id, pre_id)
 
         except Exception as e:
@@ -226,22 +202,19 @@ def run_once(base_url: str, skip_full_wheel: bool = True) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Daily automation for compare + pipeline + ranking")
+    parser = argparse.ArgumentParser(description="Daily automation: pipeline + probs + TXT full wheel + compare")
     parser.add_argument("--api-url", default="http://localhost:8000", help="Backend base URL")
     parser.add_argument("--once", action="store_true", help="Run one cycle immediately and exit")
-    parser.add_argument("--with-full-wheel", action="store_true",
-                        help="Also generate TXT full-wheel file (legacy; not needed in DB ranking mode)")
     args = parser.parse_args()
 
     base_url = args.api_url.rstrip("/")
-    skip_full_wheel = not args.with_full_wheel
 
     if args.once:
-        run_once(base_url, skip_full_wheel=skip_full_wheel)
+        run_once(base_url)
         return
 
     print("Automation started. Running once now, then every day at 01:00 local time. Ctrl+C to stop.")
-    run_once(base_url, skip_full_wheel=skip_full_wheel)
+    run_once(base_url)
     while True:
         target = _next_01_00()
         wait_seconds = (target - datetime.now()).total_seconds()
@@ -251,7 +224,7 @@ def main() -> None:
         except KeyboardInterrupt:
             print("[automation] Stopped")
             break
-        run_once(base_url, skip_full_wheel=skip_full_wheel)
+        run_once(base_url)
 
 
 if __name__ == "__main__":
