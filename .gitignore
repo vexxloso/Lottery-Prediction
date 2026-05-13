@@ -28,3 +28,5 @@ scripts/generate_el_gordo_analysis.py
 dist
 viewer_app
 build
+.venv
+.vscode

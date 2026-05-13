@@ -2410,6 +2410,13 @@ _PUBLIC_API_PATHS = {
     "/api/el-gordo/tickets/bootstrap",
     "/api/la-primitiva/tickets/bootstrap",
     "/api/tickets/bootstrap-status",
+    # Ranking dashboard endpoints
+    "/api/ranking/draws",
+    "/api/ranking/chart",
+    "/api/ranking/top-tickets",
+    "/api/ranking/compute-top-tickets",
+    "/api/ranking/study-progress",
+    "/api/ranking/study-summary",
     # Public download endpoints for native browser download (Chrome progress UI).
     "/api/euromillones/full-wheel/export",
     "/api/el-gordo/full-wheel/export",
@@ -12669,3 +12676,379 @@ def api_dev_pools_delete(
                         errors.append(f"{lot}/{p.name}: {e}")
         deleted[lot] = count
     return {"deleted": deleted, "errors": errors[:20] if errors else None}
+
+
+# ── Ranking Dashboard endpoints ───────────────────────────────────────────────
+
+_RANKING_LOTTERY_MAP = {
+    "euromillones": {
+        "draw_probs":    "euromillones_draw_probs",
+        "compare":       "euromillones_compare_results",
+        "feature":       "euromillones_feature",
+        "tickets":       "euromillones_tickets",
+        "secondary_key": "stars_probs",
+        "secondary_field": "stars",
+        "ticket_cost":   2.50,
+    },
+    "el-gordo": {
+        "draw_probs":    "el_gordo_draw_probs",
+        "compare":       "el_gordo_compare_results",
+        "feature":       "el_gordo_feature",
+        "tickets":       "el_gordo_tickets",
+        "secondary_key": "clave_probs",
+        "secondary_field": "clave",
+        "ticket_cost":   1.50,
+    },
+    "la-primitiva": {
+        "draw_probs":    "la_primitiva_draw_probs",
+        "compare":       "la_primitiva_compare_results",
+        "feature":       "la_primitiva_feature",
+        "tickets":       "la_primitiva_tickets",
+        "secondary_key": "rein_probs",
+        "secondary_field": "reintegro",
+        "ticket_cost":   1.00,
+    },
+}
+
+
+@app.get("/api/ranking/draws")
+def api_ranking_draws(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    limit: int = Query(20, ge=1, le=200),
+    skip: int = Query(0, ge=0),
+):
+    """
+    Return historical draws with jackpot position from compare_results.
+    Sorted by date DESC. Used by the Ranking Dashboard table.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    cfg = _RANKING_LOTTERY_MAP.get(lottery)
+    if not cfg:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    coll = db[cfg["compare"]]
+    total = coll.count_documents({"jackpot_position": {"$exists": True, "$ne": None}})
+    cursor = coll.find(
+        {"jackpot_position": {"$exists": True, "$ne": None}},
+        projection={"_id": 0, "current_id": 1, "pre_id": 1, "date": 1,
+                    "jackpot_position": 1, "earning": 1, "ticket_cost": 1,
+                    "categories": 1, "source": 1},
+    ).sort("date", -1).skip(skip).limit(limit)
+
+    rows = []
+    for doc in cursor:
+        rows.append({
+            "draw_id":          str(doc.get("current_id") or ""),
+            "pre_id":           str(doc.get("pre_id") or ""),
+            "date":             (doc.get("date") or "")[:10],
+            "jackpot_position": doc.get("jackpot_position"),
+            "earning":          doc.get("earning"),
+            "ticket_cost":      doc.get("ticket_cost"),
+            "source":           doc.get("source", "db"),
+        })
+
+    return JSONResponse(content={"rows": rows, "total": total, "skip": skip, "limit": limit})
+
+
+@app.get("/api/ranking/chart")
+def api_ranking_chart(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    max_points: int = Query(200, ge=10, le=500),
+):
+    """
+    Return jackpot position trend over time for charting.
+    Returns up to max_points evenly sampled from all compare results.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    cfg = _RANKING_LOTTERY_MAP.get(lottery)
+    if not cfg:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    coll = db[cfg["compare"]]
+    all_docs = list(coll.find(
+        {"jackpot_position": {"$exists": True, "$ne": None}, "date": {"$exists": True}},
+        projection={"_id": 0, "date": 1, "jackpot_position": 1, "current_id": 1},
+    ).sort("date", 1))
+
+    if not all_docs:
+        return JSONResponse(content={"points": []})
+
+    # Evenly sample up to max_points
+    total = len(all_docs)
+    if total <= max_points:
+        sampled = all_docs
+    else:
+        step = total / max_points
+        sampled = [all_docs[int(i * step)] for i in range(max_points)]
+
+    points = [
+        {
+            "date":             (doc.get("date") or "")[:10],
+            "jackpot_position": doc.get("jackpot_position"),
+            "draw_id":          str(doc.get("current_id") or ""),
+        }
+        for doc in sampled
+        if doc.get("jackpot_position") is not None
+    ]
+
+    return JSONResponse(content={"points": points, "total": total})
+
+
+@app.get("/api/ranking/top-tickets")
+def api_ranking_top_tickets(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    limit: int = Query(20, ge=1, le=100),
+    skip: int = Query(0, ge=0),
+):
+    """
+    Return top predicted tickets from pre-computed ranking cache.
+    Fast — reads from ranking_top_tickets collection, no scanning.
+    Call POST /api/ranking/compute-top-tickets first to populate.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    cfg = _RANKING_LOTTERY_MAP.get(lottery)
+    if not cfg:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    coll = db["ranking_top_tickets"]
+    total = coll.count_documents({"lottery": lottery})
+
+    if total == 0:
+        raise HTTPException(404, detail="No pre-computed top tickets found. Call POST /api/ranking/compute-top-tickets first.")
+
+    docs = list(coll.find(
+        {"lottery": lottery},
+        projection={"_id": 0},
+        sort=[("rank", 1)],
+        skip=skip,
+        limit=limit,
+    ))
+
+    # Get metadata from latest draw_probs
+    probs_doc = db[cfg["draw_probs"]].find_one(sort=[("draw_date", -1)])
+    draw_id   = str(probs_doc.get("draw_id") or "") if probs_doc else ""
+    draw_date = str(probs_doc.get("draw_date") or "") if probs_doc else ""
+    source    = str(probs_doc.get("source") or "") if probs_doc else ""
+
+    return JSONResponse(content={
+        "lottery":   lottery,
+        "draw_id":   draw_id,
+        "draw_date": draw_date,
+        "source":    source,
+        "total":     total,
+        "skip":      skip,
+        "limit":     limit,
+        "tickets":   docs,
+    })
+
+
+@app.post("/api/ranking/compute-top-tickets")
+def api_ranking_compute_top_tickets(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    top_n: int = Query(1000, ge=10, le=10000, description="How many top tickets to pre-compute and store"),
+):
+    """
+    Pre-compute top N tickets by scoring all tickets against latest probabilities.
+    Stores results in ranking_top_tickets collection for fast retrieval.
+    Runs in background — poll GET /api/ranking/top-tickets to check when ready.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    cfg = _RANKING_LOTTERY_MAP.get(lottery)
+    if not cfg:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    probs_doc = db[cfg["draw_probs"]].find_one(sort=[("draw_date", -1)])
+    if not probs_doc:
+        raise HTTPException(404, detail=f"No probability snapshot found for {lottery}")
+
+    mains_probs = {int(k): float(v) for k, v in (probs_doc.get("mains_probs") or {}).items()}
+    sec_probs   = {int(k): float(v) for k, v in (probs_doc.get(cfg["secondary_key"]) or {}).items()}
+
+    if not mains_probs:
+        raise HTTPException(404, detail="No probabilities available")
+
+    draw_id   = str(probs_doc.get("draw_id") or "")
+    draw_date = str(probs_doc.get("draw_date") or "")
+    source    = str(probs_doc.get("source") or "")
+    lottery_key = lottery.replace("-", "_")
+    sec_field   = cfg["secondary_field"]
+
+    def _run():
+        import math as _math, heapq
+        tickets_coll = db[cfg["tickets"]]
+        heap = []
+
+        def _score(mains, secondary):
+            s = sum(_math.log(max(mains_probs.get(n, 1e-6), 1e-9)) for n in mains)
+            if isinstance(secondary, list):
+                s += sum(_math.log(max(sec_probs.get(x, 1e-6), 1e-9)) for x in secondary)
+            else:
+                s += _math.log(max(sec_probs.get(int(secondary), 1e-6), 1e-9))
+            return s
+
+        for doc in tickets_coll.find(
+            {"lottery": lottery_key},
+            projection={"_id": 0, "position": 1, "mains": 1, sec_field: 1, "tier": 1},
+        ):
+            secondary = doc.get(sec_field)
+            if secondary is None:
+                continue
+            score = _score(doc["mains"], secondary)
+            if len(heap) < top_n:
+                heapq.heappush(heap, (score, doc["position"], doc))
+            elif score > heap[0][0]:
+                heapq.heapreplace(heap, (score, doc["position"], doc))
+
+        top = sorted(heap, key=lambda x: x[0], reverse=True)
+
+        # Clear old results and insert new
+        coll = db["ranking_top_tickets"]
+        coll.delete_many({"lottery": lottery})
+        batch = []
+        for rank, (score, _, doc) in enumerate(top, 1):
+            t = {
+                "lottery":   lottery,
+                "rank":      rank,
+                "position":  doc["position"],
+                "mains":     doc["mains"],
+                "score":     round(score, 6),
+                "tier":      doc.get("tier", 0),
+                "draw_id":   draw_id,
+                "draw_date": draw_date,
+                "source":    source,
+            }
+            t[sec_field] = doc.get(sec_field)
+            batch.append(t)
+            if len(batch) >= 500:
+                coll.insert_many(batch, ordered=False)
+                batch.clear()
+        if batch:
+            coll.insert_many(batch, ordered=False)
+
+        # Create index for fast pagination
+        coll.create_index([("lottery", 1), ("rank", 1)])
+        logging.info("[ranking] compute-top-tickets done lottery=%s top_n=%d", lottery, len(top))
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+    return JSONResponse(content={
+        "status":  "started",
+        "lottery": lottery,
+        "top_n":   top_n,
+        "message": f"Computing top {top_n} tickets in background. Poll GET /api/ranking/top-tickets to check.",
+    })
+
+    return JSONResponse(content={
+        "lottery":    lottery,
+        "draw_id":    str(probs_doc.get("draw_id") or ""),
+        "draw_date":  str(probs_doc.get("draw_date") or ""),
+        "source":     str(probs_doc.get("source") or ""),
+        "tickets":    tickets_out,
+    })
+
+
+@app.get("/api/ranking/study-progress")
+def api_ranking_study_progress(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    limit: int = Query(20, ge=1, le=100),
+    skip: int = Query(0, ge=0),
+):
+    """
+    Return draw_probs history — shows how model probabilities evolved draw by draw.
+    Each row: draw_id, draw_date, source (ml_model/freq_gap),
+    top 5 mains by probability, top 2 secondary by probability.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    cfg = _RANKING_LOTTERY_MAP.get(lottery)
+    if not cfg:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    coll = db[cfg["draw_probs"]]
+    total = coll.count_documents({})
+
+    docs = list(coll.find(
+        {},
+        projection={"_id": 0, "draw_id": 1, "draw_date": 1, "source": 1,
+                    "mains_probs": 1, cfg["secondary_key"]: 1},
+        sort=[("draw_date", -1)],
+        skip=skip,
+        limit=limit,
+    ))
+
+    rows = []
+    for doc in docs:
+        mains_raw = doc.get("mains_probs") or {}
+        sec_raw   = doc.get(cfg["secondary_key"]) or {}
+
+        # Sort by probability descending — return ALL numbers
+        top_mains = sorted(
+            [{"number": int(k), "p": round(float(v), 4)} for k, v in mains_raw.items()],
+            key=lambda x: x["p"], reverse=True
+        )
+        top_sec = sorted(
+            [{"number": int(k), "p": round(float(v), 4)} for k, v in sec_raw.items()],
+            key=lambda x: x["p"], reverse=True
+        )
+
+        rows.append({
+            "draw_id":    str(doc.get("draw_id") or ""),
+            "draw_date":  str(doc.get("draw_date") or ""),
+            "source":     str(doc.get("source") or ""),
+            "top_mains":  top_mains,
+            "top_secondary": top_sec,
+            "secondary_label": cfg["secondary_field"],
+        })
+
+    return JSONResponse(content={"rows": rows, "total": total, "skip": skip, "limit": limit})
+
+
+@app.get("/api/ranking/study-summary")
+def api_ranking_study_summary(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+):
+    """
+    Summary of study progress:
+    - total draws with probs
+    - ml_model vs freq_gap count
+    - first and latest draw dates
+    - how many numbers have been seen (coverage)
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    cfg = _RANKING_LOTTERY_MAP.get(lottery)
+    if not cfg:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    coll = db[cfg["draw_probs"]]
+    total      = coll.count_documents({})
+    ml_count   = coll.count_documents({"source": "ml_model"})
+    fg_count   = coll.count_documents({"source": "freq_gap"})
+
+    first  = coll.find_one({}, sort=[("draw_date",  1)], projection={"draw_id": 1, "draw_date": 1, "source": 1})
+    latest = coll.find_one({}, sort=[("draw_date", -1)], projection={"draw_id": 1, "draw_date": 1, "source": 1, "mains_probs": 1})
+
+    # Top 10 most probable numbers from latest draw
+    top_numbers: list = []
+    if latest:
+        mains_raw = latest.get("mains_probs") or {}
+        top_numbers = sorted(
+            [{"number": int(k), "p": round(float(v), 4)} for k, v in mains_raw.items()],
+            key=lambda x: x["p"], reverse=True
+        )[:10]
+
+    return JSONResponse(content={
+        "lottery":       lottery,
+        "total_draws":   total,
+        "ml_draws":      ml_count,
+        "freq_gap_draws": fg_count,
+        "ml_pct":        round(ml_count / total * 100, 1) if total else 0,
+        "first_draw":    {"id": str(first.get("draw_id") or ""), "date": str(first.get("draw_date") or ""), "source": str(first.get("source") or "")} if first else None,
+        "latest_draw":   {"id": str(latest.get("draw_id") or ""), "date": str(latest.get("draw_date") or ""), "source": str(latest.get("source") or "")} if latest else None,
+        "top_numbers_latest": top_numbers,
+    })

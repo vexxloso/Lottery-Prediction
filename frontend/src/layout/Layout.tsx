@@ -11,7 +11,8 @@ const navItems = [
   { to: '/resultados/el-gordo', label: 'El Gordo', icon: '/images/el-gordo.png' },
 ];
 const navRightItems = [
-  { to: '/bot-cuentas', label: 'Cuentas bot', icon: null },
+  { to: '/ranking', label: '📊 Ranking', icon: 'ranking' },
+  { to: '/bot-cuentas', label: 'Cuentas bot', icon: 'user' },
 ];
 
 export function Layout() {
@@ -53,7 +54,7 @@ export function Layout() {
         </nav>
         <div className="app-header-right">
           <nav className="app-nav app-nav--right" aria-label="Cuentas y configuración">
-            {navRightItems.map(({ to, label }) => (
+            {navRightItems.map(({ to, label, icon }) => (
               <NavLink
                 key={to}
                 to={to}
@@ -62,7 +63,13 @@ export function Layout() {
                 title={label}
                 aria-label={label}
               >
-                <UserOutlined className="nav-link-icon nav-link-icon--user" />
+                {icon === 'ranking' ? (
+                  <span style={{ fontSize: '0.85rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
+                    📊 <span className="nav-link-label">Ranking</span>
+                  </span>
+                ) : (
+                  <UserOutlined className="nav-link-icon nav-link-icon--user" />
+                )}
               </NavLink>
             ))}
             <button
