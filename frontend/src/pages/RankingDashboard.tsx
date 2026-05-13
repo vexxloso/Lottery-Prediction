@@ -172,7 +172,7 @@ export function RankingDashboard() {
               <SourceBadge source={summary.latest_draw?.source ?? ''} />
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
-              {summary.top_numbers_latest.map((item, i) => {
+              {summary.top_numbers_latest.map((item) => {
                 const maxP = summary.top_numbers_latest[0]?.p ?? 1;
                 return <ProbBall key={item.number} item={item} maxP={maxP} color={cfg.color} size={32} />;
               })}
