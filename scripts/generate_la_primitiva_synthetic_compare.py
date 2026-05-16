@@ -54,43 +54,41 @@ def _generate_row(source_index: int, total_draws: int, rng: random.Random) -> di
     """
     Generate one synthetic compare result row.
 
-    Progress 0.0 = first draw (2004) = worst prediction
-    Progress 1.0 = latest draw (2026) = best prediction
+    The jackpot position varies widely draw to draw (like real data: 54M, 136M, 136M).
+    Overall trend: 2004 average ~125M, 2026 average ~90M — but with huge variance.
 
-    Ranges calibrated from real observed data:
-      Especial (6+R): 130M-139M  →  improves to  50M-80M
-      1ª (6):         Especial * 0.94-0.96
-      2ª (5+C):       1ª * 0.04-0.07
-      3ª (5):         1ª * 0.0002-0.0014
-      4ª (4):         1ª * 0.000004-0.000010
-      5ª (3):         1ª * 0.0000003-0.0000012
+    Real observed range: 54M - 139M
     """
     # Progress from 0 (2004) to 1 (latest)
     progress = source_index / max(total_draws - 1, 1)
 
-    # Especial position: starts near 139M, improves toward 50M
-    especial_min = int(130_000_000 - progress * 80_000_000)   # 130M → 50M
-    especial_max = int(139_000_000 - progress * 60_000_000)   # 139M → 79M
-    especial_pos = rng.randint(especial_min, especial_max)
+    # Base center shifts slightly downward over time (model slowly improves)
+    # But variance is huge — any single draw can be anywhere in 30M-139M
+    center = int(125_000_000 - progress * 35_000_000)  # 125M → 90M over all draws
+
+    # Wide variance: ±50M around center, full range 30M-139M
+    lo = max(30_000_000,   center - 50_000_000)
+    hi = min(139_000_000,  center + 50_000_000)
+    especial_pos = rng.randint(lo, hi)
 
     # 1ª (6 mains only) = slightly less than Especial
     ratio_1a = rng.uniform(0.940, 0.960)
     pos_1a = int(especial_pos * ratio_1a)
 
-    # 2ª (5+C) = much less
-    ratio_2a = rng.uniform(0.040, 0.070)
+    # 2ª (5+C) = much less — also varies widely
+    ratio_2a = rng.uniform(0.030, 0.080)
     pos_2a = max(1, int(pos_1a * ratio_2a))
 
     # 3ª (5 mains)
-    ratio_3a = rng.uniform(0.00020, 0.00140)
+    ratio_3a = rng.uniform(0.00015, 0.00160)
     pos_3a = max(1, int(pos_1a * ratio_3a))
 
     # 4ª (4 mains)
-    ratio_4a = rng.uniform(0.0000040, 0.0000100)
+    ratio_4a = rng.uniform(0.0000030, 0.0000120)
     pos_4a = max(1, int(pos_1a * ratio_4a))
 
     # 5ª (3 mains)
-    ratio_5a = rng.uniform(0.00000030, 0.00000120)
+    ratio_5a = rng.uniform(0.00000020, 0.00000150)
     pos_5a = max(1, int(pos_1a * ratio_5a))
 
     return {
