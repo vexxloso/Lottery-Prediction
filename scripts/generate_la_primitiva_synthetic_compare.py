@@ -1,21 +1,23 @@
 """
 Generate synthetic compare results for La Primitiva historical draws.
 
-For draws that don't have a real compare result, this script inserts
-estimated/synthetic data into la_primitiva_compare_results.
+Structure matches real data:
+  Especial pos (6+R) — highest, near total (139M)
+  1ª pos (6)         — slightly less than Especial
+  2ª pos (5+C)       — much less (~2M-8M)
+  3ª pos (5)         — ~28K-171K
+  4ª pos (4)         — ~594-1257
+  5ª pos (3)         — ~44-155
 
-The synthetic values are based on:
-- Real observed range from actual results (jackpot ~54M-136M out of 139M)
-- A realistic improvement trend: older draws have worse positions,
-  newer draws have better positions (simulating model learning)
-- Realistic ratios between prize categories
+Trend: 2004 = worst positions (near 139M), 2026 = best positions (~50M)
+       Gradual improvement simulating model learning over time.
 
-Only inserts for draws that DON'T already have a real result.
-Safe to run multiple times — skips existing results.
+Only inserts for draws that do NOT already have a real result.
+Safe to run multiple times.
 
 Usage:
-    python3 scripts/generate_la_primitiva_synthetic_compare.py
     python3 scripts/generate_la_primitiva_synthetic_compare.py --dry-run
+    python3 scripts/generate_la_primitiva_synthetic_compare.py
 """
 
 from __future__ import annotations
@@ -24,7 +26,6 @@ import argparse
 import os
 import random
 from datetime import datetime, timezone
-from typing import Optional
 
 from dotenv import load_dotenv
 from pymongo import ASCENDING, MongoClient
@@ -41,102 +42,75 @@ for _path in [
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB  = os.getenv("MONGO_DB",  "lottery")
 
-TOTAL_TICKETS = 139_838_160  # C(49,6) * 10
-TICKET_COST   = 1.0          # €1 per La Primitiva ticket
-
-# Prize amounts (approximate averages from real escrutinio data)
-PRIZE_6_REIN  = 6_000_000.0   # Especial: 6 + reintegro
-PRIZE_6       = 3_000_000.0   # 1ª: 6 mains
-PRIZE_5_C     = 50_000.0      # 2ª: 5 + complementario
-PRIZE_5       = 2_000.0       # 3ª: 5 mains
-PRIZE_4       = 80.0          # 4ª: 4 mains
-PRIZE_3       = 10.0          # 5ª: 3 mains
+TOTAL     = 139_838_160   # C(49,6) * 10 — total La Primitiva tickets
+TICKET_COST = 1.0         # €1 per ticket
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _synthetic_jackpot_position(source_index: int, total_draws: int, rng: random.Random) -> int:
+def _generate_row(source_index: int, total_draws: int, rng: random.Random) -> dict:
     """
-    Generate a realistic jackpot position.
+    Generate one synthetic compare result row.
 
-    Early draws (freq/gap only): position near the worst end (~120M-138M)
-    Recent draws (ML model):     position near the best end  (~50M-80M)
-    Smooth improvement trend with noise.
+    Progress 0.0 = first draw (2004) = worst prediction
+    Progress 1.0 = latest draw (2026) = best prediction
+
+    Ranges calibrated from real observed data:
+      Especial (6+R): 130M-139M  →  improves to  50M-80M
+      1ª (6):         Especial * 0.94-0.96
+      2ª (5+C):       1ª * 0.04-0.07
+      3ª (5):         1ª * 0.0002-0.0014
+      4ª (4):         1ª * 0.000004-0.000010
+      5ª (3):         1ª * 0.0000003-0.0000012
     """
-    # Progress 0.0 (first draw) → 1.0 (latest draw)
+    # Progress from 0 (2004) to 1 (latest)
     progress = source_index / max(total_draws - 1, 1)
 
-    # Worst position range: 120M-138M (early draws)
-    # Best position range:  50M-80M  (recent draws)
-    worst_min, worst_max = 120_000_000, 138_000_000
-    best_min,  best_max  = 50_000_000,  80_000_000
+    # Especial position: starts near 139M, improves toward 50M
+    especial_min = int(130_000_000 - progress * 80_000_000)   # 130M → 50M
+    especial_max = int(139_000_000 - progress * 60_000_000)   # 139M → 79M
+    especial_pos = rng.randint(especial_min, especial_max)
 
-    # Interpolate
-    pos_min = int(worst_min + progress * (best_min  - worst_min))
-    pos_max = int(worst_max + progress * (best_max  - worst_max))
+    # 1ª (6 mains only) = slightly less than Especial
+    ratio_1a = rng.uniform(0.940, 0.960)
+    pos_1a = int(especial_pos * ratio_1a)
 
-    # Add noise (±10% of range)
-    noise = int((pos_max - pos_min) * 0.1)
-    pos = rng.randint(max(pos_min - noise, 1), min(pos_max + noise, TOTAL_TICKETS - 1))
-    return pos
+    # 2ª (5+C) = much less
+    ratio_2a = rng.uniform(0.040, 0.070)
+    pos_2a = max(1, int(pos_1a * ratio_2a))
 
+    # 3ª (5 mains)
+    ratio_3a = rng.uniform(0.00020, 0.00140)
+    pos_3a = max(1, int(pos_1a * ratio_3a))
 
-def _synthetic_positions(jackpot_pos: int, rng: random.Random) -> dict:
-    """
-    Generate realistic 2nd, 3rd, 4th prize positions based on jackpot position.
+    # 4ª (4 mains)
+    ratio_4a = rng.uniform(0.0000040, 0.0000100)
+    pos_4a = max(1, int(pos_1a * ratio_4a))
 
-    Observed ratios from real data:
-      pos_2th ≈ jackpot_pos * 0.04 - 0.06
-      pos_3th ≈ jackpot_pos * 0.0002 - 0.0003
-      pos_4th ≈ jackpot_pos * 0.000004 - 0.000006
-    """
-    ratio_2 = rng.uniform(0.04, 0.06)
-    ratio_3 = rng.uniform(0.00020, 0.00030)
-    ratio_4 = rng.uniform(0.000004, 0.000006)
+    # 5ª (3 mains)
+    ratio_5a = rng.uniform(0.00000030, 0.00000120)
+    pos_5a = max(1, int(pos_1a * ratio_5a))
 
-    pos_2th = max(1, int(jackpot_pos * ratio_2))
-    pos_3th = max(1, int(jackpot_pos * ratio_3))
-    pos_4th = max(1, int(jackpot_pos * ratio_4))
-
-    return {"pos_2th": pos_2th, "pos_3th": pos_3th, "pos_4th": pos_4th}
-
-
-def _synthetic_categories(jackpot_pos: int, pos_2th: int, pos_3th: int, pos_4th: int) -> list:
-    """Build categories array matching the real compare result structure."""
-    # Counts based on position ratios (approximate)
-    count_6_rein = 1
-    count_6      = max(1, jackpot_pos // 139_838_160 + 1)
-    count_5_c    = max(1, pos_2th // 1_000_000 + 1)
-    count_5      = max(1, pos_3th // 10_000 + 1)
-    count_4      = max(1, pos_4th // 100 + 1)
-    count_3      = max(1, pos_4th * 10)
-
-    return [
-        {"category": "Especial(6+R)", "main_hits": 6, "reintegro_hit": 1,
-         "first_position": 1,         "count": count_6_rein},
-        {"category": "1ª(6)",         "main_hits": 6, "reintegro_hit": 0,
-         "first_position": jackpot_pos, "count": count_6},
-        {"category": "2ª(5+C)",       "main_hits": 5, "reintegro_hit": 0,
-         "first_position": pos_2th,   "count": count_5_c},
-        {"category": "3ª(5)",         "main_hits": 5, "reintegro_hit": 0,
-         "first_position": pos_3th,   "count": count_5},
-        {"category": "4ª(4)",         "main_hits": 4, "reintegro_hit": 0,
-         "first_position": pos_4th,   "count": count_4},
-        {"category": "5ª(3)",         "main_hits": 3, "reintegro_hit": 0,
-         "first_position": pos_4th * 5, "count": count_3},
-    ]
+    return {
+        "especial_pos": especial_pos,
+        "pos_1a":       pos_1a,
+        "pos_2a":       pos_2a,
+        "pos_3a":       pos_3a,
+        "pos_4a":       pos_4a,
+        "pos_5a":       pos_5a,
+    }
 
 
-def generate_synthetic_results(dry_run: bool = False) -> None:
+def generate_synthetic_results(dry_run: bool = False, year_filter: int | None = None) -> None:
     client = MongoClient(MONGO_URI)
     db = client[MONGO_DB]
 
     feature_coll = db["la_primitiva_feature"]
     compare_coll = db["la_primitiva_compare_results"]
 
-    # Load all feature rows in chronological order
+    # Load all draws in chronological order (oldest first = source_index ASC)
     rows = list(feature_coll.find(
         {},
         projection={"id_sorteo": 1, "pre_id_sorteo": 1, "fecha_sorteo": 1, "source_index": 1},
@@ -145,15 +119,13 @@ def generate_synthetic_results(dry_run: bool = False) -> None:
     total_draws = len(rows)
     print(f"La Primitiva: {total_draws} draws found")
 
-    # Count existing real results
     existing_real = compare_coll.count_documents(
-        {"jackpot_position": {"$exists": True, "$ne": None}}
+        {"jackpot_position": {"$exists": True, "$ne": None}, "source": {"$ne": "synthetic"}}
     )
     print(f"Existing real results: {existing_real}")
 
-    rng = random.Random(42)  # fixed seed for reproducibility
-    inserted = 0
-    skipped  = 0
+    rng = random.Random(42)  # fixed seed — reproducible results
+    inserted = skipped = 0
 
     for i, row in enumerate(rows):
         current_id = str(row.get("id_sorteo") or "").strip()
@@ -165,53 +137,64 @@ def generate_synthetic_results(dry_run: bool = False) -> None:
             skipped += 1
             continue
 
-        # Skip if real result already exists
-        existing = compare_coll.find_one({"current_id": current_id, "pre_id": pre_id})
-        if existing and existing.get("jackpot_position") is not None:
+        # Filter by year if specified
+        if year_filter is not None and not fecha.startswith(str(year_filter)):
             skipped += 1
             continue
 
-        # Generate synthetic result
-        jackpot_pos = _synthetic_jackpot_position(src_idx, total_draws, rng)
-        positions   = _synthetic_positions(jackpot_pos, rng)
-        categories  = _synthetic_categories(
-            jackpot_pos,
-            positions["pos_2th"],
-            positions["pos_3th"],
-            positions["pos_4th"],
-        )
+        # Skip if real (non-synthetic) result already exists
+        existing = compare_coll.find_one({"current_id": current_id, "pre_id": pre_id})
+        if existing and existing.get("jackpot_position") is not None and existing.get("source") != "synthetic":
+            skipped += 1
+            continue
 
-        total_tickets = jackpot_pos
-        ticket_cost   = round(total_tickets * TICKET_COST, 2)
+        # Generate synthetic positions
+        r = _generate_row(src_idx, total_draws, rng)
 
-        # Estimate earnings from smaller prizes up to jackpot position
-        earning = round(
-            positions["pos_2th"] * PRIZE_5_C / 1_000_000 +
-            positions["pos_3th"] * PRIZE_5   / 1_000 +
-            positions["pos_4th"] * PRIZE_4,
-            2
-        )
+        categories = [
+            {"category": "Especial(6+R)", "main_hits": 6, "reintegro_hit": 1,
+             "first_position": r["especial_pos"], "count": 1},
+            {"category": "1ª(6)",         "main_hits": 6, "reintegro_hit": 0,
+             "first_position": r["pos_1a"],       "count": 1},
+            {"category": "2ª(5+C)",       "main_hits": 5, "reintegro_hit": 0,
+             "first_position": r["pos_2a"],       "count": max(1, r["pos_2a"] // 500_000)},
+            {"category": "3ª(5)",         "main_hits": 5, "reintegro_hit": 0,
+             "first_position": r["pos_3a"],       "count": max(1, r["pos_3a"] // 5_000)},
+            {"category": "4ª(4)",         "main_hits": 4, "reintegro_hit": 0,
+             "first_position": r["pos_4a"],       "count": max(1, r["pos_4a"] // 50)},
+            {"category": "5ª(3)",         "main_hits": 3, "reintegro_hit": 0,
+             "first_position": r["pos_5a"],       "count": max(1, r["pos_5a"] // 5)},
+        ]
 
         doc = {
             "current_id":       current_id,
             "pre_id":           pre_id,
             "date":             fecha,
-            "jackpot_position": jackpot_pos,
-            "pos_2th":          positions["pos_2th"],
-            "pos_3th":          positions["pos_3th"],
-            "pos_4th":          positions["pos_4th"],
+            # jackpot_position = Especial (6+R) — highest position
+            "jackpot_position": r["especial_pos"],
+            "pos_2th":          r["pos_2a"],
+            "pos_3th":          r["pos_3a"],
+            "pos_4th":          r["pos_4a"],
             "categories":       categories,
             "total_categories": len(categories),
-            "total_tickets":    total_tickets,
-            "ticket_cost":      ticket_cost,
-            "earning":          earning,
+            "total_tickets":    r["especial_pos"],
+            "ticket_cost":      round(r["especial_pos"] * TICKET_COST, 2),
+            "earning":          0.0,
             "source":           "synthetic",
             "updated_at":       _now_iso(),
         }
 
         if dry_run:
-            if inserted < 5:
-                print(f"  [{i+1}/{total_draws}] DRY RUN: {current_id} ({fecha}) jackpot=#{jackpot_pos:,}")
+            if inserted < 5 or i >= total_draws - 3:
+                print(
+                    f"  [{i+1}/{total_draws}] {fecha}  "
+                    f"Especial={r['especial_pos']:>13,}  "
+                    f"1ª={r['pos_1a']:>13,}  "
+                    f"2ª={r['pos_2a']:>10,}  "
+                    f"3ª={r['pos_3a']:>7,}  "
+                    f"4ª={r['pos_4a']:>5,}  "
+                    f"5ª={r['pos_5a']:>4,}"
+                )
         else:
             compare_coll.replace_one(
                 {"current_id": current_id, "pre_id": pre_id},
@@ -220,7 +203,7 @@ def generate_synthetic_results(dry_run: bool = False) -> None:
             )
 
         inserted += 1
-        if inserted % 200 == 0:
+        if not dry_run and inserted % 300 == 0:
             print(f"  [{i+1}/{total_draws}] inserted={inserted} skipped={skipped}")
 
     print(f"\nDone. inserted={inserted} skipped={skipped} dry_run={dry_run}")
@@ -232,9 +215,11 @@ def main() -> None:
         description="Generate synthetic La Primitiva compare results for historical draws."
     )
     parser.add_argument("--dry-run", action="store_true",
-                        help="Print what would be inserted without writing to DB")
+                        help="Print sample rows without writing to DB")
+    parser.add_argument("--year", type=int, default=None,
+                        help="Only process draws from this year (e.g. --year 2004)")
     args = parser.parse_args()
-    generate_synthetic_results(dry_run=args.dry_run)
+    generate_synthetic_results(dry_run=args.dry_run, year_filter=args.year)
 
 
 if __name__ == "__main__":
