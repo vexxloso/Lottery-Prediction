@@ -156,7 +156,7 @@ def generate_synthetic_results(dry_run: bool = False, year_filter: int | None = 
              "first_position": r["especial_pos"], "count": 1},
             {"category": "1ª(6)",         "main_hits": 6, "reintegro_hit": 0,
              "first_position": r["pos_1a"],       "count": 1},
-            {"category": "2ª(5+C)",       "main_hits": 5, "reintegro_hit": 0,
+            {"category": "2ª(5+C)",       "main_hits": 5, "reintegro_hit": 1,
              "first_position": r["pos_2a"],       "count": max(1, r["pos_2a"] // 500_000)},
             {"category": "3ª(5)",         "main_hits": 5, "reintegro_hit": 0,
              "first_position": r["pos_3a"],       "count": max(1, r["pos_3a"] // 5_000)},
