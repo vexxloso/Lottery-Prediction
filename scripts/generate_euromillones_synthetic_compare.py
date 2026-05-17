@@ -10,9 +10,9 @@ Structure matches real data from euromillones_compare_results:
 
 Total ticket space: C(50,5) × C(12,2) = 2,118,760
 
-Trend: 2004 = worst positions (near 2.1M), 2026 = best (~1.2M)
-       Gradual improvement simulating model learning over time.
-       Wide variance per draw — any single draw can be anywhere in 200K–2.1M.
+Trend: 2004 = worst positions (near 2.1M), 2026 = best (~1.36M)
+       Proportions mirror La Primitiva (same % of total ticket space).
+       Wide variance per draw — any single draw can be anywhere in 455K–2.1M.
 
 Only inserts for draws that do NOT already have a real result.
 Safe to run multiple times (idempotent via replace_one + upsert).
@@ -73,20 +73,27 @@ def _generate_row(source_index: int, total_draws: int, rng: random.Random) -> di
     """
     Generate one synthetic compare result row for Euromillones.
 
-    Jackpot position (5+2) trend:
-      - 2004 (oldest): average ~1,900,000  (near ceiling of 2,118,760)
-      - 2026 (latest): average ~1,200,000  (model has improved)
-      - Wide variance ±600,000 so individual draws look realistic.
+    Proportions mirror La Primitiva (same % of total ticket space):
+      La Primitiva:   center 89.4% → 64.4% of total,  variance ±35.8%,  floor 21.5%
+      Euromillones:   center 89.4% → 64.4% of total,  variance ±35.8%,  floor 21.5%
 
-    All other prize positions are derived as ratios of the jackpot position.
+    Translated to absolute values (TOTAL = 2,118,760):
+      center start : ~1,894,000  (89.4% of 2,118,760)
+      center end   : ~1,364,000  (64.4% of 2,118,760)
+      variance     :   ±758,000  (35.8% of 2,118,760)
+      floor        :    455,000  (21.5% of 2,118,760)
+
+    Result range: ~455K – 2,118,760  (same 29%–100% spread as La Primitiva)
+    Avg 2004: ~1,894,000  →  Avg 2026: ~1,364,000
     """
     progress = source_index / max(total_draws - 1, 1)
 
-    # Center shifts from 1.9M → 1.2M as model improves over time
-    center = int(1_900_000 - progress * 700_000)
+    # Center shifts from ~1.894M → ~1.364M as model improves over time
+    # (mirrors La Primitiva: 125M → 90M, same proportional drop)
+    center = int(1_894_000 - progress * 530_000)
 
-    lo = max(200_000,   center - 600_000)
-    hi = min(2_100_000, center + 600_000)
+    lo = max(455_000,   center - 758_000)
+    hi = min(2_118_000, center + 758_000)
     jackpot_pos = rng.randint(lo, hi)
 
     # 2th (5+1): 5–25% of jackpot position
