@@ -8,11 +8,19 @@ Structure matches real data from euromillones_compare_results:
   fourth_positions  list  — (4+2) 4th prize
   categories        list  — all 13 prize tiers
 
-Total ticket space: C(50,5) × C(12,2) = 2,118,760
+Total ticket space: C(50,5) × C(12,2) = 139,838,160
 
-Trend: 2004 = worst positions (near 2.1M), 2026 = best (~1.36M)
-       Proportions mirror La Primitiva (same % of total ticket space).
-       Wide variance per draw — any single draw can be anywhere in 455K–2.1M.
+Jackpot range: 2,000,000 – 30,000,000  (1.4% – 21.5% of total)
+  Trend: 2004 = worst (~28M avg), 2026 = best (~5M avg)
+  Wide variance per draw so individual draws look realistic.
+
+Sub-prize ratios derived from real La Primitiva data (6 recent draws):
+  2th (5+1) : 94.05–95.37% of jackpot
+  3th (5+0) : 4.53–7.20%   of jackpot
+  4th (4+2) : 0.035–0.147% of jackpot
+  5th (4+1) : 0.00041–0.00105% of jackpot
+  6th (4+0) : 0.000040–0.000129% of jackpot
+  7th–13th  : cascading fractions
 
 Only inserts for draws that do NOT already have a real result.
 Safe to run multiple times (idempotent via replace_one + upsert).
@@ -51,8 +59,8 @@ MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB  = os.getenv("MONGO_DB",  "lottery")
 
 # ── constants ─────────────────────────────────────────────────────────────────
-TOTAL         = 2_118_760   # C(50,5) × C(12,2) — total Euromillones tickets
-TICKET_COST   = 2.50        # €2.50 per ticket
+TOTAL         = 139_838_160  # C(50,5) × C(12,2) — total Euromillones tickets
+TICKET_COST   = 2.50         # €2.50 per ticket
 
 # Canonical 13-category order matching _EMIL_CATEGORY_ORDER in main.py
 _CATEGORY_ORDER = [
@@ -73,64 +81,55 @@ def _generate_row(source_index: int, total_draws: int, rng: random.Random) -> di
     """
     Generate one synthetic compare result row for Euromillones.
 
-    Proportions mirror La Primitiva (same % of total ticket space):
-      La Primitiva:   center 89.4% → 64.4% of total,  variance ±35.8%,  floor 21.5%
-      Euromillones:   center 89.4% → 64.4% of total,  variance ±35.8%,  floor 21.5%
+    Total ticket space: C(50,5) × C(12,2) = 139,838,160
 
-    Translated to absolute values (TOTAL = 2,118,760):
-      center start : ~1,894,000  (89.4% of 2,118,760)
-      center end   : ~1,364,000  (64.4% of 2,118,760)
-      variance     :   ±758,000  (35.8% of 2,118,760)
-      floor        :    455,000  (21.5% of 2,118,760)
+    Jackpot position range: 2,000,000 – 30,000,000  (1.4% – 21.5% of total)
+      Trend:
+        2004 (oldest) : center ~28,000,000  (model barely better than random in top 20%)
+        2026 (latest) : center ~5,000,000   (model improved, jackpot in top 3.6%)
+      Variance: ±10,000,000 around center (wide draw-to-draw noise)
+      Floor: 2,000,000  /  Ceiling: 30,000,000
 
-    Result range: ~455K – 2,118,760  (same 29%–100% spread as La Primitiva)
-    Avg 2004: ~1,894,000  →  Avg 2026: ~1,364,000
+    Sub-prize ratios from real La Primitiva data (6 recent draws):
+      2th (5+1) : 94.05–95.37% of jackpot
+      3th (5+0) : 4.53–7.20%   of jackpot
+      4th (4+2) : 0.035–0.147% of jackpot
+      5th (4+1) : 0.00041–0.00105% of jackpot
+      6th (4+0) : 0.000040–0.000129% of jackpot
+      7th–13th  : cascading fractions of 6th
     """
     progress = source_index / max(total_draws - 1, 1)
 
-    # Center shifts from ~1.894M → ~1.364M as model improves over time
-    # (mirrors La Primitiva: 125M → 90M, same proportional drop)
-    center = int(1_894_000 - progress * 530_000)
+    # Center shifts from 28M → 5M as model improves over time
+    center = int(28_000_000 - progress * 23_000_000)
 
-    lo = max(455_000,   center - 758_000)
-    hi = min(2_118_000, center + 758_000)
+    lo = max(2_000_000,  center - 10_000_000)
+    hi = min(30_000_000, center + 10_000_000)
     jackpot_pos = rng.randint(lo, hi)
 
-    # 2th (5+1): 5–25% of jackpot position
-    pos_2th = max(1, int(jackpot_pos * rng.uniform(0.05, 0.25)))
+    # 2th (5+1): 94.05–95.37% of jackpot  (real LP 1a ratio)
+    pos_2th = max(1, int(jackpot_pos * rng.uniform(0.9405, 0.9537)))
 
-    # 3th (5+0): 0.5–5% of jackpot position
-    pos_3th = max(1, int(jackpot_pos * rng.uniform(0.005, 0.05)))
+    # 3th (5+0): 4.53–7.20% of jackpot  (real LP 2a ratio)
+    pos_3th = max(1, int(jackpot_pos * rng.uniform(0.0453, 0.0720)))
 
-    # 4th (4+2): slightly less than 3th — 0.3–3% of jackpot
-    pos_4th = max(1, int(jackpot_pos * rng.uniform(0.003, 0.03)))
+    # 4th (4+2): 0.035–0.147% of jackpot  (real LP 3a ratio)
+    pos_4th = max(1, int(jackpot_pos * rng.uniform(0.000348, 0.001469)))
 
-    # 5th (4+1): 0.02–0.3% of jackpot
-    pos_5th = max(1, int(jackpot_pos * rng.uniform(0.0002, 0.003)))
+    # 5th (4+1): 0.00041–0.00105% of jackpot  (real LP 4a ratio)
+    pos_5th = max(1, int(jackpot_pos * rng.uniform(0.00000415, 0.00001046)))
 
-    # 6th (4+0): 0.005–0.05% of jackpot
-    pos_6th = max(1, int(jackpot_pos * rng.uniform(0.00005, 0.0005)))
+    # 6th (4+0): 0.000040–0.000129% of jackpot  (real LP 5a ratio)
+    pos_6th = max(1, int(jackpot_pos * rng.uniform(0.000000402, 0.000001286)))
 
-    # 7th (3+2): 0.002–0.02% of jackpot
-    pos_7th = max(1, int(jackpot_pos * rng.uniform(0.00002, 0.0002)))
-
-    # 8th (3+1): slightly less than 7th
-    pos_8th = max(1, int(pos_7th * rng.uniform(0.3, 0.8)))
-
-    # 9th (3+0): very small
-    pos_9th = max(1, int(pos_8th * rng.uniform(0.2, 0.6)))
-
-    # 10th (2+2): very small
-    pos_10th = max(1, int(pos_9th * rng.uniform(0.3, 0.8)))
-
-    # 11th (2+1): tiny
-    pos_11th = max(1, int(pos_10th * rng.uniform(0.2, 0.6)))
-
-    # 12th (1+2): tiny
-    pos_12th = max(1, int(pos_11th * rng.uniform(0.3, 0.9)))
-
-    # 13th (2+0): tiny
-    pos_13th = max(1, int(pos_11th * rng.uniform(0.2, 0.7)))
+    # 7th–13th: cascading fractions of 6th (lower prizes, very small positions)
+    pos_7th  = max(1, int(pos_6th * rng.uniform(0.40, 0.80)))
+    pos_8th  = max(1, int(pos_7th * rng.uniform(0.30, 0.75)))
+    pos_9th  = max(1, int(pos_8th * rng.uniform(0.20, 0.60)))
+    pos_10th = max(1, int(pos_9th * rng.uniform(0.30, 0.80)))
+    pos_11th = max(1, int(pos_10th * rng.uniform(0.20, 0.60)))
+    pos_12th = max(1, int(pos_11th * rng.uniform(0.30, 0.90)))
+    pos_13th = max(1, int(pos_11th * rng.uniform(0.20, 0.70)))
 
     return {
         "jackpot_pos": jackpot_pos,
