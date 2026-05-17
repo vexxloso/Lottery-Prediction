@@ -154,6 +154,3 @@ python scripts/run_daily_prediction_automation.py --api-url http://localhost:800
 
 ---
 
-## Contact 📬
-
-- Telegram: [`@riora_1`](https://t.me/riora_1)
