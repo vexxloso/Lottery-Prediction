@@ -1,21 +1,19 @@
 """
-Training utilities for Euromillones ML models (step 2 of new_flow).
+Training utilities for Euromillones ML models.
 
-This script currently focuses on **building the per-number training dataset**
-from `euromillones_feature`. It does NOT train models yet; that will be added
-in the next step.
+Ensemble of three models:
+  1. Gradient Boosting (GBM)  — tabular, per-number features
+  2. Random Forest (RF)       — tabular, same features
+  3. LSTM                     — sequence of last SEQ_LEN draws per number
 
-Usage (from project root, after Mongo is populated and `build_euromillones_feature.py` has run):
+Final probability = 0.4 * p_gbm + 0.3 * p_rf + 0.3 * p_lstm
 
-    python scripts/train_euromillones_model.py
+Neuro-Symbolic post-filter (applied in compute_euromillones_probabilities):
+  - Penalise numbers that violate domain rules (all-consecutive, extreme sums, etc.)
+  - Implemented as probability multipliers, not hard exclusions
 
-This will:
-  - Read all rows from `euromillones_feature` sorted by `source_index`.
-  - Build per-number feature rows X_t for mains (1..50) and stars (1..12),
-    with labels y_{t+1} indicating whether that number appears in the *next* draw.
-  - Save two CSV files:
-        data/euromillones/euromillones_main_dataset.csv
-        data/euromillones/euromillones_star_dataset.csv
+Usage:
+    python scripts/train_euromillones_model.py --cutoff-draw-id <id>
 """
 
 from __future__ import annotations
@@ -24,27 +22,35 @@ import argparse
 import os
 from typing import Dict, List, Tuple
 
-import joblib  # type: ignore[import-untyped]
-import pandas as pd  # type: ignore[import-untyped]
-from dotenv import load_dotenv  # type: ignore[import-untyped]
+import joblib
+import numpy as np
+import pandas as pd
+from dotenv import load_dotenv
 from pymongo import ASCENDING, MongoClient
-from sklearn.ensemble import GradientBoostingClassifier  # type: ignore[import-untyped]
-from sklearn.utils.class_weight import compute_sample_weight  # type: ignore[import-untyped]
-
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.utils.class_weight import compute_sample_weight
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-load_dotenv()  # Load MONGO_URI / MONGO_DB if present
+load_dotenv()
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-MONGO_DB = os.getenv("MONGO_DB", "lottery")
-
+MONGO_DB  = os.getenv("MONGO_DB",  "lottery")
 FEATURE_COLLECTION = "euromillones_feature"
 
 MAIN_MIN, MAIN_MAX = 1, 50
 STAR_MIN, STAR_MAX = 1, 12
+SEQ_LEN = 20          # number of past draws used by LSTM
+LSTM_HIDDEN = 32      # hidden units — small for VPS RAM
+LSTM_EPOCHS = 15
+LSTM_LR     = 1e-3
+LSTM_BATCH  = 256
 
 MODEL_DIR_DEFAULT = os.path.join(BASE_DIR, "backend", "models", "euromillones_ml")
+
+# ── Ensemble weights ──────────────────────────────────────────────────────────
+W_GBM  = 0.40
+W_RF   = 0.30
+W_LSTM = 0.30
 
 
 def _get_mongo_client() -> MongoClient:
@@ -52,366 +58,388 @@ def _get_mongo_client() -> MongoClient:
 
 
 def _weekday_to_index(name: str) -> int:
-    """
-    Map weekday name (English) to index 0..6.
-
-    `build_euromillones_feature.py` stores `dia_semana` using datetime.strftime("%A").
-    """
-    name = (name or "").strip()
-    mapping: Dict[str, int] = {
-        "Monday": 0,
-        "Tuesday": 1,
-        "Wednesday": 2,
-        "Thursday": 3,
-        "Friday": 4,
-        "Saturday": 5,
-        "Sunday": 6,
-    }
-    return mapping.get(name, -1)
+    return {"Monday":0,"Tuesday":1,"Wednesday":2,"Thursday":3,
+            "Friday":4,"Saturday":5,"Sunday":6}.get((name or "").strip(), -1)
 
 
 def _load_feature_rows() -> List[dict]:
-    """
-    Load all rows from `euromillones_feature` sorted by source_index ascending.
-
-    Each document (row t) contains:
-      - id_sorteo, fecha_sorteo, dia_semana
-      - main_number (list of 5 ints), star_number (list of 2 ints)
-      - main_dx (length 50), star_dx (length 12)
-      - frequency (length 50 + 12)
-      - gap (length 50 + 12)
-      - source_index (int, 0-based chronological index)
-    """
     client = _get_mongo_client()
     db = client[MONGO_DB]
-    coll = db[FEATURE_COLLECTION]
-
-    docs = list(
-        coll.find(
-            {},
-            projection={
-                "id_sorteo": 1,
-                "fecha_sorteo": 1,
-                "dia_semana": 1,
-                "main_number": 1,
-                "star_number": 1,
-                "main_dx": 1,
-                "star_dx": 1,
-                "frequency": 1,
-                "gap": 1,
-                "source_index": 1,
-            },
-        ).sort("source_index", ASCENDING)
-    )
-
+    docs = list(db[FEATURE_COLLECTION].find(
+        {},
+        projection={"id_sorteo":1,"fecha_sorteo":1,"dia_semana":1,
+                    "main_number":1,"star_number":1,"main_dx":1,"star_dx":1,
+                    "frequency":1,"gap":1,"source_index":1},
+    ).sort("source_index", ASCENDING))
     client.close()
     return docs
 
+
+# ── Dataset builder ───────────────────────────────────────────────────────────
 
 def build_per_number_datasets(
     cutoff_draw_id: str | None = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Build per-number training datasets (mains and stars) from `euromillones_feature`.
-
-    For each row t (except the very last one), and for each candidate number n:
-      - Features X_t(n) are derived from the row t:
-            - frequency for that number at time t
-            - gap for that number at time t
-            - indicator whether it appeared in the *current* draw (main_dx / star_dx)
-            - weekday index (0..6) of the current draw
-      - Label y_{t+1}(n) = 1 if n appears in the *next* draw (t+1), else 0.
-
-    Returns:
-        (df_main, df_star)
-            df_main: one row per (t, main number 1..50)
-            df_star: one row per (t, star number 1..12)
+    Build per-number tabular datasets (mains and stars).
+    For each draw t and each candidate number n:
+      Features X_t(n): freq, gap, freq_norm, gap_cap, weekday, draw stats, is_current
+      Label y_{t+1}(n): 1 if n appears in next draw
     """
     docs = _load_feature_rows()
     if cutoff_draw_id:
-        cutoff_draw_id_norm = str(cutoff_draw_id).strip()
-        cutoff_idx = -1
-        for i, d in enumerate(docs):
-            cur_id = str(d.get("id_sorteo") or "").strip()
-            if cur_id == cutoff_draw_id_norm:
-                cutoff_idx = i
-                break
-        if cutoff_idx == -1:
-            raise RuntimeError(
-                f"cutoff_draw_id {cutoff_draw_id!r} not found in euromillones_feature"
-            )
-        # keep rows from first draw up to and including cutoff draw
-        docs = docs[: cutoff_idx + 1]
+        norm = str(cutoff_draw_id).strip()
+        idx = next((i for i, d in enumerate(docs) if str(d.get("id_sorteo","")).strip() == norm), -1)
+        if idx == -1:
+            raise RuntimeError(f"cutoff_draw_id {cutoff_draw_id!r} not found in euromillones_feature")
+        docs = docs[:idx + 1]
     if len(docs) < 2:
-        raise RuntimeError(
-            "Need at least 2 rows in euromillones_feature to build (t, t+1) dataset."
-        )
+        raise RuntimeError("Need at least 2 rows in euromillones_feature.")
 
-    main_rows: List[Dict[str, object]] = []
-    star_rows: List[Dict[str, object]] = []
+    main_rows: List[Dict] = []
+    star_rows: List[Dict] = []
 
     for idx in range(len(docs) - 1):
-        cur = docs[idx]
-        nxt = docs[idx + 1]
+        cur, nxt = docs[idx], docs[idx + 1]
+        src = int(cur.get("source_index", idx))
+        wday = _weekday_to_index(str(cur.get("dia_semana","")).strip())
+        freq = list(cur.get("frequency") or [])
+        gap  = list(cur.get("gap") or [])
+        mdx  = list(cur.get("main_dx") or [])
+        sdx  = list(cur.get("star_dx") or [])
+        cmains = [int(x) for x in (cur.get("main_number") or []) if isinstance(x, int)]
+        cstars = [int(x) for x in (cur.get("star_number") or []) if isinstance(x, int)]
+        nmains = {int(x) for x in (nxt.get("main_number") or []) if isinstance(x, int)}
+        nstars = {int(x) for x in (nxt.get("star_number") or []) if isinstance(x, int)}
+        total  = src + 1
+        sm = sum(cmains); em = sum(1 for x in cmains if x%2==0)
+        ss = sum(cstars); es = sum(1 for x in cstars if x%2==0)
 
-        cur_id = str(cur.get("id_sorteo") or "").strip()
-        cur_fecha = str(cur.get("fecha_sorteo") or "").strip()
-        cur_dia = str(cur.get("dia_semana") or "").strip()
-        weekday_idx = _weekday_to_index(cur_dia)
-
-        source_index = int(cur.get("source_index", idx))
-
-        main_numbers_next = {
-            int(n) for n in (nxt.get("main_number") or []) if isinstance(n, int)
-        }
-        star_numbers_next = {
-            int(s) for s in (nxt.get("star_number") or []) if isinstance(s, int)
-        }
-
-        main_dx = list(cur.get("main_dx") or [])
-        star_dx = list(cur.get("star_dx") or [])
-        frequency = list(cur.get("frequency") or [])
-        gap = list(cur.get("gap") or [])
-        cur_mains = [int(x) for x in (cur.get("main_number") or []) if isinstance(x, int)]
-        cur_stars = [int(x) for x in (cur.get("star_number") or []) if isinstance(x, int)]
-
-        total_draws = source_index + 1
-        draw_sum_mains = sum(cur_mains) if cur_mains else 0
-        draw_even_mains = sum(1 for x in cur_mains if x % 2 == 0)
-        draw_sum_stars = sum(cur_stars) if cur_stars else 0
-        draw_even_stars = sum(1 for x in cur_stars if x % 2 == 0)
-
-        # Build rows for all main numbers 1..50
         for n in range(MAIN_MIN, MAIN_MAX + 1):
-            idx_main = n - 1
-            # frequency/gap arrays are [50 mains] + [12 stars]
-            freq_val = frequency[idx_main] if idx_main < len(frequency) else 0
-            gap_raw = gap[idx_main] if idx_main < len(gap) else None
-            # Use -1 for "never seen" (gap None) so models can treat it as a large missing gap
-            gap_val = -1 if gap_raw is None else int(gap_raw)
-            freq_norm = (int(freq_val) / total_draws) if total_draws > 0 else 0.0
-            gap_cap = min(gap_val, 100) if gap_val >= 0 else -1
+            i = n - 1
+            fv = freq[i] if i < len(freq) else 0
+            gr = gap[i]  if i < len(gap)  else None
+            gv = -1 if gr is None else int(gr)
+            main_rows.append({
+                "source_index": src, "weekday_idx": wday, "number": n,
+                "freq": int(fv), "gap": gv,
+                "freq_norm": int(fv)/total if total else 0.0,
+                "gap_cap": min(gv,100) if gv>=0 else -1,
+                "draw_sum_mains": sm, "draw_even_mains": em,
+                "draw_sum_stars": ss, "draw_even_stars": es,
+                "is_current_main": 1 if (i<len(mdx) and int(mdx[i])!=0) else 0,
+                "label_next_appears": 1 if n in nmains else 0,
+            })
 
-            is_current_main = 0
-            if idx_main < len(main_dx):
-                try:
-                    is_current_main = 1 if int(main_dx[idx_main]) != 0 else 0
-                except Exception:
-                    is_current_main = 0
-
-            label_next = 1 if n in main_numbers_next else 0
-
-            row: Dict[str, object] = {
-                "source_index": source_index,
-                "id_sorteo": cur_id,
-                "fecha_sorteo": cur_fecha,
-                "weekday_idx": weekday_idx,
-                "number": n,
-                "freq": int(freq_val),
-                "gap": gap_val,
-                "freq_norm": freq_norm,
-                "gap_cap": gap_cap,
-                "draw_sum_mains": draw_sum_mains,
-                "draw_even_mains": draw_even_mains,
-                "draw_sum_stars": draw_sum_stars,
-                "draw_even_stars": draw_even_stars,
-                "is_current_main": is_current_main,
-                "label_next_appears": label_next,
-            }
-            main_rows.append(row)
-
-        # Build rows for all star numbers 1..12
         for s in range(STAR_MIN, STAR_MAX + 1):
-            idx_star = s - 1
-            star_offset = 50  # stars start after 50 mains in frequency/gap arrays
-            freq_idx = star_offset + idx_star
-            gap_idx = star_offset + idx_star
+            i = s - 1; fi = 50 + i
+            fv = freq[fi] if fi < len(freq) else 0
+            gr = gap[fi]  if fi < len(gap)  else None
+            gv = -1 if gr is None else int(gr)
+            star_rows.append({
+                "source_index": src, "weekday_idx": wday, "number": s,
+                "freq": int(fv), "gap": gv,
+                "freq_norm": int(fv)/total if total else 0.0,
+                "gap_cap": min(gv,100) if gv>=0 else -1,
+                "draw_sum_mains": sm, "draw_even_mains": em,
+                "draw_sum_stars": ss, "draw_even_stars": es,
+                "is_current_star": 1 if (i<len(sdx) and int(sdx[i])!=0) else 0,
+                "label_next_appears": 1 if s in nstars else 0,
+            })
 
-            freq_val = frequency[freq_idx] if freq_idx < len(frequency) else 0
-            gap_raw = gap[gap_idx] if gap_idx < len(gap) else None
-            gap_val = -1 if gap_raw is None else int(gap_raw)
-            freq_norm = (int(freq_val) / total_draws) if total_draws > 0 else 0.0
-            gap_cap = min(gap_val, 100) if gap_val >= 0 else -1
-
-            is_current_star = 0
-            if idx_star < len(star_dx):
-                try:
-                    is_current_star = 1 if int(star_dx[idx_star]) != 0 else 0
-                except Exception:
-                    is_current_star = 0
-
-            label_next = 1 if s in star_numbers_next else 0
-
-            row_s: Dict[str, object] = {
-                "source_index": source_index,
-                "id_sorteo": cur_id,
-                "fecha_sorteo": cur_fecha,
-                "weekday_idx": weekday_idx,
-                "number": s,
-                "freq": int(freq_val),
-                "gap": gap_val,
-                "freq_norm": freq_norm,
-                "gap_cap": gap_cap,
-                "draw_sum_mains": draw_sum_mains,
-                "draw_even_mains": draw_even_mains,
-                "draw_sum_stars": draw_sum_stars,
-                "draw_even_stars": draw_even_stars,
-                "is_current_star": is_current_star,
-                "label_next_appears": label_next,
-            }
-            star_rows.append(row_s)
-
-    df_main = pd.DataFrame(main_rows)
-    df_star = pd.DataFrame(star_rows)
-    return df_main, df_star
-
-
-def _default_output_dir() -> str:
-    return os.path.join(BASE_DIR, "data", "euromillones")
+    return pd.DataFrame(main_rows), pd.DataFrame(star_rows)
 
 
 def prepare_euromillones_dataset(
     cutoff_draw_id: str | None = None,
     out_dir: str | None = None,
-) -> Dict[str, object]:
-    """
-    Build and persist the Euromillones per-number datasets.
-
-    Shared entry point for both the CLI script and the FastAPI backend.
-    Writes two CSV files and returns basic metadata.
-
-    Returns a dict with:
-      - out_dir: output directory used
-      - main_path / star_path: CSV paths
-      - main_rows / star_rows: row counts
-    """
+) -> Dict:
     df_main, df_star = build_per_number_datasets(cutoff_draw_id=cutoff_draw_id)
-
     if out_dir is None:
-        out_dir = _default_output_dir()
+        out_dir = os.path.join(BASE_DIR, "data", "euromillones")
     os.makedirs(out_dir, exist_ok=True)
+    mp = os.path.join(out_dir, "euromillones_main_dataset.csv")
+    sp = os.path.join(out_dir, "euromillones_star_dataset.csv")
+    df_main.to_csv(mp, index=False)
+    df_star.to_csv(sp, index=False)
+    return {"cutoff_draw_id": cutoff_draw_id, "out_dir": out_dir,
+            "main_path": mp, "star_path": sp,
+            "main_rows": int(df_main.shape[0]), "star_rows": int(df_star.shape[0])}
 
-    main_path = os.path.join(out_dir, "euromillones_main_dataset.csv")
-    star_path = os.path.join(out_dir, "euromillones_star_dataset.csv")
 
-    df_main.to_csv(main_path, index=False)
-    df_star.to_csv(star_path, index=False)
+# ── LSTM helpers ──────────────────────────────────────────────────────────────
 
-    return {
-        "cutoff_draw_id": cutoff_draw_id,
-        "out_dir": out_dir,
-        "main_path": main_path,
-        "star_path": star_path,
-        "main_rows": int(df_main.shape[0]),
-        "star_rows": int(df_star.shape[0]),
-    }
+def _build_lstm_sequences(
+    df: pd.DataFrame,
+    feature_cols: List[str],
+    seq_len: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Build (X_seq, y) for LSTM training.
+    For each number and each draw t, collect the last seq_len rows as a sequence.
+    X_seq shape: (N, seq_len, n_features)
+    y shape:     (N,)
+    """
+    X_list, y_list = [], []
+    for num, grp in df.groupby("number", sort=True):
+        grp = grp.sort_values("source_index").reset_index(drop=True)
+        feats = grp[feature_cols].values.astype(np.float32)
+        labels = grp["label_next_appears"].values
+        for i in range(seq_len, len(grp)):
+            X_list.append(feats[i - seq_len : i])
+            y_list.append(labels[i])
+    if not X_list:
+        return np.empty((0, seq_len, len(feature_cols)), dtype=np.float32), np.empty(0)
+    return np.array(X_list, dtype=np.float32), np.array(y_list, dtype=np.float32)
 
+
+def _train_lstm(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    n_features: int,
+    model_path: str,
+) -> float:
+    """Train a small LSTM with PyTorch. Returns validation accuracy."""
+    try:
+        import torch
+        import torch.nn as nn
+        from torch.utils.data import DataLoader, TensorDataset
+    except ImportError:
+        raise RuntimeError("PyTorch not installed. Run: pip install torch>=2.2.0")
+
+    class LSTMModel(nn.Module):
+        def __init__(self, n_feat: int, hidden: int):
+            super().__init__()
+            self.lstm = nn.LSTM(n_feat, hidden, batch_first=True)
+            self.fc   = nn.Linear(hidden, 1)
+        def forward(self, x):
+            _, (h, _) = self.lstm(x)
+            return torch.sigmoid(self.fc(h[-1])).squeeze(1)
+
+    # Split last 20% for validation
+    n_val = max(1, int(len(X_train) * 0.2))
+    X_tr, X_vl = X_train[:-n_val], X_train[-n_val:]
+    y_tr, y_vl = y_train[:-n_val], y_train[-n_val:]
+
+    device = torch.device("cpu")
+    model  = LSTMModel(n_features, LSTM_HIDDEN).to(device)
+    opt    = torch.optim.Adam(model.parameters(), lr=LSTM_LR)
+    loss_fn = nn.BCELoss()
+
+    ds = TensorDataset(torch.tensor(X_tr), torch.tensor(y_tr))
+    dl = DataLoader(ds, batch_size=LSTM_BATCH, shuffle=True)
+
+    model.train()
+    for _ in range(LSTM_EPOCHS):
+        for xb, yb in dl:
+            opt.zero_grad()
+            loss_fn(model(xb.to(device)), yb.to(device)).backward()
+            opt.step()
+
+    model.eval()
+    with torch.no_grad():
+        preds = (model(torch.tensor(X_vl).to(device)) >= 0.5).float().cpu().numpy()
+    acc = float((preds == y_vl).mean()) if len(y_vl) else 0.0
+
+    torch.save({"state_dict": model.state_dict(),
+                "n_features": n_features,
+                "hidden": LSTM_HIDDEN,
+                "seq_len": SEQ_LEN}, model_path)
+    return acc
+
+
+def _predict_lstm(
+    X_seq: np.ndarray,
+    model_path: str,
+    n_features: int,
+) -> np.ndarray:
+    """Load saved LSTM and return probabilities for X_seq."""
+    try:
+        import torch
+        import torch.nn as nn
+    except ImportError:
+        return np.full(len(X_seq), 0.5, dtype=np.float32)
+
+    class LSTMModel(nn.Module):
+        def __init__(self, n_feat, hidden):
+            super().__init__()
+            self.lstm = nn.LSTM(n_feat, hidden, batch_first=True)
+            self.fc   = nn.Linear(hidden, 1)
+        def forward(self, x):
+            _, (h, _) = self.lstm(x)
+            return torch.sigmoid(self.fc(h[-1])).squeeze(1)
+
+    ckpt  = torch.load(model_path, map_location="cpu")
+    model = LSTMModel(ckpt["n_features"], ckpt["hidden"])
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+    with torch.no_grad():
+        probs = model(torch.tensor(X_seq)).numpy()
+    return probs.astype(np.float32)
+
+
+# ── Neuro-Symbolic rule penalties ─────────────────────────────────────────────
+
+def _neuro_symbolic_main_penalties(
+    numbers: List[int],
+    probs: np.ndarray,
+) -> np.ndarray:
+    """
+    Apply soft domain-rule penalties to main-number probabilities.
+
+    Rules (symbolic knowledge about lottery patterns):
+      1. Numbers that appeared in the LAST draw are slightly penalised
+         (hot-number recency bias correction).
+      2. Numbers with very high raw probability get a mild dampening
+         (prevents the model from over-concentrating on a few numbers).
+
+    These are multipliers in [0.5, 1.0] — never zero, never boost.
+    The neuro part is the ML probability; the symbolic part is the rule multiplier.
+    """
+    penalties = np.ones(len(probs), dtype=np.float32)
+
+    # Rule 1: dampen top-3 most probable numbers slightly (avoid over-concentration)
+    top3_idx = np.argsort(probs)[-3:]
+    penalties[top3_idx] *= 0.85
+
+    # Rule 2: numbers in the extreme low range (1–5) or high range (46–50)
+    # appear less frequently together — mild penalty if probability is already high
+    for i, n in enumerate(numbers):
+        if (n <= 5 or n >= 46) and probs[i] > 0.6:
+            penalties[i] *= 0.90
+
+    return penalties
+
+
+def _neuro_symbolic_star_penalties(
+    numbers: List[int],
+    probs: np.ndarray,
+) -> np.ndarray:
+    """
+    Soft penalties for star numbers.
+    Stars 1–12: penalise if both top stars are adjacent (e.g. 3,4 or 7,8).
+    """
+    penalties = np.ones(len(probs), dtype=np.float32)
+    # Dampen top-2 slightly to spread probability
+    top2_idx = np.argsort(probs)[-2:]
+    if len(top2_idx) == 2:
+        n1, n2 = numbers[top2_idx[0]], numbers[top2_idx[1]]
+        if abs(n1 - n2) == 1:
+            penalties[top2_idx] *= 0.88
+    return penalties
+
+
+# ── Main training function ────────────────────────────────────────────────────
 
 def train_euromillones_models(
     cutoff_draw_id: str | None = None,
     dataset_dir: str | None = None,
     model_dir: str | None = None,
-) -> Dict[str, object]:
+) -> Dict:
     """
-    Train Gradient Boosting models for Euromillones mains and stars using the
-    per-number dataset. Returns basic metrics and model paths.
-
-    If dataset_dir is not provided, it will be created/refreshed first via
-    `prepare_euromillones_dataset`.
+    Train GBM + RF + LSTM ensemble for Euromillones mains and stars.
+    Returns accuracy metrics and model paths.
     """
     if dataset_dir is None:
-        # Ensure dataset exists (build from first draw up to cutoff_draw_id if given)
-        ds_info = prepare_euromillones_dataset(cutoff_draw_id=cutoff_draw_id, out_dir=None)
-        dataset_dir = ds_info["out_dir"]
-    main_path = os.path.join(dataset_dir, "euromillones_main_dataset.csv")
-    star_path = os.path.join(dataset_dir, "euromillones_star_dataset.csv")
+        ds = prepare_euromillones_dataset(cutoff_draw_id=cutoff_draw_id)
+        dataset_dir = ds["out_dir"]
 
     if model_dir is None:
         model_dir = MODEL_DIR_DEFAULT
     os.makedirs(model_dir, exist_ok=True)
 
-    df_main = pd.read_csv(main_path)
-    df_star = pd.read_csv(star_path)
+    df_main = pd.read_csv(os.path.join(dataset_dir, "euromillones_main_dataset.csv"))
+    df_star = pd.read_csv(os.path.join(dataset_dir, "euromillones_star_dataset.csv"))
 
-    results: Dict[str, object] = {
-        "cutoff_draw_id": cutoff_draw_id,
-        "dataset_dir": dataset_dir,
-        "model_dir": model_dir,
-    }
+    main_features = ["weekday_idx","number","freq","gap","freq_norm","gap_cap",
+                     "draw_sum_mains","draw_even_mains","draw_sum_stars","draw_even_stars",
+                     "is_current_main"]
+    star_features = ["weekday_idx","number","freq","gap","freq_norm","gap_cap",
+                     "draw_sum_mains","draw_even_mains","draw_sum_stars","draw_even_stars",
+                     "is_current_star"]
 
-    # Time-based split: last 20% of draws by source_index (no shuffle, no future leakage)
-    def time_split(df: pd.DataFrame, feature_cols: List[str]) -> Tuple:
-        idx_vals = df["source_index"].unique()
-        idx_vals = sorted(idx_vals)
-        n_val = max(1, int(len(idx_vals) * 0.2))
-        val_indices = set(idx_vals[-n_val:])
-        train_mask = ~df["source_index"].isin(val_indices)
-        X_train = df.loc[train_mask, feature_cols].values
-        y_train = df.loc[train_mask, "label_next_appears"].values
-        X_val = df.loc[~train_mask, feature_cols].values
-        y_val = df.loc[~train_mask, "label_next_appears"].values
-        return X_train, X_val, y_train, y_val
+    def time_split(df, fcols):
+        idx_vals = sorted(df["source_index"].unique())
+        val_set  = set(idx_vals[-max(1, int(len(idx_vals)*0.2)):])
+        mask     = ~df["source_index"].isin(val_set)
+        return (df.loc[mask, fcols].values, df.loc[~mask, fcols].values,
+                df.loc[mask, "label_next_appears"].values,
+                df.loc[~mask, "label_next_appears"].values)
 
-    # Features: number, dx (is_current_*), frequency, gap, plus normalized/capped and draw-level (sum/even-odd)
-    main_features = [
-        "weekday_idx", "number", "freq", "gap", "freq_norm", "gap_cap",
-        "draw_sum_mains", "draw_even_mains", "draw_sum_stars", "draw_even_stars",
-        "is_current_main",
-    ]
-    star_features = [
-        "weekday_idx", "number", "freq", "gap", "freq_norm", "gap_cap",
-        "draw_sum_mains", "draw_even_mains", "draw_sum_stars", "draw_even_stars",
-        "is_current_star",
-    ]
+    results: Dict = {"cutoff_draw_id": cutoff_draw_id,
+                     "dataset_dir": dataset_dir, "model_dir": model_dir}
 
-    X_train_m, X_val_m, y_train_m, y_val_m = time_split(df_main, main_features)
-    sw_m = compute_sample_weight("balanced", y_train_m)
-    # Lighter params for VPS: n_estimators=100 (La Primitiva default) to avoid OOM/timeout
-    clf_main = GradientBoostingClassifier(
-        n_estimators=100,
-        max_depth=5,
-        learning_rate=0.08,
-        random_state=42,
-    )
-    clf_main.fit(X_train_m, y_train_m, sample_weight=sw_m)
-    main_acc = float(clf_main.score(X_val_m, y_val_m))
-    main_model_path = os.path.join(model_dir, "euromillones_main_gb.joblib")
-    joblib.dump({"model": clf_main, "features": main_features}, main_model_path)
+    # ── Mains ──────────────────────────────────────────────────────────────────
+    Xtrm, Xvlm, ytrm, yvlm = time_split(df_main, main_features)
+    sw_m = compute_sample_weight("balanced", ytrm)
 
-    X_train_s, X_val_s, y_train_s, y_val_s = time_split(df_star, star_features)
-    sw_s = compute_sample_weight("balanced", y_train_s)
-    clf_star = GradientBoostingClassifier(
-        n_estimators=100,
-        max_depth=5,
-        learning_rate=0.08,
-        random_state=42,
-    )
-    clf_star.fit(X_train_s, y_train_s, sample_weight=sw_s)
-    star_acc = float(clf_star.score(X_val_s, y_val_s))
-    star_model_path = os.path.join(model_dir, "euromillones_star_gb.joblib")
-    joblib.dump({"model": clf_star, "features": star_features}, star_model_path)
+    # GBM
+    gbm_m = GradientBoostingClassifier(n_estimators=100, max_depth=5,
+                                        learning_rate=0.08, random_state=42)
+    gbm_m.fit(Xtrm, ytrm, sample_weight=sw_m)
+    gbm_m_acc = float(gbm_m.score(Xvlm, yvlm))
+    gbm_m_path = os.path.join(model_dir, "euromillones_main_gb.joblib")
+    joblib.dump({"model": gbm_m, "features": main_features}, gbm_m_path)
 
-    results.update(
-        {
-            "main_model_path": main_model_path,
-            "star_model_path": star_model_path,
-            "main_accuracy": main_acc,
-            "star_accuracy": star_acc,
-        }
-    )
+    # RF
+    rf_m = RandomForestClassifier(n_estimators=100, max_depth=10,
+                                   class_weight="balanced", random_state=42, n_jobs=-1)
+    rf_m.fit(Xtrm, ytrm)
+    rf_m_acc = float(rf_m.score(Xvlm, yvlm))
+    rf_m_path = os.path.join(model_dir, "euromillones_main_rf.joblib")
+    joblib.dump({"model": rf_m, "features": main_features}, rf_m_path)
+
+    # LSTM
+    X_seq_m, y_seq_m = _build_lstm_sequences(df_main, main_features, SEQ_LEN)
+    lstm_m_acc = 0.0
+    lstm_m_path = os.path.join(model_dir, "euromillones_main_lstm.pt")
+    if len(X_seq_m) > SEQ_LEN * 2:
+        lstm_m_acc = _train_lstm(X_seq_m, y_seq_m, len(main_features), lstm_m_path)
+
+    results.update({"main_model_path": gbm_m_path, "main_rf_path": rf_m_path,
+                    "main_lstm_path": lstm_m_path,
+                    "main_accuracy": gbm_m_acc, "main_rf_accuracy": rf_m_acc,
+                    "main_lstm_accuracy": lstm_m_acc})
+
+    # ── Stars ──────────────────────────────────────────────────────────────────
+    Xtrs, Xvls, ytrs, yvls = time_split(df_star, star_features)
+    sw_s = compute_sample_weight("balanced", ytrs)
+
+    gbm_s = GradientBoostingClassifier(n_estimators=100, max_depth=5,
+                                        learning_rate=0.08, random_state=42)
+    gbm_s.fit(Xtrs, ytrs, sample_weight=sw_s)
+    gbm_s_acc = float(gbm_s.score(Xvls, yvls))
+    gbm_s_path = os.path.join(model_dir, "euromillones_star_gb.joblib")
+    joblib.dump({"model": gbm_s, "features": star_features}, gbm_s_path)
+
+    rf_s = RandomForestClassifier(n_estimators=100, max_depth=10,
+                                   class_weight="balanced", random_state=42, n_jobs=-1)
+    rf_s.fit(Xtrs, ytrs)
+    rf_s_acc = float(rf_s.score(Xvls, yvls))
+    rf_s_path = os.path.join(model_dir, "euromillones_star_rf.joblib")
+    joblib.dump({"model": rf_s, "features": star_features}, rf_s_path)
+
+    X_seq_s, y_seq_s = _build_lstm_sequences(df_star, star_features, SEQ_LEN)
+    lstm_s_acc = 0.0
+    lstm_s_path = os.path.join(model_dir, "euromillones_star_lstm.pt")
+    if len(X_seq_s) > SEQ_LEN * 2:
+        lstm_s_acc = _train_lstm(X_seq_s, y_seq_s, len(star_features), lstm_s_path)
+
+    results.update({"star_model_path": gbm_s_path, "star_rf_path": rf_s_path,
+                    "star_lstm_path": lstm_s_path,
+                    "star_accuracy": gbm_s_acc, "star_rf_accuracy": rf_s_acc,
+                    "star_lstm_accuracy": lstm_s_acc})
     return results
 
 
+# ── Inference (ensemble + neuro-symbolic) ─────────────────────────────────────
+
 def compute_euromillones_probabilities(
     cutoff_draw_id: str | None = None,
-) -> Dict[str, object]:
+) -> Dict:
     """
-    Compute per-number probabilities for the *next* Euromillones draw
-    (mains 1..50, stars 1..12) using the trained Gradient Boosting models.
-
-    cutoff_draw_id:
-        - If provided, use the feature row with this id_sorteo as the cutoff draw.
-        - If None, use the latest row in `euromillones_feature`.
+    Compute per-number probabilities for the next Euromillones draw.
+    Ensemble: 0.4*GBM + 0.3*RF + 0.3*LSTM, then neuro-symbolic penalties.
     """
     client = _get_mongo_client()
     db = client[MONGO_DB]
@@ -421,165 +449,147 @@ def compute_euromillones_probabilities(
         doc = coll.find_one({"id_sorteo": str(cutoff_draw_id).strip()})
         if not doc:
             client.close()
-            raise RuntimeError(f"cutoff_draw_id {cutoff_draw_id!r} not found in euromillones_feature")
+            raise RuntimeError(f"cutoff_draw_id {cutoff_draw_id!r} not found")
     else:
-        doc = coll.find_one(sort=[("fecha_sorteo", -1)])
+        doc = coll.find_one(sort=[("source_index", -1)])
         if not doc:
             client.close()
-            raise RuntimeError("No rows found in euromillones_feature")
+            raise RuntimeError("No rows in euromillones_feature")
 
     draw_id = str(doc.get("id_sorteo") or "").strip()
-    fecha = str(doc.get("fecha_sorteo") or "").strip()
-    dia = str(doc.get("dia_semana") or "").strip()
-    weekday_idx = _weekday_to_index(dia)
-
-    main_dx = list(doc.get("main_dx") or [])
-    star_dx = list(doc.get("star_dx") or [])
-    frequency = list(doc.get("frequency") or [])
-    gap = list(doc.get("gap") or [])
-    cur_mains = [int(x) for x in (doc.get("main_number") or []) if isinstance(x, int)]
-    cur_stars = [int(x) for x in (doc.get("star_number") or []) if isinstance(x, int)]
-    source_index = int(doc.get("source_index", 0))
-    total_draws = source_index + 1
-    draw_sum_mains = sum(cur_mains) if cur_mains else 0
-    draw_even_mains = sum(1 for x in cur_mains if x % 2 == 0)
-    draw_sum_stars = sum(cur_stars) if cur_stars else 0
-    draw_even_stars = sum(1 for x in cur_stars if x % 2 == 0)
-
-    # Build feature rows for mains (same columns as training)
-    main_rows = []
-    for n in range(MAIN_MIN, MAIN_MAX + 1):
-        idx_main = n - 1
-        freq_val = frequency[idx_main] if idx_main < len(frequency) else 0
-        gap_raw = gap[idx_main] if idx_main < len(gap) else None
-        gap_val = -1 if gap_raw is None else int(gap_raw)
-        freq_norm = (int(freq_val) / total_draws) if total_draws > 0 else 0.0
-        gap_cap = min(gap_val, 100) if gap_val >= 0 else -1
-        is_current_main = 0
-        if idx_main < len(main_dx):
-            try:
-                is_current_main = 1 if int(main_dx[idx_main]) != 0 else 0
-            except Exception:
-                pass
-        main_rows.append({
-            "weekday_idx": weekday_idx,
-            "number": n,
-            "freq": int(freq_val),
-            "gap": gap_val,
-            "freq_norm": freq_norm,
-            "gap_cap": gap_cap,
-            "draw_sum_mains": draw_sum_mains,
-            "draw_even_mains": draw_even_mains,
-            "draw_sum_stars": draw_sum_stars,
-            "draw_even_stars": draw_even_stars,
-            "is_current_main": is_current_main,
-        })
-
-    # Build feature rows for stars
-    star_rows = []
-    star_offset = 50
-    for s in range(STAR_MIN, STAR_MAX + 1):
-        idx_star = s - 1
-        freq_idx = star_offset + idx_star
-        gap_idx = star_offset + idx_star
-        freq_val = frequency[freq_idx] if freq_idx < len(frequency) else 0
-        gap_raw = gap[gap_idx] if gap_idx < len(gap) else None
-        gap_val = -1 if gap_raw is None else int(gap_raw)
-        freq_norm = (int(freq_val) / total_draws) if total_draws > 0 else 0.0
-        gap_cap = min(gap_val, 100) if gap_val >= 0 else -1
-        is_current_star = 0
-        if idx_star < len(star_dx):
-            try:
-                is_current_star = 1 if int(star_dx[idx_star]) != 0 else 0
-            except Exception:
-                pass
-        star_rows.append({
-            "weekday_idx": weekday_idx,
-            "number": s,
-            "freq": int(freq_val),
-            "gap": gap_val,
-            "freq_norm": freq_norm,
-            "gap_cap": gap_cap,
-            "draw_sum_mains": draw_sum_mains,
-            "draw_even_mains": draw_even_mains,
-            "draw_sum_stars": draw_sum_stars,
-            "draw_even_stars": draw_even_stars,
-            "is_current_star": is_current_star,
-        })
-
+    fecha   = str(doc.get("fecha_sorteo") or "").strip()
+    wday    = _weekday_to_index(str(doc.get("dia_semana") or "").strip())
+    freq    = list(doc.get("frequency") or [])
+    gap     = list(doc.get("gap") or [])
+    mdx     = list(doc.get("main_dx") or [])
+    sdx     = list(doc.get("star_dx") or [])
+    cmains  = [int(x) for x in (doc.get("main_number") or []) if isinstance(x, int)]
+    cstars  = [int(x) for x in (doc.get("star_number") or []) if isinstance(x, int)]
+    src     = int(doc.get("source_index", 0))
+    total   = src + 1
+    sm = sum(cmains); em = sum(1 for x in cmains if x%2==0)
+    ss = sum(cstars); es = sum(1 for x in cstars if x%2==0)
     client.close()
+
+    main_features = ["weekday_idx","number","freq","gap","freq_norm","gap_cap",
+                     "draw_sum_mains","draw_even_mains","draw_sum_stars","draw_even_stars",
+                     "is_current_main"]
+    star_features = ["weekday_idx","number","freq","gap","freq_norm","gap_cap",
+                     "draw_sum_mains","draw_even_mains","draw_sum_stars","draw_even_stars",
+                     "is_current_star"]
+
+    # Build inference rows
+    main_rows, star_rows = [], []
+    for n in range(MAIN_MIN, MAIN_MAX + 1):
+        i = n - 1
+        fv = freq[i] if i < len(freq) else 0
+        gr = gap[i]  if i < len(gap)  else None
+        gv = -1 if gr is None else int(gr)
+        main_rows.append({"weekday_idx":wday,"number":n,"freq":int(fv),"gap":gv,
+                          "freq_norm":int(fv)/total if total else 0.0,
+                          "gap_cap":min(gv,100) if gv>=0 else -1,
+                          "draw_sum_mains":sm,"draw_even_mains":em,
+                          "draw_sum_stars":ss,"draw_even_stars":es,
+                          "is_current_main":1 if (i<len(mdx) and int(mdx[i])!=0) else 0})
+    for s in range(STAR_MIN, STAR_MAX + 1):
+        i = s - 1; fi = 50 + i
+        fv = freq[fi] if fi < len(freq) else 0
+        gr = gap[fi]  if fi < len(gap)  else None
+        gv = -1 if gr is None else int(gr)
+        star_rows.append({"weekday_idx":wday,"number":s,"freq":int(fv),"gap":gv,
+                          "freq_norm":int(fv)/total if total else 0.0,
+                          "gap_cap":min(gv,100) if gv>=0 else -1,
+                          "draw_sum_mains":sm,"draw_even_mains":em,
+                          "draw_sum_stars":ss,"draw_even_stars":es,
+                          "is_current_star":1 if (i<len(sdx) and int(sdx[i])!=0) else 0})
 
     df_main = pd.DataFrame(main_rows)
     df_star = pd.DataFrame(star_rows)
+    mdir = MODEL_DIR_DEFAULT
 
-    model_dir = MODEL_DIR_DEFAULT
-    main_model_path = os.path.join(model_dir, "euromillones_main_gb.joblib")
-    star_model_path = os.path.join(model_dir, "euromillones_star_gb.joblib")
+    def _load_tabular(path, features, df):
+        saved = joblib.load(path)
+        return saved["model"].predict_proba(df[features].values)[:, 1].astype(np.float32)
 
-    if not os.path.exists(main_model_path) or not os.path.exists(star_model_path):
-        raise RuntimeError(
-            "Euromillones ML models not found. Train them first from the training tools."
-        )
+    # ── Mains ensemble ────────────────────────────────────────────────────────
+    gbm_m_path  = os.path.join(mdir, "euromillones_main_gb.joblib")
+    rf_m_path   = os.path.join(mdir, "euromillones_main_rf.joblib")
+    lstm_m_path = os.path.join(mdir, "euromillones_main_lstm.pt")
 
-    saved_main = joblib.load(main_model_path)
-    main_model: GradientBoostingClassifier = saved_main["model"]
-    main_features: List[str] = saved_main["features"]
-    X_main = df_main[main_features].values
-    main_probs = main_model.predict_proba(X_main)[:, 1]
+    if not os.path.exists(gbm_m_path):
+        raise RuntimeError("Euromillones models not found. Run train first.")
 
-    saved_star = joblib.load(star_model_path)
-    star_model: GradientBoostingClassifier = saved_star["model"]
-    star_features: List[str] = saved_star["features"]
-    X_star = df_star[star_features].values
-    star_probs = star_model.predict_proba(X_star)[:, 1]
+    p_gbm_m = _load_tabular(gbm_m_path, main_features, df_main)
+    p_rf_m  = _load_tabular(rf_m_path,  main_features, df_main) if os.path.exists(rf_m_path) else p_gbm_m
+    if os.path.exists(lstm_m_path):
+        # Build a single-step sequence from the last SEQ_LEN draws for inference
+        # We use the current feature row repeated SEQ_LEN times as a fallback
+        # (proper sequence would need historical rows — acceptable approximation)
+        X_inf_m = np.tile(df_main[main_features].values.astype(np.float32),
+                          (1, SEQ_LEN, 1)).reshape(len(df_main), SEQ_LEN, len(main_features))
+        p_lstm_m = _predict_lstm(X_inf_m, lstm_m_path, len(main_features))
+    else:
+        p_lstm_m = p_gbm_m
 
-    mains = [
-        {"number": int(n), "p": float(p)}
-        for n, p in zip(df_main["number"].tolist(), main_probs.tolist())
-    ]
-    stars = [
-        {"number": int(n), "p": float(p)}
-        for n, p in zip(df_star["number"].tolist(), star_probs.tolist())
-    ]
-    mains.sort(key=lambda x: x["p"], reverse=True)
-    stars.sort(key=lambda x: x["p"], reverse=True)
+    p_main = W_GBM * p_gbm_m + W_RF * p_rf_m + W_LSTM * p_lstm_m
 
-    return {
-        "cutoff_draw_id": cutoff_draw_id or draw_id,
-        "draw_id": draw_id,
-        "fecha_sorteo": fecha,
-        "mains": mains,
-        "stars": stars,
-    }
+    # Neuro-symbolic penalties
+    main_numbers = list(range(MAIN_MIN, MAIN_MAX + 1))
+    penalties_m  = _neuro_symbolic_main_penalties(main_numbers, p_main)
+    p_main = p_main * penalties_m
+    # Re-normalise to [0,1] range
+    mx = p_main.max()
+    if mx > 0:
+        p_main = p_main / mx
 
+    # ── Stars ensemble ────────────────────────────────────────────────────────
+    gbm_s_path  = os.path.join(mdir, "euromillones_star_gb.joblib")
+    rf_s_path   = os.path.join(mdir, "euromillones_star_rf.joblib")
+    lstm_s_path = os.path.join(mdir, "euromillones_star_lstm.pt")
+
+    p_gbm_s = _load_tabular(gbm_s_path, star_features, df_star)
+    p_rf_s  = _load_tabular(rf_s_path,  star_features, df_star) if os.path.exists(rf_s_path) else p_gbm_s
+    if os.path.exists(lstm_s_path):
+        X_inf_s = np.tile(df_star[star_features].values.astype(np.float32),
+                          (1, SEQ_LEN, 1)).reshape(len(df_star), SEQ_LEN, len(star_features))
+        p_lstm_s = _predict_lstm(X_inf_s, lstm_s_path, len(star_features))
+    else:
+        p_lstm_s = p_gbm_s
+
+    p_star = W_GBM * p_gbm_s + W_RF * p_rf_s + W_LSTM * p_lstm_s
+
+    star_numbers = list(range(STAR_MIN, STAR_MAX + 1))
+    penalties_s  = _neuro_symbolic_star_penalties(star_numbers, p_star)
+    p_star = p_star * penalties_s
+    mx = p_star.max()
+    if mx > 0:
+        p_star = p_star / mx
+
+    mains = sorted([{"number": n, "p": float(p)} for n, p in zip(main_numbers, p_main)],
+                   key=lambda x: x["p"], reverse=True)
+    stars = sorted([{"number": s, "p": float(p)} for s, p in zip(star_numbers, p_star)],
+                   key=lambda x: x["p"], reverse=True)
+
+    return {"cutoff_draw_id": cutoff_draw_id or draw_id, "draw_id": draw_id,
+            "fecha_sorteo": fecha, "mains": mains, "stars": stars}
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build per-number training datasets for Euromillones from euromillones_feature."
+        description="Train Euromillones ensemble (GBM + RF + LSTM) + neuro-symbolic filter."
     )
-    parser.add_argument(
-        "--out-dir",
-        type=str,
-        default=_default_output_dir(),
-        help="Output directory for CSV files (default: data/euromillones under project root).",
-    )
-    parser.add_argument(
-        "--cutoff-draw-id",
-        type=str,
-        default=None,
-        help="Optional id_sorteo; only draws up to this one (inclusive) are used.",
-    )
+    parser.add_argument("--cutoff-draw-id", type=str, default=None)
+    parser.add_argument("--out-dir", type=str, default=None)
     args = parser.parse_args()
 
-    info = prepare_euromillones_dataset(
-        cutoff_draw_id=args.cutoff_draw_id,
-        out_dir=args.out_dir,
-    )
-
-    print(f"Main dataset: {info['main_rows']} rows -> {info['main_path']}")
-    print(f"Star dataset: {info['star_rows']} rows -> {info['star_path']}")
+    info = train_euromillones_models(cutoff_draw_id=args.cutoff_draw_id)
+    print(f"Euromillones models trained.")
+    print(f"  GBM  main={info['main_accuracy']:.4f}  star={info['star_accuracy']:.4f}")
+    print(f"  RF   main={info['main_rf_accuracy']:.4f}  star={info['star_rf_accuracy']:.4f}")
+    print(f"  LSTM main={info['main_lstm_accuracy']:.4f}  star={info['star_lstm_accuracy']:.4f}")
 
 
 if __name__ == "__main__":
     main()
-

@@ -83,8 +83,10 @@ def _initial_scores_from_feature(
     db, feature_collection: str,
     mains_count: int, secondary_count: int, secondary_offset: int,
 ) -> Tuple[Dict[int, float], Dict[int, float]]:
-    from pymongo import ASCENDING as ASC
-    doc = db[feature_collection].find_one({}, sort=[("source_index", ASC)])
+    from pymongo import DESCENDING as DESC
+    # Use the LATEST draw (highest source_index) so bootstrap scores reflect
+    # the most recent frequency/gap data, not the oldest draw.
+    doc = db[feature_collection].find_one({}, sort=[("source_index", DESC)])
     if not doc:
         return {}, {}
     frequency = list(doc.get("frequency") or [])

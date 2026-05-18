@@ -9680,7 +9680,16 @@ def api_el_gordo_run_pipeline(
             info = train_el_gordo_models(cutoff_draw_id=cid)
             coll.update_one(
                 {"cutoff_draw_id": cid},
-                {"$set": {"models_trained": True, "trained_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "main_accuracy": info.get("main_accuracy"), "clave_accuracy": info.get("clave_accuracy")}},
+                {"$set": {
+                    "models_trained": True,
+                    "trained_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "main_accuracy": info.get("main_accuracy"),
+                    "clave_accuracy": info.get("clave_accuracy"),
+                    "main_rf_accuracy": info.get("main_rf_accuracy"),
+                    "clave_rf_accuracy": info.get("clave_rf_accuracy"),
+                    "main_lstm_accuracy": info.get("main_lstm_accuracy"),
+                    "clave_lstm_accuracy": info.get("clave_lstm_accuracy"),
+                }},
             )
             info = compute_el_gordo_probabilities(cutoff_draw_id=cid)
             coll.update_one(
@@ -9909,7 +9918,16 @@ def api_la_primitiva_run_pipeline(
             info = train_la_primitiva_models(cutoff_draw_id=cid)
             coll.update_one(
                 {"cutoff_draw_id": cid},
-                {"$set": {"models_trained": True, "trained_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "main_accuracy": info.get("main_accuracy"), "reintegro_accuracy": info.get("reintegro_accuracy")}},
+                {"$set": {
+                    "models_trained": True,
+                    "trained_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "main_accuracy": info.get("main_accuracy"),
+                    "reintegro_accuracy": info.get("reintegro_accuracy"),
+                    "main_rf_accuracy": info.get("main_rf_accuracy"),
+                    "reintegro_rf_accuracy": info.get("reintegro_rf_accuracy"),
+                    "main_lstm_accuracy": info.get("main_lstm_accuracy"),
+                    "reintegro_lstm_accuracy": info.get("reintegro_lstm_accuracy"),
+                }},
             )
             info = compute_la_primitiva_probabilities(cutoff_draw_id=cid)
             coll.update_one(
@@ -10288,6 +10306,10 @@ def api_euromillones_train_models(
                     "trained_at": now,
                     "main_accuracy": info.get("main_accuracy"),
                     "star_accuracy": info.get("star_accuracy"),
+                    "main_rf_accuracy": info.get("main_rf_accuracy"),
+                    "star_rf_accuracy": info.get("star_rf_accuracy"),
+                    "main_lstm_accuracy": info.get("main_lstm_accuracy"),
+                    "star_lstm_accuracy": info.get("star_lstm_accuracy"),
                 }
             },
             upsert=True,
@@ -10456,6 +10478,11 @@ def api_euromillones_run_pipeline(
                         "trained_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                         "main_accuracy": info.get("main_accuracy"),
                         "star_accuracy": info.get("star_accuracy"),
+                        # RF + LSTM ensemble accuracies
+                        "main_rf_accuracy": info.get("main_rf_accuracy"),
+                        "star_rf_accuracy": info.get("star_rf_accuracy"),
+                        "main_lstm_accuracy": info.get("main_lstm_accuracy"),
+                        "star_lstm_accuracy": info.get("star_lstm_accuracy"),
                     }
                 },
             )

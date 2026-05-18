@@ -1,28 +1,15 @@
 """
-Training utilities for El Gordo ML models (step 2 of new_flow).
+Training utilities for El Gordo ML models.
 
-This first version focuses on **building the per-number training dataset**
-from `el_gordo_feature`. It does NOT train models yet.
+Ensemble of three models:
+  1. Gradient Boosting (GBM)
+  2. Random Forest (RF)
+  3. LSTM
 
-El Gordo specifics:
-  - 5 main numbers in [1, 54]
-  - 1 clave number in [0, 9]
+Final probability = 0.4 * p_gbm + 0.3 * p_rf + 0.3 * p_lstm
+Neuro-symbolic penalties applied after ensemble.
 
-For each draw t (row t in `el_gordo_feature`) we build:
-  - Features X_t(n) for every candidate main n in 1..54
-  - Features X_t(c) for every candidate clave c in 0..9
-  - Labels y_{t+1}(n) / y_{t+1}(c) indicating whether that number appears in draw t+1.
-
-Usage (after `build_el_gordo_feature.py` has run):
-
-    python scripts/train_el_gordo_model.py --cutoff_draw_id <id_sorteo_optional>
-
-This will:
-  - Read all rows from `el_gordo_feature` sorted by `source_index`
-  - Build two DataFrames:
-        df_main: one row per (t, main number 1..54)
-        df_clave: one row per (t, clave 0..9)
-  - (Later we will add code to save these to CSV and train models.)
+El Gordo: 5 mains from 1–54, 1 clave from 0–9.
 """
 
 from __future__ import annotations
@@ -31,31 +18,34 @@ import argparse
 import os
 from typing import Dict, List, Tuple
 
-import joblib  # type: ignore[import-untyped]
-import pandas as pd  # type: ignore[import-untyped]
-from dotenv import load_dotenv  # type: ignore[import-untyped]
-from pymongo import MongoClient  # type: ignore[import-untyped]
-from sklearn.ensemble import GradientBoostingClassifier  # type: ignore[import-untyped]
-from sklearn.utils.class_weight import compute_sample_weight  # type: ignore[import-untyped]
-
+import joblib
+import numpy as np
+import pandas as pd
+from dotenv import load_dotenv
+from pymongo import MongoClient
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.utils.class_weight import compute_sample_weight
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-load_dotenv()  # Load MONGO_URI / MONGO_DB if present
+load_dotenv()
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-MONGO_DB = os.getenv("MONGO_DB", "lottery")
-
+MONGO_DB  = os.getenv("MONGO_DB",  "lottery")
 FEATURE_COLLECTION = "el_gordo_feature"
 
 MAIN_MIN, MAIN_MAX = 1, 54
 CLAVE_MIN, CLAVE_MAX = 0, 9
+SEQ_LEN     = 20
+LSTM_HIDDEN = 32
+LSTM_EPOCHS = 15
+LSTM_LR     = 1e-3
+LSTM_BATCH  = 256
 
 MODEL_DIR_DEFAULT = os.path.join(BASE_DIR, "backend", "models", "el_gordo_ml")
 
-
-def _default_output_dir() -> str:
-    return os.path.join(BASE_DIR, "data", "el_gordo")
+W_GBM  = 0.40
+W_RF   = 0.30
+W_LSTM = 0.30
 
 
 def _get_mongo_client() -> MongoClient:
@@ -63,60 +53,23 @@ def _get_mongo_client() -> MongoClient:
 
 
 def _weekday_to_index(name: str) -> int:
-    """
-    Map weekday name (English) to index 0..6.
+    return {"Monday":0,"Tuesday":1,"Wednesday":2,"Thursday":3,
+            "Friday":4,"Saturday":5,"Sunday":6}.get((name or "").strip(), -1)
 
-    `build_el_gordo_feature.py` stores `dia_semana` using datetime.strftime("%A").
-    """
-    name = (name or "").strip()
-    mapping: Dict[str, int] = {
-        "Monday": 0,
-        "Tuesday": 1,
-        "Wednesday": 2,
-        "Thursday": 3,
-        "Friday": 4,
-        "Saturday": 5,
-        "Sunday": 6,
-    }
-    return mapping.get(name, -1)
+
+def _default_output_dir() -> str:
+    return os.path.join(BASE_DIR, "data", "el_gordo")
 
 
 def _load_feature_rows() -> List[dict]:
-    """
-    Load all rows from `el_gordo_feature` sorted by source_index ascending.
-
-    Each document (row t) contains:
-      - id_sorteo, fecha_sorteo, dia_semana
-      - main_number (list of 5 ints)
-      - clave (single int 0–9 or None)
-      - main_dx (length 54)
-      - clave_dx (length 10)
-      - frequency (length 54 + 10)
-      - gap (length 54 + 10)
-      - source_index (int, 0-based chronological index)
-    """
     client = _get_mongo_client()
     db = client[MONGO_DB]
-    coll = db[FEATURE_COLLECTION]
-
-    docs = list(
-        coll.find(
-            {},
-            projection={
-                "id_sorteo": 1,
-                "fecha_sorteo": 1,
-                "dia_semana": 1,
-                "main_number": 1,
-                "clave": 1,
-                "main_dx": 1,
-                "clave_dx": 1,
-                "frequency": 1,
-                "gap": 1,
-                "source_index": 1,
-            },
-        ).sort("source_index", 1)
-    )
-
+    docs = list(db[FEATURE_COLLECTION].find(
+        {},
+        projection={"id_sorteo":1,"fecha_sorteo":1,"dia_semana":1,
+                    "main_number":1,"clave":1,"main_dx":1,"clave_dx":1,
+                    "frequency":1,"gap":1,"source_index":1},
+    ).sort("source_index", 1))
     client.close()
     return docs
 
@@ -124,470 +77,371 @@ def _load_feature_rows() -> List[dict]:
 def build_per_number_datasets(
     cutoff_draw_id: str | None = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Build per-number training datasets (mains and clave) from `el_gordo_feature`.
-
-    For each row t (except the very last one), and for each candidate number:
-      - Features X_t(main n) / X_t(clave c) are derived from row t:
-            - frequency for that number at time t
-            - gap for that number at time t
-            - indicator whether it appeared in the *current* draw (main_dx / clave_dx)
-            - weekday index (0..6) of the current draw
-            - simple draw-level stats (sum/evens for mains and clave)
-      - Label y_{t+1}(n/c) = 1 if that number appears in the *next* draw (t+1), else 0.
-
-    Returns:
-        (df_main, df_clave)
-            df_main: one row per (t, main number 1..54)
-            df_clave: one row per (t, clave 0..9)
-    """
     docs = _load_feature_rows()
     if cutoff_draw_id:
-        cutoff_draw_id_norm = str(cutoff_draw_id).strip()
-        cutoff_idx = -1
-        for i, d in enumerate(docs):
-            cur_id = str(d.get("id_sorteo") or "").strip()
-            if cur_id == cutoff_draw_id_norm:
-                cutoff_idx = i
-                break
-        if cutoff_idx == -1:
-            raise RuntimeError(
-                f"cutoff_draw_id {cutoff_draw_id!r} not found in el_gordo_feature"
-            )
-        # keep rows from first draw up to and including cutoff draw
-        docs = docs[: cutoff_idx + 1]
+        norm = str(cutoff_draw_id).strip()
+        idx = next((i for i, d in enumerate(docs) if str(d.get("id_sorteo","")).strip() == norm), -1)
+        if idx == -1:
+            raise RuntimeError(f"cutoff_draw_id {cutoff_draw_id!r} not found in el_gordo_feature")
+        docs = docs[:idx + 1]
     if len(docs) < 2:
-        raise RuntimeError(
-            "Need at least 2 rows in el_gordo_feature to build (t, t+1) dataset."
-        )
+        raise RuntimeError("Need at least 2 rows in el_gordo_feature.")
 
-    main_rows: List[Dict[str, object]] = []
-    clave_rows: List[Dict[str, object]] = []
+    main_rows: List[Dict] = []
+    clave_rows: List[Dict] = []
 
     for idx in range(len(docs) - 1):
-        cur = docs[idx]
-        nxt = docs[idx + 1]
+        cur, nxt = docs[idx], docs[idx + 1]
+        src  = int(cur.get("source_index", idx))
+        wday = _weekday_to_index(str(cur.get("dia_semana","")).strip())
+        freq = list(cur.get("frequency") or [])
+        gap  = list(cur.get("gap") or [])
+        mdx  = list(cur.get("main_dx") or [])
+        cdx  = list(cur.get("clave_dx") or [])
+        cmains = [int(x) for x in (cur.get("main_number") or []) if isinstance(x, int)]
+        cclave_raw = cur.get("clave")
+        cclave = int(cclave_raw) if isinstance(cclave_raw, int) else -1
+        nmains = {int(x) for x in (nxt.get("main_number") or []) if isinstance(x, int)}
+        nclave_raw = nxt.get("clave")
+        nclave = int(nclave_raw) if isinstance(nclave_raw, int) else None
+        total  = src + 1
+        sm = sum(cmains); em = sum(1 for x in cmains if x%2==0)
 
-        cur_id = str(cur.get("id_sorteo") or "").strip()
-        cur_fecha = str(cur.get("fecha_sorteo") or "").strip()
-        cur_dia = str(cur.get("dia_semana") or "").strip()
-        weekday_idx = _weekday_to_index(cur_dia)
-
-        source_index = int(cur.get("source_index", idx))
-
-        # Next-draw mains and clave (labels)
-        main_numbers_next = {
-            int(n) for n in (nxt.get("main_number") or []) if isinstance(n, int)
-        }
-        clave_next_raw = nxt.get("clave")
-        clave_next = int(clave_next_raw) if isinstance(clave_next_raw, int) else None
-
-        # Current row features
-        main_dx = list(cur.get("main_dx") or [])
-        clave_dx = list(cur.get("clave_dx") or [])
-        frequency = list(cur.get("frequency") or [])
-        gap = list(cur.get("gap") or [])
-        cur_mains = [
-            int(x) for x in (cur.get("main_number") or []) if isinstance(x, int)
-        ]
-        cur_clave_raw = cur.get("clave")
-        cur_clave = int(cur_clave_raw) if isinstance(cur_clave_raw, int) else None
-
-        total_draws = source_index + 1
-        draw_sum_mains = sum(cur_mains) if cur_mains else 0
-        draw_even_mains = sum(1 for x in cur_mains if x % 2 == 0)
-        draw_clave = cur_clave if cur_clave is not None else -1
-
-        # ----- Main numbers 1..54 -----
         for n in range(MAIN_MIN, MAIN_MAX + 1):
-            idx_main = n - MAIN_MIN
-            # frequency/gap arrays are [54 mains] + [10 clave]
-            freq_val = frequency[idx_main] if idx_main < len(frequency) else 0
-            gap_raw = gap[idx_main] if idx_main < len(gap) else None
-            # Use -1 for "never seen" so models can treat it as a large missing gap
-            gap_val = -1 if gap_raw is None else int(gap_raw)
-            freq_norm = (int(freq_val) / total_draws) if total_draws > 0 else 0.0
-            gap_cap = min(gap_val, 100) if gap_val >= 0 else -1
+            i = n - MAIN_MIN
+            fv = freq[i] if i < len(freq) else 0
+            gr = gap[i]  if i < len(gap)  else None
+            gv = -1 if gr is None else int(gr)
+            main_rows.append({
+                "source_index":src,"weekday_idx":wday,"number":n,
+                "freq":int(fv),"gap":gv,
+                "freq_norm":int(fv)/total if total else 0.0,
+                "gap_cap":min(gv,100) if gv>=0 else -1,
+                "draw_sum_mains":sm,"draw_even_mains":em,"draw_clave":cclave,
+                "is_current_main":1 if (i<len(mdx) and int(mdx[i])!=0) else 0,
+                "label_next_appears":1 if n in nmains else 0,
+            })
 
-            is_current_main = 0
-            if idx_main < len(main_dx):
-                try:
-                    is_current_main = 1 if int(main_dx[idx_main]) != 0 else 0
-                except Exception:
-                    is_current_main = 0
-
-            label_next = 1 if n in main_numbers_next else 0
-
-            row_main: Dict[str, object] = {
-                "source_index": source_index,
-                "id_sorteo": cur_id,
-                "fecha_sorteo": cur_fecha,
-                "weekday_idx": weekday_idx,
-                "number": n,
-                "freq": int(freq_val),
-                "gap": gap_val,
-                "freq_norm": freq_norm,
-                "gap_cap": gap_cap,
-                "draw_sum_mains": draw_sum_mains,
-                "draw_even_mains": draw_even_mains,
-                "draw_clave": draw_clave,
-                "is_current_main": is_current_main,
-                "label_next_appears": label_next,
-            }
-            main_rows.append(row_main)
-
-        # ----- Clave numbers 0..9 -----
+        clave_offset = MAIN_MAX - MAIN_MIN + 1  # 54
         for c in range(CLAVE_MIN, CLAVE_MAX + 1):
-            idx_clave = c - CLAVE_MIN
-            clave_offset = MAIN_MAX - MAIN_MIN + 1  # 54 mains first
-            freq_idx = clave_offset + idx_clave
-            gap_idx = clave_offset + idx_clave
+            ic = c - CLAVE_MIN; fi = clave_offset + ic
+            fv = freq[fi] if fi < len(freq) else 0
+            gr = gap[fi]  if fi < len(gap)  else None
+            gv = -1 if gr is None else int(gr)
+            clave_rows.append({
+                "source_index":src,"weekday_idx":wday,"number":c,
+                "freq":int(fv),"gap":gv,
+                "freq_norm":int(fv)/total if total else 0.0,
+                "gap_cap":min(gv,100) if gv>=0 else -1,
+                "draw_sum_mains":sm,"draw_even_mains":em,"draw_clave":cclave,
+                "is_current_clave":1 if (ic<len(cdx) and int(cdx[ic])!=0) else 0,
+                "label_next_appears":1 if (nclave is not None and c==nclave) else 0,
+            })
 
-            freq_val = frequency[freq_idx] if freq_idx < len(frequency) else 0
-            gap_raw = gap[gap_idx] if gap_idx < len(gap) else None
-            gap_val = -1 if gap_raw is None else int(gap_raw)
-            freq_norm = (int(freq_val) / total_draws) if total_draws > 0 else 0.0
-            gap_cap = min(gap_val, 100) if gap_val >= 0 else -1
-
-            is_current_clave = 0
-            if idx_clave < len(clave_dx):
-                try:
-                    is_current_clave = 1 if int(clave_dx[idx_clave]) != 0 else 0
-                except Exception:
-                    is_current_clave = 0
-
-            label_next = 1 if (clave_next is not None and c == clave_next) else 0
-
-            row_clave: Dict[str, object] = {
-                "source_index": source_index,
-                "id_sorteo": cur_id,
-                "fecha_sorteo": cur_fecha,
-                "weekday_idx": weekday_idx,
-                "number": c,
-                "freq": int(freq_val),
-                "gap": gap_val,
-                "freq_norm": freq_norm,
-                "gap_cap": gap_cap,
-                "draw_sum_mains": draw_sum_mains,
-                "draw_even_mains": draw_even_mains,
-                "draw_clave": draw_clave,
-                "is_current_clave": is_current_clave,
-                "label_next_appears": label_next,
-            }
-            clave_rows.append(row_clave)
-
-    df_main = pd.DataFrame(main_rows)
-    df_clave = pd.DataFrame(clave_rows)
-    return df_main, df_clave
+    return pd.DataFrame(main_rows), pd.DataFrame(clave_rows)
 
 
 def prepare_el_gordo_dataset(
     cutoff_draw_id: str | None = None,
     out_dir: str | None = None,
-) -> Dict[str, object]:
-    """
-    Build and persist the El Gordo per-number datasets.
-
-    Shared entry point for both the CLI script and the FastAPI backend.
-    Writes two CSV files and returns basic metadata.
-
-    Returns a dict with:
-      - out_dir: output directory used
-      - main_path / clave_path: CSV paths
-      - main_rows / clave_rows: row counts
-    """
+) -> Dict:
     df_main, df_clave = build_per_number_datasets(cutoff_draw_id=cutoff_draw_id)
-
     if out_dir is None:
-      out_dir = _default_output_dir()
+        out_dir = _default_output_dir()
     os.makedirs(out_dir, exist_ok=True)
+    mp = os.path.join(out_dir, "el_gordo_main_dataset.csv")
+    cp = os.path.join(out_dir, "el_gordo_clave_dataset.csv")
+    df_main.to_csv(mp, index=False)
+    df_clave.to_csv(cp, index=False)
+    return {"cutoff_draw_id":cutoff_draw_id,"out_dir":out_dir,
+            "main_path":mp,"clave_path":cp,
+            "main_rows":int(df_main.shape[0]),"clave_rows":int(df_clave.shape[0])}
 
-    main_path = os.path.join(out_dir, "el_gordo_main_dataset.csv")
-    clave_path = os.path.join(out_dir, "el_gordo_clave_dataset.csv")
 
-    df_main.to_csv(main_path, index=False)
-    df_clave.to_csv(clave_path, index=False)
+# ── LSTM (shared helpers, same as euromillones) ───────────────────────────────
 
-    return {
-        "cutoff_draw_id": cutoff_draw_id,
-        "out_dir": out_dir,
-        "main_path": main_path,
-        "clave_path": clave_path,
-        "main_rows": int(df_main.shape[0]),
-        "clave_rows": int(df_clave.shape[0]),
-    }
+def _build_lstm_sequences(df, feature_cols, seq_len):
+    X_list, y_list = [], []
+    for _, grp in df.groupby("number", sort=True):
+        grp = grp.sort_values("source_index").reset_index(drop=True)
+        feats  = grp[feature_cols].values.astype(np.float32)
+        labels = grp["label_next_appears"].values
+        for i in range(seq_len, len(grp)):
+            X_list.append(feats[i-seq_len:i])
+            y_list.append(labels[i])
+    if not X_list:
+        return np.empty((0,seq_len,len(feature_cols)),dtype=np.float32), np.empty(0)
+    return np.array(X_list,dtype=np.float32), np.array(y_list,dtype=np.float32)
 
+
+def _train_lstm(X_train, y_train, n_features, model_path):
+    try:
+        import torch, torch.nn as nn
+        from torch.utils.data import DataLoader, TensorDataset
+    except ImportError:
+        raise RuntimeError("PyTorch not installed.")
+
+    class LSTMModel(nn.Module):
+        def __init__(self,nf,h):
+            super().__init__()
+            self.lstm=nn.LSTM(nf,h,batch_first=True)
+            self.fc=nn.Linear(h,1)
+        def forward(self,x):
+            _,(h,_)=self.lstm(x)
+            return torch.sigmoid(self.fc(h[-1])).squeeze(1)
+
+    n_val=max(1,int(len(X_train)*0.2))
+    Xtr,Xvl=X_train[:-n_val],X_train[-n_val:]
+    ytr,yvl=y_train[:-n_val],y_train[-n_val:]
+    model=LSTMModel(n_features,LSTM_HIDDEN)
+    opt=torch.optim.Adam(model.parameters(),lr=LSTM_LR)
+    loss_fn=nn.BCELoss()
+    dl=DataLoader(TensorDataset(torch.tensor(Xtr),torch.tensor(ytr)),
+                  batch_size=LSTM_BATCH,shuffle=True)
+    model.train()
+    for _ in range(LSTM_EPOCHS):
+        for xb,yb in dl:
+            opt.zero_grad(); loss_fn(model(xb),yb).backward(); opt.step()
+    model.eval()
+    with torch.no_grad():
+        preds=(model(torch.tensor(Xvl))>=0.5).float().numpy()
+    acc=float((preds==yvl).mean()) if len(yvl) else 0.0
+    torch.save({"state_dict":model.state_dict(),"n_features":n_features,
+                "hidden":LSTM_HIDDEN,"seq_len":SEQ_LEN},model_path)
+    return acc
+
+
+def _predict_lstm(X_seq, model_path, n_features):
+    try:
+        import torch, torch.nn as nn
+    except ImportError:
+        return np.full(len(X_seq),0.5,dtype=np.float32)
+
+    class LSTMModel(nn.Module):
+        def __init__(self,nf,h):
+            super().__init__()
+            self.lstm=nn.LSTM(nf,h,batch_first=True)
+            self.fc=nn.Linear(h,1)
+        def forward(self,x):
+            _,(h,_)=self.lstm(x)
+            return torch.sigmoid(self.fc(h[-1])).squeeze(1)
+
+    ckpt=torch.load(model_path,map_location="cpu")
+    m=LSTMModel(ckpt["n_features"],ckpt["hidden"])
+    m.load_state_dict(ckpt["state_dict"]); m.eval()
+    with torch.no_grad():
+        return m(torch.tensor(X_seq)).numpy().astype(np.float32)
+
+
+# ── Neuro-symbolic penalties ──────────────────────────────────────────────────
+
+def _ns_main_penalties(numbers, probs):
+    p = np.ones(len(probs), dtype=np.float32)
+    p[np.argsort(probs)[-3:]] *= 0.85
+    for i, n in enumerate(numbers):
+        if (n <= 5 or n >= 50) and probs[i] > 0.6:
+            p[i] *= 0.90
+    return p
+
+
+def _ns_clave_penalties(numbers, probs):
+    # Clave 0–9: no strong domain rules, just dampen top-1 slightly
+    p = np.ones(len(probs), dtype=np.float32)
+    p[np.argmax(probs)] *= 0.90
+    return p
+
+
+# ── Training ──────────────────────────────────────────────────────────────────
 
 def train_el_gordo_models(
     cutoff_draw_id: str | None = None,
     dataset_dir: str | None = None,
     model_dir: str | None = None,
-) -> Dict[str, object]:
-    """
-    Train Gradient Boosting models for El Gordo mains and clave using the
-    per-number dataset. Returns basic metrics and model paths.
-
-    If dataset_dir is not provided, it will be created/refreshed first via
-    `prepare_el_gordo_dataset`.
-    """
+) -> Dict:
     if dataset_dir is None:
-        ds_info = prepare_el_gordo_dataset(cutoff_draw_id=cutoff_draw_id, out_dir=None)
-        dataset_dir = ds_info["out_dir"]
-
-    main_path = os.path.join(dataset_dir, "el_gordo_main_dataset.csv")
-    clave_path = os.path.join(dataset_dir, "el_gordo_clave_dataset.csv")
-
+        ds = prepare_el_gordo_dataset(cutoff_draw_id=cutoff_draw_id)
+        dataset_dir = ds["out_dir"]
     if model_dir is None:
         model_dir = MODEL_DIR_DEFAULT
     os.makedirs(model_dir, exist_ok=True)
 
-    df_main = pd.read_csv(main_path)
-    df_clave = pd.read_csv(clave_path)
+    df_main  = pd.read_csv(os.path.join(dataset_dir, "el_gordo_main_dataset.csv"))
+    df_clave = pd.read_csv(os.path.join(dataset_dir, "el_gordo_clave_dataset.csv"))
 
-    results: Dict[str, object] = {
-        "cutoff_draw_id": cutoff_draw_id,
-        "dataset_dir": dataset_dir,
-        "model_dir": model_dir,
-    }
+    mf = ["weekday_idx","number","freq","gap","freq_norm","gap_cap",
+          "draw_sum_mains","draw_even_mains","draw_clave","is_current_main"]
+    cf = ["weekday_idx","number","freq","gap","freq_norm","gap_cap",
+          "draw_sum_mains","draw_even_mains","draw_clave","is_current_clave"]
 
-    def time_split(df: pd.DataFrame, feature_cols: List[str]) -> Tuple:
-        idx_vals = sorted(df["source_index"].unique())
-        n_val = max(1, int(len(idx_vals) * 0.2))
-        val_indices = set(idx_vals[-n_val:])
-        train_mask = ~df["source_index"].isin(val_indices)
-        X_train = df.loc[train_mask, feature_cols].values
-        y_train = df.loc[train_mask, "label_next_appears"].values
-        X_val = df.loc[~train_mask, feature_cols].values
-        y_val = df.loc[~train_mask, "label_next_appears"].values
-        return X_train, X_val, y_train, y_val
+    def split(df, fcols):
+        iv=sorted(df["source_index"].unique())
+        vs=set(iv[-max(1,int(len(iv)*0.2)):])
+        mk=~df["source_index"].isin(vs)
+        return (df.loc[mk,fcols].values,df.loc[~mk,fcols].values,
+                df.loc[mk,"label_next_appears"].values,df.loc[~mk,"label_next_appears"].values)
 
-    main_features = [
-        "weekday_idx",
-        "number",
-        "freq",
-        "gap",
-        "freq_norm",
-        "gap_cap",
-        "draw_sum_mains",
-        "draw_even_mains",
-        "draw_clave",
-        "is_current_main",
-    ]
-    clave_features = [
-        "weekday_idx",
-        "number",
-        "freq",
-        "gap",
-        "freq_norm",
-        "gap_cap",
-        "draw_sum_mains",
-        "draw_even_mains",
-        "draw_clave",
-        "is_current_clave",
-    ]
+    res: Dict = {"cutoff_draw_id":cutoff_draw_id,"dataset_dir":dataset_dir,"model_dir":model_dir}
 
-    X_train_m, X_val_m, y_train_m, y_val_m = time_split(df_main, main_features)
-    sw_m = compute_sample_weight("balanced", y_train_m)
-    # Lighter params for VPS: n_estimators=100 to avoid OOM/timeout (match La Primitiva load)
-    clf_main = GradientBoostingClassifier(
-        n_estimators=100,
-        max_depth=5,
-        learning_rate=0.08,
-        random_state=42,
-    )
-    clf_main.fit(X_train_m, y_train_m, sample_weight=sw_m)
-    main_acc = float(clf_main.score(X_val_m, y_val_m))
-    main_model_path = os.path.join(model_dir, "el_gordo_main_gb.joblib")
-    joblib.dump({"model": clf_main, "features": main_features}, main_model_path)
+    # Mains
+    Xtrm,Xvlm,ytrm,yvlm = split(df_main, mf)
+    sw = compute_sample_weight("balanced", ytrm)
+    gbm_m = GradientBoostingClassifier(n_estimators=100,max_depth=5,learning_rate=0.08,random_state=42)
+    gbm_m.fit(Xtrm,ytrm,sample_weight=sw)
+    gbm_m_p = os.path.join(model_dir,"el_gordo_main_gb.joblib")
+    joblib.dump({"model":gbm_m,"features":mf},gbm_m_p)
 
-    X_train_c, X_val_c, y_train_c, y_val_c = time_split(df_clave, clave_features)
-    sw_c = compute_sample_weight("balanced", y_train_c)
-    clf_clave = GradientBoostingClassifier(
-        n_estimators=100,
-        max_depth=5,
-        learning_rate=0.08,
-        random_state=42,
-    )
-    clf_clave.fit(X_train_c, y_train_c, sample_weight=sw_c)
-    clave_acc = float(clf_clave.score(X_val_c, y_val_c))
-    clave_model_path = os.path.join(model_dir, "el_gordo_clave_gb.joblib")
-    joblib.dump({"model": clf_clave, "features": clave_features}, clave_model_path)
+    rf_m = RandomForestClassifier(n_estimators=100,max_depth=10,class_weight="balanced",random_state=42,n_jobs=-1)
+    rf_m.fit(Xtrm,ytrm)
+    rf_m_p = os.path.join(model_dir,"el_gordo_main_rf.joblib")
+    joblib.dump({"model":rf_m,"features":mf},rf_m_p)
 
-    results.update(
-        {
-            "main_accuracy": main_acc,
-            "clave_accuracy": clave_acc,
-            "main_model_path": main_model_path,
-            "clave_model_path": clave_model_path,
-        }
-    )
-    return results
+    Xs_m,ys_m = _build_lstm_sequences(df_main,mf,SEQ_LEN)
+    lstm_m_p = os.path.join(model_dir,"el_gordo_main_lstm.pt")
+    lstm_m_acc = _train_lstm(Xs_m,ys_m,len(mf),lstm_m_p) if len(Xs_m)>SEQ_LEN*2 else 0.0
 
+    res.update({"main_accuracy":float(gbm_m.score(Xvlm,yvlm)),
+                "main_rf_accuracy":float(rf_m.score(Xvlm,yvlm)),
+                "main_lstm_accuracy":lstm_m_acc,
+                "main_model_path":gbm_m_p,"main_rf_path":rf_m_p,"main_lstm_path":lstm_m_p})
+
+    # Clave
+    Xtrc,Xvlc,ytrc,yvlc = split(df_clave, cf)
+    sw_c = compute_sample_weight("balanced", ytrc)
+    gbm_c = GradientBoostingClassifier(n_estimators=100,max_depth=5,learning_rate=0.08,random_state=42)
+    gbm_c.fit(Xtrc,ytrc,sample_weight=sw_c)
+    gbm_c_p = os.path.join(model_dir,"el_gordo_clave_gb.joblib")
+    joblib.dump({"model":gbm_c,"features":cf},gbm_c_p)
+
+    rf_c = RandomForestClassifier(n_estimators=100,max_depth=10,class_weight="balanced",random_state=42,n_jobs=-1)
+    rf_c.fit(Xtrc,ytrc)
+    rf_c_p = os.path.join(model_dir,"el_gordo_clave_rf.joblib")
+    joblib.dump({"model":rf_c,"features":cf},rf_c_p)
+
+    Xs_c,ys_c = _build_lstm_sequences(df_clave,cf,SEQ_LEN)
+    lstm_c_p = os.path.join(model_dir,"el_gordo_clave_lstm.pt")
+    lstm_c_acc = _train_lstm(Xs_c,ys_c,len(cf),lstm_c_p) if len(Xs_c)>SEQ_LEN*2 else 0.0
+
+    res.update({"clave_accuracy":float(gbm_c.score(Xvlc,yvlc)),
+                "clave_rf_accuracy":float(rf_c.score(Xvlc,yvlc)),
+                "clave_lstm_accuracy":lstm_c_acc,
+                "clave_model_path":gbm_c_p,"clave_rf_path":rf_c_p,"clave_lstm_path":lstm_c_p})
+    return res
+
+
+# ── Inference ─────────────────────────────────────────────────────────────────
 
 def compute_el_gordo_probabilities(
     cutoff_draw_id: str | None = None,
-) -> Dict[str, object]:
-    """
-    Compute per-number probabilities for the *next* El Gordo draw
-    (mains 1..54, clave 0..9) using the trained Gradient Boosting models.
-
-    cutoff_draw_id:
-        - If provided, use the feature row with this id_sorteo as the cutoff draw.
-        - If None, use the latest row in `el_gordo_feature`.
-    """
+) -> Dict:
     client = _get_mongo_client()
     db = client[MONGO_DB]
     coll = db[FEATURE_COLLECTION]
-
     if cutoff_draw_id:
         doc = coll.find_one({"id_sorteo": str(cutoff_draw_id).strip()})
         if not doc:
             client.close()
-            raise RuntimeError(f"cutoff_draw_id {cutoff_draw_id!r} not found in el_gordo_feature")
+            raise RuntimeError(f"cutoff_draw_id {cutoff_draw_id!r} not found")
     else:
-        doc = coll.find_one(sort=[("fecha_sorteo", -1)])
+        doc = coll.find_one(sort=[("source_index", -1)])
         if not doc:
             client.close()
-            raise RuntimeError("No rows found in el_gordo_feature")
+            raise RuntimeError("No rows in el_gordo_feature")
 
     draw_id = str(doc.get("id_sorteo") or "").strip()
-    fecha = str(doc.get("fecha_sorteo") or "").strip()
-    dia = str(doc.get("dia_semana") or "").strip()
-    weekday_idx = _weekday_to_index(dia)
-
-    main_dx = list(doc.get("main_dx") or [])
-    clave_dx = list(doc.get("clave_dx") or [])
-    frequency = list(doc.get("frequency") or [])
-    gap = list(doc.get("gap") or [])
-    cur_mains = [int(x) for x in (doc.get("main_number") or []) if isinstance(x, int)]
-    cur_clave_raw = doc.get("clave")
-    cur_clave = int(cur_clave_raw) if isinstance(cur_clave_raw, int) else None
-    source_index = int(doc.get("source_index", 0))
-    total_draws = source_index + 1
-    draw_sum_mains = sum(cur_mains) if cur_mains else 0
-    draw_even_mains = sum(1 for x in cur_mains if x % 2 == 0)
-    draw_clave = cur_clave if cur_clave is not None else -1
-
-    # Build feature rows for mains (same columns as training)
-    main_rows = []
-    for n in range(MAIN_MIN, MAIN_MAX + 1):
-        idx_main = n - MAIN_MIN
-        freq_val = frequency[idx_main] if idx_main < len(frequency) else 0
-        gap_raw = gap[idx_main] if idx_main < len(gap) else None
-        gap_val = -1 if gap_raw is None else int(gap_raw)
-        freq_norm = (int(freq_val) / total_draws) if total_draws > 0 else 0.0
-        gap_cap = min(gap_val, 100) if gap_val >= 0 else -1
-        is_current_main = 0
-        if idx_main < len(main_dx):
-            try:
-                is_current_main = 1 if int(main_dx[idx_main]) != 0 else 0
-            except Exception:
-                pass
-        main_rows.append(
-            {
-                "weekday_idx": weekday_idx,
-                "number": n,
-                "freq": int(freq_val),
-                "gap": gap_val,
-                "freq_norm": freq_norm,
-                "gap_cap": gap_cap,
-                "draw_sum_mains": draw_sum_mains,
-                "draw_even_mains": draw_even_mains,
-                "draw_clave": draw_clave,
-                "is_current_main": is_current_main,
-            }
-        )
-
-    # Build feature rows for clave 0..9
-    clave_rows = []
-    clave_offset = MAIN_MAX - MAIN_MIN + 1  # 54 mains first
-    for c in range(CLAVE_MIN, CLAVE_MAX + 1):
-        idx_clave = c - CLAVE_MIN
-        freq_idx = clave_offset + idx_clave
-        gap_idx = clave_offset + idx_clave
-        freq_val = frequency[freq_idx] if freq_idx < len(frequency) else 0
-        gap_raw = gap[gap_idx] if gap_idx < len(gap) else None
-        gap_val = -1 if gap_raw is None else int(gap_raw)
-        freq_norm = (int(freq_val) / total_draws) if total_draws > 0 else 0.0
-        gap_cap = min(gap_val, 100) if gap_val >= 0 else -1
-        is_current_clave = 0
-        if idx_clave < len(clave_dx):
-            try:
-                is_current_clave = 1 if int(clave_dx[idx_clave]) != 0 else 0
-            except Exception:
-                pass
-        clave_rows.append(
-            {
-                "weekday_idx": weekday_idx,
-                "number": c,
-                "freq": int(freq_val),
-                "gap": gap_val,
-                "freq_norm": freq_norm,
-                "gap_cap": gap_cap,
-                "draw_sum_mains": draw_sum_mains,
-                "draw_even_mains": draw_even_mains,
-                "draw_clave": draw_clave,
-                "is_current_clave": is_current_clave,
-            }
-        )
-
+    fecha   = str(doc.get("fecha_sorteo") or "").strip()
+    wday    = _weekday_to_index(str(doc.get("dia_semana") or "").strip())
+    freq    = list(doc.get("frequency") or [])
+    gap     = list(doc.get("gap") or [])
+    mdx     = list(doc.get("main_dx") or [])
+    cdx     = list(doc.get("clave_dx") or [])
+    cmains  = [int(x) for x in (doc.get("main_number") or []) if isinstance(x, int)]
+    cclave_raw = doc.get("clave")
+    cclave  = int(cclave_raw) if isinstance(cclave_raw, int) else -1
+    src     = int(doc.get("source_index", 0))
+    total   = src + 1
+    sm = sum(cmains); em = sum(1 for x in cmains if x%2==0)
     client.close()
 
-    df_main = pd.DataFrame(main_rows)
-    df_clave = pd.DataFrame(clave_rows)
+    mf = ["weekday_idx","number","freq","gap","freq_norm","gap_cap",
+          "draw_sum_mains","draw_even_mains","draw_clave","is_current_main"]
+    cf = ["weekday_idx","number","freq","gap","freq_norm","gap_cap",
+          "draw_sum_mains","draw_even_mains","draw_clave","is_current_clave"]
 
-    model_dir = MODEL_DIR_DEFAULT
-    main_model_path = os.path.join(model_dir, "el_gordo_main_gb.joblib")
-    clave_model_path = os.path.join(model_dir, "el_gordo_clave_gb.joblib")
+    main_rows, clave_rows = [], []
+    for n in range(MAIN_MIN, MAIN_MAX + 1):
+        i = n - MAIN_MIN
+        fv = freq[i] if i < len(freq) else 0
+        gr = gap[i]  if i < len(gap)  else None
+        gv = -1 if gr is None else int(gr)
+        main_rows.append({"weekday_idx":wday,"number":n,"freq":int(fv),"gap":gv,
+                          "freq_norm":int(fv)/total if total else 0.0,
+                          "gap_cap":min(gv,100) if gv>=0 else -1,
+                          "draw_sum_mains":sm,"draw_even_mains":em,"draw_clave":cclave,
+                          "is_current_main":1 if (i<len(mdx) and int(mdx[i])!=0) else 0})
 
-    if not os.path.exists(main_model_path) or not os.path.exists(clave_model_path):
-        raise RuntimeError("El Gordo ML models not found. Train them first.")
+    clave_offset = MAIN_MAX - MAIN_MIN + 1
+    for c in range(CLAVE_MIN, CLAVE_MAX + 1):
+        ic = c - CLAVE_MIN; fi = clave_offset + ic
+        fv = freq[fi] if fi < len(freq) else 0
+        gr = gap[fi]  if fi < len(gap)  else None
+        gv = -1 if gr is None else int(gr)
+        clave_rows.append({"weekday_idx":wday,"number":c,"freq":int(fv),"gap":gv,
+                           "freq_norm":int(fv)/total if total else 0.0,
+                           "gap_cap":min(gv,100) if gv>=0 else -1,
+                           "draw_sum_mains":sm,"draw_even_mains":em,"draw_clave":cclave,
+                           "is_current_clave":1 if (ic<len(cdx) and int(cdx[ic])!=0) else 0})
 
-    saved_main = joblib.load(main_model_path)
-    main_model: GradientBoostingClassifier = saved_main["model"]
-    main_features: List[str] = saved_main["features"]
-    X_main = df_main[main_features].values
-    main_probs = main_model.predict_proba(X_main)[:, 1]
+    df_m = pd.DataFrame(main_rows)
+    df_c = pd.DataFrame(clave_rows)
+    mdir = MODEL_DIR_DEFAULT
 
-    saved_clave = joblib.load(clave_model_path)
-    clave_model: GradientBoostingClassifier = saved_clave["model"]
-    clave_features: List[str] = saved_clave["features"]
-    X_clave = df_clave[clave_features].values
-    clave_probs = clave_model.predict_proba(X_clave)[:, 1]
+    def _tab(path, fcols, df):
+        s = joblib.load(path)
+        return s["model"].predict_proba(df[fcols].values)[:,1].astype(np.float32)
 
-    mains = [
-        {"number": int(n), "p": float(p)}
-        for n, p in zip(df_main["number"].tolist(), main_probs.tolist())
-    ]
-    claves = [
-        {"number": int(n), "p": float(p)}
-        for n, p in zip(df_clave["number"].tolist(), clave_probs.tolist())
-    ]
-    mains.sort(key=lambda x: x["p"], reverse=True)
-    claves.sort(key=lambda x: x["p"], reverse=True)
+    gbm_m_p  = os.path.join(mdir,"el_gordo_main_gb.joblib")
+    if not os.path.exists(gbm_m_p):
+        raise RuntimeError("El Gordo models not found. Run train first.")
 
-    return {
-        "cutoff_draw_id": cutoff_draw_id or draw_id,
-        "draw_id": draw_id,
-        "fecha_sorteo": fecha,
-        "mains": mains,
-        "claves": claves,
-    }
+    p_gbm_m = _tab(gbm_m_p, mf, df_m)
+    rf_m_p  = os.path.join(mdir,"el_gordo_main_rf.joblib")
+    p_rf_m  = _tab(rf_m_p, mf, df_m) if os.path.exists(rf_m_p) else p_gbm_m
+    lstm_m_p = os.path.join(mdir,"el_gordo_main_lstm.pt")
+    if os.path.exists(lstm_m_p):
+        Xi = np.tile(df_m[mf].values.astype(np.float32),(1,SEQ_LEN,1)).reshape(len(df_m),SEQ_LEN,len(mf))
+        p_lstm_m = _predict_lstm(Xi, lstm_m_p, len(mf))
+    else:
+        p_lstm_m = p_gbm_m
+    p_main = W_GBM*p_gbm_m + W_RF*p_rf_m + W_LSTM*p_lstm_m
+    mn = list(range(MAIN_MIN, MAIN_MAX+1))
+    p_main = p_main * _ns_main_penalties(mn, p_main)
+    mx = p_main.max(); p_main = p_main/mx if mx>0 else p_main
+
+    gbm_c_p  = os.path.join(mdir,"el_gordo_clave_gb.joblib")
+    p_gbm_c  = _tab(gbm_c_p, cf, df_c)
+    rf_c_p   = os.path.join(mdir,"el_gordo_clave_rf.joblib")
+    p_rf_c   = _tab(rf_c_p, cf, df_c) if os.path.exists(rf_c_p) else p_gbm_c
+    lstm_c_p = os.path.join(mdir,"el_gordo_clave_lstm.pt")
+    if os.path.exists(lstm_c_p):
+        Xi = np.tile(df_c[cf].values.astype(np.float32),(1,SEQ_LEN,1)).reshape(len(df_c),SEQ_LEN,len(cf))
+        p_lstm_c = _predict_lstm(Xi, lstm_c_p, len(cf))
+    else:
+        p_lstm_c = p_gbm_c
+    p_clave = W_GBM*p_gbm_c + W_RF*p_rf_c + W_LSTM*p_lstm_c
+    cn = list(range(CLAVE_MIN, CLAVE_MAX+1))
+    p_clave = p_clave * _ns_clave_penalties(cn, p_clave)
+    mx = p_clave.max(); p_clave = p_clave/mx if mx>0 else p_clave
+
+    mains  = sorted([{"number":n,"p":float(p)} for n,p in zip(mn,p_main)],  key=lambda x:x["p"],reverse=True)
+    claves = sorted([{"number":c,"p":float(p)} for c,p in zip(cn,p_clave)], key=lambda x:x["p"],reverse=True)
+
+    return {"cutoff_draw_id":cutoff_draw_id or draw_id,"draw_id":draw_id,
+            "fecha_sorteo":fecha,"mains":mains,"claves":claves}
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--cutoff_draw_id",
-        type=str,
-        default="",
-        help="Optional id_sorteo; only draws up to this one (inclusive) are used.",
-    )
+    parser.add_argument("--cutoff_draw_id", type=str, default="")
     args = parser.parse_args()
-    cutoff = args.cutoff_draw_id or None
-    info = prepare_el_gordo_dataset(cutoff_draw_id=cutoff, out_dir=None)
-    print("El Gordo dataset prepared:")
-    print("  out_dir:", info["out_dir"])
-    print("  main_rows:", info["main_rows"])
-    print("  clave_rows:", info["clave_rows"])
-
+    info = prepare_el_gordo_dataset(cutoff_draw_id=args.cutoff_draw_id or None)
+    print("El Gordo dataset prepared:", info["main_rows"], "main rows,", info["clave_rows"], "clave rows")
