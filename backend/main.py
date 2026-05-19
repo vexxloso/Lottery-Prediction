@@ -4556,7 +4556,7 @@ def _euromillones_full_wheel_compare(
     aggregate prize counts and earnings per category using escrutinio premio per category.
     Save to euromillones_compare_results.
 
-    NOTE: Existence / fallback logic (real vs synthetic vs no-data) is handled
+    NOTE: Compare GET endpoints return cached or TXT-based results only (no synthetic fallback).
     by the public API endpoint; this helper always attempts to compute a fresh
     compare result from TXT and may raise if the TXT/progress is missing.
     """
@@ -4900,7 +4900,7 @@ def _la_primitiva_full_wheel_compare(
       (when complementario is set, wait for 2nd too).
     - Save summary to la_primitiva_compare_results.
 
-    NOTE: Existence / fallback logic (real vs synthetic vs no-data) is handled
+    NOTE: Compare GET endpoints return cached or TXT-based results only (no synthetic fallback).
     by the public API endpoint; this helper always attempts to compute a fresh
     compare result from TXT and may raise if the TXT/progress is missing.
     """
@@ -5134,43 +5134,14 @@ def api_euromillones_compare_full_wheel(
         out = {k: v for k, v in existing.items() if k != "_id"}
         return JSONResponse(content=_item_to_json(out))
 
-    # 2) Try to compute a fresh compare result from TXT. If TXT/progress is missing,
-    #    fall back to synthetic or empty result.
+    # 2) Compute from full-wheel TXT for pre_id (no synthetic fallback).
     try:
         result = _euromillones_full_wheel_compare(current_id_clean, pre_id_clean, db)
         return JSONResponse(content=_item_to_json(result))
-    except HTTPException as e:
-        detail_str = str(e.detail).lower() if isinstance(e.detail, str) else ""
-        # Only fall back when the problem is missing training/TXT; otherwise re-raise.
-        if e.status_code not in (400, 404) or (
-            "training progress not found" not in detail_str
-            and "full wheel file not generated" not in detail_str
-            and "full wheel file not found" not in detail_str
-        ):
-            raise
-
-    # 3) No TXT: try to return a synthetic compare result for this draw.
-    fake = coll_compare.find_one({"current_id": current_id_clean, "pre_id": "__synthetic__"})
-    if fake:
-        out = {k: v for k, v in fake.items() if k != "_id"}
-        return JSONResponse(content=_item_to_json(out))
-
-    # 4) No real, no TXT, no fake -> return empty payload so frontend can show "no data".
-    return JSONResponse(
-        content={
-            "current_id": current_id_clean,
-            "pre_id": pre_id_clean,
-            "date": None,
-            "jackpot_position": None,
-            "second_positions": [],
-            "third_positions": [],
-            "fourth_positions": [],
-            "categories": [],
-            "total_tickets": 0,
-            "earning": 0,
-            "ticket_cost": 0,
-        }
-    )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=f"Euromillones compare failed: {e}")
 
 
 @app.get("/api/el-gordo/compare/full-wheel")
@@ -5201,11 +5172,7 @@ def api_la_primitiva_compare_full_wheel(
 ):
     """
     Compare La Primitiva full wheel TXT (from pre_id) against draw result (current_id).
-    Priority:
-      1. If a real compare result exists for (current_id, pre_id), return it.
-      2. Else, try to compute a fresh result from TXT and save/return it.
-      3. If TXT/progress is missing, return a synthetic compare result for current_id if present.
-      4. If none of the above, return an empty payload.
+    Returns cached (current_id, pre_id) or computes from TXT. No synthetic fallback.
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
@@ -5220,40 +5187,14 @@ def api_la_primitiva_compare_full_wheel(
         out = {k: v for k, v in existing.items() if k != "_id"}
         return JSONResponse(content=_item_to_json(out))
 
-    # 2) Try to compute from TXT
+    # 2) Compute from full-wheel TXT for pre_id (no synthetic fallback).
     try:
         result = _la_primitiva_full_wheel_compare(current_id_clean, pre_id_clean, db)
         return JSONResponse(content=_item_to_json(result))
-    except HTTPException as e:
-        detail_str = str(e.detail).lower() if isinstance(e.detail, str) else ""
-        if e.status_code not in (400, 404) or (
-            "training progress not found" not in detail_str
-            and "full wheel file not generated" not in detail_str
-            and "full wheel file not found" not in detail_str
-        ):
-            raise
-
-    # 3) Fallback to synthetic compare for this draw
-    fake = coll_compare.find_one({"current_id": current_id_clean, "pre_id": "__synthetic__"})
-    if fake:
-        out = {k: v for k, v in fake.items() if k != "_id"}
-        return JSONResponse(content=_item_to_json(out))
-
-    # 4) No real, no TXT, no fake
-    return JSONResponse(
-        content={
-            "current_id": current_id_clean,
-            "pre_id": pre_id_clean,
-            "date": None,
-            "jackpot_position": None,
-            "pos_2th": None,
-            "pos_3th": None,
-            "pos_4th": None,
-            "pos_5th": None,
-            "categories": [],
-            "total_categories": 0,
-        }
-    )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=f"La Primitiva compare failed: {e}")
 
 @app.get("/api/el-gordo/compare/full-wheel")
 def api_el_gordo_compare_full_wheel(
