@@ -12,6 +12,7 @@ const navItems = [
 ];
 const navRightItems = [
   { to: '/ranking', label: '📊 Ranking', icon: 'ranking' },
+  { to: '/validation', label: '🔬 Validation', icon: 'validation' },
   { to: '/bot-cuentas', label: 'Cuentas bot', icon: 'user' },
 ];
 
@@ -66,6 +67,10 @@ export function Layout() {
                 {icon === 'ranking' ? (
                   <span style={{ fontSize: '0.85rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
                     📊 <span className="nav-link-label">Ranking</span>
+                  </span>
+                ) : icon === 'validation' ? (
+                  <span style={{ fontSize: '0.85rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
+                    🔬 <span className="nav-link-label">Validation</span>
                   </span>
                 ) : (
                   <UserOutlined className="nav-link-icon nav-link-icon--user" />

@@ -6,8 +6,10 @@ Goal:
 - For each lottery:
   1) Read latest feature-model row (id_sorteo + pre_id_sorteo).
   2) Ensure train pipeline is done for current_id (trains model, computes probs, builds pool).
-  3) Trigger compare/reorder for (current_id, pre_id) — saves ranking snapshot to DB.
-     (TXT full-wheel generation is optional and skipped by default in DB mode.)
+  3) Save probability snapshot to draw_probs collection.
+  4) Generate TXT full wheel file + ORC snapshot (pre-draw step).
+  5) Compare using TXT file — saves jackpot position to compare_results.
+  6) Apply online learning feedback loop (post-draw step) — updates model weights.
 
 This script uses backend public endpoints only.
 """
@@ -26,6 +28,7 @@ import requests
 POLL_SECONDS = 8
 PIPELINE_TIMEOUT_SECONDS = 45 * 60
 FULL_WHEEL_TIMEOUT_SECONDS = 90 * 60
+ONLINE_LEARNING_TIMEOUT_SECONDS = 10 * 60
 
 
 @dataclass(frozen=True)
@@ -122,16 +125,25 @@ def _wait_full_wheel_done(session: requests.Session, base_url: str, cfg: Lottery
 
 
 def _ensure_pipeline(session: requests.Session, base_url: str, cfg: LotteryConfig, cutoff_draw_id: str) -> None:
-    progress = _get_progress(session, base_url, cfg, cutoff_draw_id) or {}
-    if progress.get("rules_applied") is True:
-        print(f"[{cfg.name}] Pipeline already ready for cutoff={cutoff_draw_id}")
-        return
+    """
+    Always retrain the pipeline for cutoff_draw_id using ALL draws from the second onward.
+    We reset the pipeline_status so it retrains with the latest accumulated data,
+    rather than skipping if rules_applied is already True from a previous run.
+    """
+    # Reset the pipeline so it retrains with all draws up to current_id
+    reset_url = f"{base_url}/api/train/reset?lottery={cfg.api_slug}&delete_files=false&delete_compare=false"
+    try:
+        _request_json(session, "POST", reset_url, timeout=30)
+        print(f"[{cfg.name}] Pipeline reset for cutoff={cutoff_draw_id} (continuous retraining)")
+    except Exception as e:
+        print(f"[{cfg.name}] WARNING: pipeline reset failed ({e}), proceeding anyway")
+
     url = f"{base_url}/api/{cfg.api_slug}/train/run-pipeline?cutoff_draw_id={cutoff_draw_id}"
     data = _request_json(session, "POST", url)
     status = str(data.get("status") or "")
     print(f"[{cfg.name}] Pipeline trigger: status={status or 'unknown'} cutoff={cutoff_draw_id}")
     _wait_pipeline_done(session, base_url, cfg, cutoff_draw_id)
-    print(f"[{cfg.name}] Pipeline done")
+    print(f"[{cfg.name}] Pipeline done (retrained with all draws up to {cutoff_draw_id})")
 
 
 def _ensure_full_wheel(
@@ -165,12 +177,59 @@ def _save_draw_probs(session: requests.Session, base_url: str, cfg: LotteryConfi
         print(f"[{cfg.name}] WARNING: could not save draw_probs for {draw_id}: {e}")
 
 
-def _trigger_compare(session: requests.Session, base_url: str, cfg: LotteryConfig, current_id: str, pre_id: str) -> None:
-    """Trigger TXT-based compare. Fast — reads file sequentially until jackpot found."""
+def _trigger_compare(session: requests.Session, base_url: str, cfg: LotteryConfig, current_id: str, pre_id: str) -> Optional[int]:
+    """Trigger TXT-based compare. Fast — reads file sequentially until jackpot found.
+    Returns jackpot_position so the feedback loop can use it."""
     url = f"{base_url}/api/{cfg.api_slug}/compare/full-wheel?current_id={current_id}&pre_id={pre_id}"
     data = _request_json(session, "GET", url, timeout=600)
     jackpot = data.get("jackpot_position")
     print(f"[{cfg.name}] Compare done (current={current_id}, pre={pre_id}, jackpot={jackpot})")
+    return jackpot
+
+
+def _trigger_pre_draw_orc(session: requests.Session, base_url: str, cfg: LotteryConfig, cutoff_draw_id: str) -> None:
+    """
+    Pre-draw step: generate .orc binary model snapshot + SHA-256 hash.
+    Called AFTER the full wheel TXT is ready so the hash can cover both files.
+    """
+    url = f"{base_url}/api/online-learning/pre-draw?lottery={cfg.api_slug}&cutoff_draw_id={cutoff_draw_id}"
+    try:
+        data = _request_json(session, "POST", url, timeout=120)
+        orc_hash = data.get("orc_hash", "")
+        print(f"[{cfg.name}] Pre-draw ORC snapshot saved (draw_id={cutoff_draw_id}, hash={orc_hash[:12]}...)")
+    except Exception as e:
+        print(f"[{cfg.name}] WARNING: pre-draw ORC failed ({e}) — feedback loop will be skipped for this draw")
+
+
+def _trigger_post_draw_feedback(
+    session: requests.Session,
+    base_url: str,
+    cfg: LotteryConfig,
+    current_id: str,
+    pre_id: str,
+) -> None:
+    """
+    Post-draw feedback loop:
+      1. Load .orc snapshot from pre_id (model state before the draw)
+      2. Compute error = jackpot_position / total_tickets
+      3. Warm-start GBM with 10 more estimators weighted toward winning numbers
+      4. Save updated model + new .orc for next draw cycle
+    """
+    url = f"{base_url}/api/online-learning/post-draw?lottery={cfg.api_slug}&current_id={current_id}&pre_id={pre_id}"
+    start = time.time()
+    try:
+        data = _request_json(session, "POST", url, timeout=ONLINE_LEARNING_TIMEOUT_SECONDS)
+        error_rate = data.get("error_rate", "?")
+        new_orc = data.get("new_orc_path", "")
+        elapsed = int(time.time() - start)
+        print(
+            f"[{cfg.name}] Post-draw feedback done "
+            f"(current={current_id}, pre={pre_id}, error_rate={error_rate}, "
+            f"new_orc={new_orc!r}, elapsed={elapsed}s)"
+        )
+    except Exception as e:
+        elapsed = int(time.time() - start)
+        print(f"[{cfg.name}] WARNING: post-draw feedback failed after {elapsed}s: {e}")
 
 
 def run_once(base_url: str) -> None:
@@ -193,8 +252,16 @@ def run_once(base_url: str) -> None:
             # Step 3: generate TXT full wheel file (original system)
             _ensure_full_wheel(session, base_url, cfg, current_id, draw_date)
 
-            # Step 4: compare using TXT file — fast sequential read
+            # Step 4: pre-draw ORC snapshot — captures model state AFTER full wheel is ready
+            # so both .txt and .orc share the same SHA-256 validation hash
+            _trigger_pre_draw_orc(session, base_url, cfg, current_id)
+
+            # Step 5: compare using TXT file — fast sequential read
             _trigger_compare(session, base_url, cfg, current_id, pre_id)
+
+            # Step 6: post-draw feedback loop — update model weights based on actual draw result
+            # This is the continuous learning step: model accumulates knowledge with each draw
+            _trigger_post_draw_feedback(session, base_url, cfg, current_id, pre_id)
 
         except Exception as e:
             print(f"[{cfg.name}] ERROR: {e}")

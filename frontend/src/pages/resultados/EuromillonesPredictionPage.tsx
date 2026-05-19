@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Card, notification, Spin, Steps, Table } from 'antd';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
@@ -357,6 +357,50 @@ export function EuromillonesPredictionPage() {
                 items={stepItems}
                 className="euromillones-train-steps"
               />
+
+              {/* Model accuracy panel */}
+              {progress?.models_trained && (
+                <div style={{ margin: '12px 0 4px', padding: '10px 12px', background: 'var(--color-surface-hover, #f5f5f5)', borderRadius: 8, fontSize: '0.78rem' }}>
+                  <div style={{ fontWeight: 600, marginBottom: 6, color: 'var(--color-text-muted)' }}>🤖 Ensemble accuracy</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                    {progress.main_accuracy != null && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span>GBM mains</span>
+                        <span style={{ fontWeight: 700, color: progress.main_accuracy > 0.8 ? '#16a34a' : '#f59e0b' }}>
+                          {(progress.main_accuracy * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                    )}
+                    {(progress as any).main_rf_accuracy != null && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span>RF mains</span>
+                        <span style={{ fontWeight: 700, color: (progress as any).main_rf_accuracy > 0.8 ? '#16a34a' : '#f59e0b' }}>
+                          {((progress as any).main_rf_accuracy * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                    )}
+                    {(progress as any).main_lstm_accuracy != null && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span>LSTM mains</span>
+                        <span style={{ fontWeight: 700, color: (progress as any).main_lstm_accuracy > 0.8 ? '#16a34a' : '#f59e0b' }}>
+                          {((progress as any).main_lstm_accuracy * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                    )}
+                    {progress.star_accuracy != null && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span>GBM stars</span>
+                        <span style={{ fontWeight: 700, color: progress.star_accuracy > 0.8 ? '#16a34a' : '#f59e0b' }}>
+                          {(progress.star_accuracy * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  <Link to="/validation" style={{ display: 'block', marginTop: 8, fontSize: '0.75rem', color: '#1976D2', textDecoration: 'none', fontWeight: 600 }}>
+                    🔬 Ver dashboard de validación →
+                  </Link>
+                </div>
+              )}
               <div style={{ marginTop: 'var(--space-md)', display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)' }}>
                 <button
                   type="button"

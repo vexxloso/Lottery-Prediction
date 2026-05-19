@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Drawer, Pagination } from 'antd';
+import { Link } from 'react-router-dom';
 import {
   ResponsiveContainer,
   LineChart,
@@ -10,6 +11,8 @@ import {
   Legend,
   Line,
 } from 'recharts';
+import { AnalysisDifferenceCell } from '../../components/AnalysisDifferenceCell';
+import { differenceFromRow, formatPosition } from '../../utils/compareAnalysis';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
@@ -19,6 +22,7 @@ type AnalysisRowLaPrimitiva = {
   pre_id: string;
   special_position?: number | null;
   jackpot_position?: number | null;
+  difference_special_1st?: number | null;
   pos_1th: number;
   pos_2th: number | null;
   pos_3th: number | null;
@@ -95,6 +99,7 @@ export function LaPrimitivaAnalysisPage() {
           label: r.date || r.current_id,
           special_position: r.special_position ?? r.jackpot_position ?? null,
           pos_1th: r.pos_1th || null,
+          difference_special_1st: differenceFromRow(r),
           pos_2th: r.pos_2th,
           pos_3th: r.pos_3th,
           pos_4th: r.pos_4th,
@@ -116,7 +121,14 @@ export function LaPrimitivaAnalysisPage() {
         <h3 style={{ marginTop: 0, marginBottom: '0.75rem' }}>
           Análisis full wheel (La Primitiva)
         </h3>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+          <Link
+            to="/validation"
+            style={{ fontSize: '0.8rem', color: '#00843d', fontWeight: 600, textDecoration: 'none', padding: '4px 10px', border: '1px solid #00843d', borderRadius: 6 }}
+            title="Ver dashboard de validación completo"
+          >
+            🔬 Validación
+          </Link>
           {rows.length > 0 && (
             <button
               type="button"
@@ -207,6 +219,11 @@ export function LaPrimitivaAnalysisPage() {
         <p style={{ margin: 0 }}>No hay resultados de comparación full wheel.</p>
       )}
       {rows.length > 0 && (
+        <p style={{ margin: '0 0 0.5rem', fontSize: '0.82rem', color: '#666' }}>
+          <strong>Difference (Special − 1ª)</strong> — client validation metric (Especial minus 1ª position).
+        </p>
+      )}
+      {rows.length > 0 && (
         <div className="resultados-features-table-wrap" style={{ marginTop: 'var(--space-sm)' }}>
           <table className="resultados-features-table">
             <thead>
@@ -214,6 +231,7 @@ export function LaPrimitivaAnalysisPage() {
                 <th>Fecha</th>
                 <th>Especial pos (6 + R)</th>
                 <th>1ª pos (6)</th>
+                <th>Difference (Special − 1ª)</th>
                 <th>2ª pos (5 + C)</th>
                 <th>3ª pos (5)</th>
                 <th>4ª pos (4)</th>
@@ -224,18 +242,13 @@ export function LaPrimitivaAnalysisPage() {
               {rows.map((r) => (
                 <tr key={`${r.date}-${r.current_id}-${r.pre_id}`}>
                   <td>{r.date || '—'}</td>
-                  <td>
-                    {r.special_position != null
-                      ? Number(r.special_position).toLocaleString()
-                      : r.jackpot_position != null
-                        ? Number(r.jackpot_position).toLocaleString()
-                        : '—'}
-                  </td>
-                  <td>{r.pos_1th ? r.pos_1th.toLocaleString() : '—'}</td>
-                  <td>{r.pos_2th != null ? r.pos_2th.toLocaleString() : '—'}</td>
-                  <td>{r.pos_3th != null ? r.pos_3th.toLocaleString() : '—'}</td>
-                  <td>{r.pos_4th != null ? r.pos_4th.toLocaleString() : '—'}</td>
-                  <td>{r.pos_5th != null ? r.pos_5th.toLocaleString() : '—'}</td>
+                  <td>{formatPosition(r.special_position ?? r.jackpot_position)}</td>
+                  <td>{formatPosition(r.pos_1th)}</td>
+                  <AnalysisDifferenceCell row={r} />
+                  <td>{formatPosition(r.pos_2th)}</td>
+                  <td>{formatPosition(r.pos_3th)}</td>
+                  <td>{formatPosition(r.pos_4th)}</td>
+                  <td>{formatPosition(r.pos_5th)}</td>
                 </tr>
               ))}
             </tbody>
@@ -289,6 +302,14 @@ export function LaPrimitivaAnalysisPage() {
                   dataKey="pos_1th"
                   name="1ª (6)"
                   stroke="#dc2626"
+                  dot={false}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="difference_special_1st"
+                  name="Difference (Special − 1ª)"
+                  stroke="#7c3aed"
+                  strokeDasharray="4 4"
                   dot={false}
                 />
                 <Line

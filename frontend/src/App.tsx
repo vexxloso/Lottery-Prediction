@@ -9,6 +9,7 @@ import { SimulationPage } from './pages/SimulationPage';
 import { BotCredentialsPage } from './pages/BotCredentialsPage';
 import { DevPoolsPage } from './pages/DevPoolsPage';
 import { RankingDashboard } from './pages/RankingDashboard';
+import { ValidationDashboard } from './pages/ValidationDashboard';
 
 function App() {
   return (
@@ -26,6 +27,7 @@ function App() {
         <Route path="resultados/el-gordo" element={<ResultadosElGordo />} />
         <Route path="simulacion/:lottery/:drawId" element={<SimulationPage />} />
         <Route path="ranking" element={<RankingDashboard />} />
+        <Route path="validation" element={<ValidationDashboard />} />
         <Route path="bot-cuentas" element={<BotCredentialsPage />} />
         {/* Dev only: not linked anywhere — only if you know the URL */}
         <Route path="dev/pools" element={<DevPoolsPage />} />

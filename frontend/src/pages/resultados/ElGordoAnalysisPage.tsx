@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Drawer, Pagination } from 'antd';
+import { Link } from 'react-router-dom';
 import {
   ResponsiveContainer,
   LineChart,
@@ -10,6 +11,8 @@ import {
   Legend,
   Line,
 } from 'recharts';
+import { AnalysisDifferenceCell } from '../../components/AnalysisDifferenceCell';
+import { differenceFromRow, formatPosition } from '../../utils/compareAnalysis';
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
@@ -25,7 +28,10 @@ type AnalysisRowElGordo = {
   date: string;
   current_id: string;
   pre_id: string;
+  special_position?: number | null;
   jackpot_position: number;
+  difference_special_1st?: number | null;
+  pos_1th: number;
   pos_2th: number | null;
   pos_3th: number | null;
   pos_4th: number | null;
@@ -99,7 +105,9 @@ export function ElGordoAnalysisPage() {
         })
         .map((r) => ({
           label: r.date || r.current_id,
-          pos_1th: r.jackpot_position || null,
+          special_position: r.special_position ?? r.jackpot_position ?? null,
+          pos_1th: r.pos_1th || null,
+          difference_special_1st: differenceFromRow(r),
           pos_2th: r.pos_2th,
           pos_3th: r.pos_3th,
           pos_4th: r.pos_4th,
@@ -118,7 +126,14 @@ export function ElGordoAnalysisPage() {
         }}
       >
         <h3 style={{ marginTop: 0, marginBottom: '0.75rem' }}>Análisis full wheel (El Gordo)</h3>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+          <Link
+            to="/validation"
+            style={{ fontSize: '0.8rem', color: '#c41230', fontWeight: 600, textDecoration: 'none', padding: '4px 10px', border: '1px solid #c41230', borderRadius: 6 }}
+            title="Ver dashboard de validación completo"
+          >
+            🔬 Validación
+          </Link>
           {rows.length > 0 && (
             <button
               type="button"
@@ -216,9 +231,10 @@ export function ElGordoAnalysisPage() {
             <thead>
               <tr>
                 <th>Fecha</th>
-                <th>1ª pos (5+1)</th>
-                <th>2ª pos (5+0)</th>
-                <th>3ª pos (4+1)</th>
+                <th>Special pos (5+1)</th>
+                <th>1ª pos (5+0)</th>
+                <th>Difference (Special − 1ª)</th>
+                <th>2ª pos (4+1)</th>
                 <th>4ª pos (4+0)</th>
                 <th>5ª pos (3+1)</th>
                 <th>6ª pos (3+0)</th>
@@ -241,10 +257,12 @@ export function ElGordoAnalysisPage() {
                 return (
                   <tr key={`${r.date}-${r.current_id}-${r.pre_id}`}>
                     <td>{r.date || '—'}</td>
-                    <td>{r.jackpot_position ? r.jackpot_position.toLocaleString() : '—'}</td>
-                    <td>{r.pos_2th != null ? r.pos_2th.toLocaleString() : '—'}</td>
-                    <td>{r.pos_3th != null ? r.pos_3th.toLocaleString() : '—'}</td>
-                    <td>{r.pos_4th != null ? r.pos_4th.toLocaleString() : '—'}</td>
+                    <td>{formatPosition(r.special_position ?? r.jackpot_position)}</td>
+                    <td>{formatPosition(r.pos_1th)}</td>
+                    <AnalysisDifferenceCell row={r} />
+                    <td>{formatPosition(r.pos_2th)}</td>
+                    <td>{formatPosition(r.pos_3th)}</td>
+                    <td>{formatPosition(r.pos_4th)}</td>
                     <td>{pos5 != null ? pos5.toLocaleString() : '—'}</td>
                     <td>{pos6 != null ? pos6.toLocaleString() : '—'}</td>
                     <td>{pos7 != null ? pos7.toLocaleString() : '—'}</td>
@@ -291,10 +309,11 @@ export function ElGordoAnalysisPage() {
                 <YAxis />
                 <Tooltip />
                 <Legend />
-                <Line type="monotone" dataKey="pos_1th" name="1ª (5+1)" stroke="#dc2626" dot={false} />
-                <Line type="monotone" dataKey="pos_2th" name="2ª (5+0)" stroke="#f59e0b" dot={false} />
-                <Line type="monotone" dataKey="pos_3th" name="3ª (4+1)" stroke="#2563eb" dot={false} />
-                <Line type="monotone" dataKey="pos_4th" name="4ª (4+0)" stroke="#16a34a" dot={false} />
+                <Line type="monotone" dataKey="special_position" name="Special (5+1)" stroke="#7c3aed" dot={false} />
+                <Line type="monotone" dataKey="pos_1th" name="1ª (5+0)" stroke="#dc2626" dot={false} />
+                <Line type="monotone" dataKey="difference_special_1st" name="Difference" stroke="#9333ea" strokeDasharray="4 4" dot={false} />
+                <Line type="monotone" dataKey="pos_2th" name="2ª (4+1)" stroke="#f59e0b" dot={false} />
+                <Line type="monotone" dataKey="pos_3th" name="3ª (4+0)" stroke="#2563eb" dot={false} />
               </LineChart>
             </ResponsiveContainer>
           </div>

@@ -5904,15 +5904,22 @@ def api_euromillones_compare_analysis(
         second_positions = doc.get("second_positions") or []
         third_positions = doc.get("third_positions") or []
         fourth_positions = doc.get("fourth_positions") or []
+        special_pos = int(doc.get("jackpot_position") or 0) or None  # 5+2
+        pos_5p0 = int(third_positions[0]) if third_positions else None  # 5+0 (client "1st")
+        pos_5p1 = int(second_positions[0]) if second_positions else None  # 5+1 (client "2nd")
+        pos_4p2 = int(fourth_positions[0]) if fourth_positions else None
         rows.append(
             {
                 "date": date_str,
                 "current_id": str(doc.get("current_id") or ""),
                 "pre_id": str(doc.get("pre_id") or ""),
-                "pos_1th": int(doc.get("jackpot_position") or 0),
-                "pos_2th": int(second_positions[0]) if second_positions else None,
-                "pos_3th": int(third_positions[0]) if third_positions else None,
-                "pos_4th": int(fourth_positions[0]) if fourth_positions else None,
+                "special_position": special_pos,
+                "jackpot_position": special_pos,
+                "pos_1th": pos_5p0 if pos_5p0 and pos_5p0 > 0 else 0,
+                "pos_2th": pos_5p1,
+                "pos_3th": pos_4p2,
+                "pos_4th": None,
+                "difference_special_1st": _compare_difference(special_pos, pos_5p0),
             }
         )
     return JSONResponse(content={"rows": rows, "total": total, "skip": skip, "limit": limit})
@@ -6144,15 +6151,20 @@ def api_el_gordo_compare_analysis(
                     "count": int(c.get("count") or 0),
                 }
             )
+        jackpot_pos = int(doc.get("jackpot_position") or 0) or None
+        pos_5p0 = int(doc.get("pos_2th") or 0) if doc.get("pos_2th") is not None else None
         rows.append(
             {
                 "date": date_str,
                 "current_id": str(doc.get("current_id") or ""),
                 "pre_id": str(doc.get("pre_id") or ""),
-                "jackpot_position": int(doc.get("jackpot_position") or 0),
-                "pos_2th": int(doc.get("pos_2th") or 0) if doc.get("pos_2th") is not None else None,
-                "pos_3th": int(doc.get("pos_3th") or 0) if doc.get("pos_3th") is not None else None,
-                "pos_4th": int(doc.get("pos_4th") or 0) if doc.get("pos_4th") is not None else None,
+                "special_position": jackpot_pos,
+                "jackpot_position": jackpot_pos,
+                "pos_1th": pos_5p0 if pos_5p0 and pos_5p0 > 0 else 0,
+                "pos_2th": int(doc.get("pos_3th") or 0) if doc.get("pos_3th") is not None else None,
+                "pos_3th": int(doc.get("pos_4th") or 0) if doc.get("pos_4th") is not None else None,
+                "pos_4th": None,
+                "difference_special_1st": _compare_difference(jackpot_pos, pos_5p0),
                 "categories": norm_cats,
             }
         )
@@ -6358,18 +6370,21 @@ def api_la_primitiva_compare_analysis(
                 cat_by_key[(hm, rh)] = fp
         # Derive pos_1th..pos_5th from categories (1ª=6-0, 2ª=5-1, 3ª=5-0, 4ª=4-0, 5ª=3-0)
         positions = [cat_by_key.get(key) for key in _LA_PRIMITIVA_ANALYSIS_KEYS]
+        special_pos = int(doc.get("special_position") or 0) or None
+        pos_1th = positions[0] if positions[0] is not None and positions[0] > 0 else 0
         rows.append(
             {
                 "date": date_str,
                 "current_id": str(doc.get("current_id") or ""),
                 "pre_id": str(doc.get("pre_id") or ""),
                 "jackpot_position": int(doc.get("jackpot_position") or 0) or None,
-                "special_position": int(doc.get("special_position") or 0) or None,
-                "pos_1th": positions[0] if positions[0] is not None and positions[0] > 0 else 0,
+                "special_position": special_pos,
+                "pos_1th": pos_1th,
                 "pos_2th": positions[1] if positions[1] and positions[1] > 0 else None,
                 "pos_3th": positions[2] if positions[2] and positions[2] > 0 else None,
                 "pos_4th": positions[3] if positions[3] and positions[3] > 0 else None,
                 "pos_5th": positions[4] if positions[4] and positions[4] > 0 else None,
+                "difference_special_1st": _compare_difference(special_pos, pos_1th),
             }
         )
     return JSONResponse(content={"rows": rows, "total": total, "skip": skip, "limit": limit})
@@ -13162,4 +13177,813 @@ def api_ranking_save_draw_probs(
         "source":    source,
         "mains_count": len(mains_probs),
         "sec_count":   len(sec_probs),
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ITEM 2 — Online Learning API endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _import_online_learning():
+    """Lazy import of online_learning module (avoids circular import at startup)."""
+    import importlib
+    import sys as _sys
+    if "online_learning" not in _sys.modules:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "online_learning",
+            os.path.join(_SCRIPTS_DIR, "online_learning.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        _sys.modules["online_learning"] = mod
+        spec.loader.exec_module(mod)
+    return _sys.modules["online_learning"]
+
+
+@app.post("/api/online-learning/pre-draw")
+def api_online_learning_pre_draw(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    cutoff_draw_id: str = Query(..., description="Draw ID to snapshot model state for"),
+):
+    """
+    Pre-draw step: generate .orc binary model snapshot + SHA-256 hash.
+
+    Call this AFTER the full wheel TXT has been generated so both files
+    can share the same validation hash.
+
+    Stores metadata in MongoDB model_orc_snapshots collection.
+    Returns: {orc_path, orc_hash, txt_hash, draw_id, lottery, created_at}
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    ol = _import_online_learning()
+    valid_lotteries = list(ol.LOTTERY_CONFIG.keys())
+    if lottery not in valid_lotteries:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}. Valid: {valid_lotteries}")
+
+    try:
+        result = ol.pre_draw(lottery=lottery, cutoff_draw_id=cutoff_draw_id.strip())
+        return JSONResponse(content=result)
+    except Exception as e:
+        logger.exception("pre-draw ORC failed: %s", e)
+        raise HTTPException(500, detail=str(e))
+
+
+@app.post("/api/online-learning/post-draw")
+def api_online_learning_post_draw(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    current_id: str = Query(..., description="Draw ID of the draw that just happened"),
+    pre_id: str = Query(..., description="Draw ID used to generate the pre-draw ORC snapshot"),
+):
+    """
+    Post-draw feedback loop — continuous learning step.
+
+    Steps:
+    1. Load .orc snapshot from pre_id (model state before the draw)
+    2. Read actual draw result from MongoDB
+    3. Compute error = jackpot_position / total_tickets (0=perfect, 1=worst)
+    4. Warm-start GBM: add 10 estimators weighted toward winning numbers
+    5. Save updated model files + generate new .orc for next draw cycle
+    6. Store feedback record in model_feedback_log collection
+
+    The model accumulates knowledge with each draw WITHOUT reviewing old data —
+    knowledge is encoded in the weights.
+
+    Returns: {lottery, draw_id, pre_draw_id, error_rate, updated_at, feedback_records}
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    ol = _import_online_learning()
+    valid_lotteries = list(ol.LOTTERY_CONFIG.keys())
+    if lottery not in valid_lotteries:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}. Valid: {valid_lotteries}")
+
+    try:
+        result = ol.post_draw(
+            lottery=lottery,
+            current_id=current_id.strip(),
+            pre_id=pre_id.strip(),
+        )
+        # Remove large binary fields before returning
+        safe = {k: v for k, v in result.items() if k not in ("feedback_records",)}
+        safe["feedback_records"] = result.get("feedback_records", [])
+        return JSONResponse(content=safe)
+    except Exception as e:
+        logger.exception("post-draw feedback failed: %s", e)
+        raise HTTPException(500, detail=str(e))
+
+
+@app.post("/api/online-learning/validate-hashes")
+def api_online_learning_validate_hashes(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    draw_id: str = Query(..., description="Draw ID to validate"),
+):
+    """
+    Validate that the .orc and .txt files on disk still match their stored SHA-256 hashes.
+
+    Returns: {valid, orc_match, txt_match, details, draw_id, lottery}
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    ol = _import_online_learning()
+    valid_lotteries = list(ol.LOTTERY_CONFIG.keys())
+    if lottery not in valid_lotteries:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}. Valid: {valid_lotteries}")
+
+    try:
+        result = ol.validate_hashes(lottery=lottery, draw_id=draw_id.strip())
+        return JSONResponse(content=result)
+    except Exception as e:
+        logger.exception("validate-hashes failed: %s", e)
+        raise HTTPException(500, detail=str(e))
+
+
+@app.get("/api/online-learning/history")
+def api_online_learning_history(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    limit: int = Query(50, ge=1, le=500),
+    skip: int = Query(0, ge=0),
+):
+    """
+    Return the online learning feedback history for a lottery.
+    Sorted newest first. Used by the validation dashboard.
+
+    Returns: {lottery, total, rows: [{draw_id, pre_draw_id, error_rate, updated_at, feedback_records}]}
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db["model_feedback_log"]
+    total = coll.count_documents({"lottery": lottery})
+    rows_raw = list(
+        coll.find(
+            {"lottery": lottery},
+            projection={"_id": 0, "lottery": 1, "draw_id": 1, "pre_draw_id": 1,
+                        "error_rate": 1, "updated_at": 1, "actual_jackpot_position": 1,
+                        "feedback_records": 1, "new_orc_hash": 1},
+            sort=[("updated_at", -1)],
+            skip=skip,
+            limit=limit,
+        )
+    )
+    rows = [_item_to_json(r) for r in rows_raw]
+    return JSONResponse(content={"lottery": lottery, "total": total, "rows": rows})
+
+
+@app.get("/api/online-learning/orc-snapshots")
+def api_online_learning_orc_snapshots(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    limit: int = Query(20, ge=1, le=200),
+    skip: int = Query(0, ge=0),
+):
+    """
+    Return ORC snapshot metadata for a lottery (newest first).
+    Used by the validation dashboard hash panel.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    coll = db["model_orc_snapshots"]
+    total = coll.count_documents({"lottery": lottery})
+    rows_raw = list(
+        coll.find(
+            {"lottery": lottery},
+            projection={"_id": 0, "lottery": 1, "draw_id": 1, "orc_hash": 1,
+                        "txt_hash": 1, "orc_path": 1, "txt_path": 1, "created_at": 1},
+            sort=[("created_at", -1)],
+            skip=skip,
+            limit=limit,
+        )
+    )
+    rows = [_item_to_json(r) for r in rows_raw]
+    return JSONResponse(content={"lottery": lottery, "total": total, "rows": rows})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ITEM 3 — Validation Dashboard API endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _compare_difference(special: Any, first: Any) -> Optional[int]:
+    """Client metric: Special position minus 1st-tier position (when both are valid ranks)."""
+    try:
+        s = int(special) if special is not None else 0
+        f = int(first) if first is not None else 0
+    except (TypeError, ValueError):
+        return None
+    if s <= 0 or f <= 0:
+        return None
+    return s - f
+
+
+@app.get("/api/validation/accuracy-chart")
+def api_validation_accuracy_chart(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    """
+    Accuracy chart data per draw.
+
+    For each draw that has a compare result, returns:
+    - draw_id, draw_date
+    - jackpot_position (actual position of the winning ticket in the ranked list)
+    - total_tickets (total tickets in the wheel)
+    - error_rate (jackpot_position / total_tickets — lower is better)
+    - error_rate_pct (error_rate * 100)
+    - model_source (ml_model | freq_gap)
+
+    Sorted oldest → newest so charts render left-to-right chronologically.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    compare_map = {
+        "euromillones": (EUROMILLONES_COMPARE_RESULTS_COLLECTION, 139_838_160),
+        "el-gordo":     (EL_GORDO_COMPARE_RESULTS_COLLECTION,     31_625_100),
+        "la-primitiva": (LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION, 139_838_160),
+    }
+    if lottery not in compare_map:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    coll_name, total_tickets = compare_map[lottery]
+    coll = db[coll_name]
+
+    # Fetch compare results sorted by date ascending
+    rows_raw = list(
+        coll.find(
+            {"jackpot_position": {"$ne": None, "$exists": True}},
+            projection={"_id": 0, "current_id": 1, "pre_id": 1, "date": 1,
+                        "jackpot_position": 1, "source": 1},
+            sort=[("date", 1)],
+            limit=limit,
+        )
+    )
+
+    # Enrich with model source from draw_probs
+    draw_probs_map = {
+        "euromillones": "euromillones_draw_probs",
+        "el-gordo":     "el_gordo_draw_probs",
+        "la-primitiva": "la_primitiva_draw_probs",
+    }
+    probs_coll = db[draw_probs_map[lottery]]
+
+    rows = []
+    for r in rows_raw:
+        jp = r.get("jackpot_position")
+        if not jp:
+            continue
+        jp = int(jp)
+        error_rate = round(jp / total_tickets, 6)
+
+        # Get model source from draw_probs for the pre_id (the model used to rank)
+        pre_id = str(r.get("pre_id") or "").strip()
+        prob_doc = probs_coll.find_one({"draw_id": pre_id}, projection={"source": 1}) if pre_id else None
+        model_source = str(prob_doc.get("source") or "unknown") if prob_doc else "unknown"
+
+        rows.append({
+            "draw_id":        str(r.get("current_id") or ""),
+            "pre_id":         pre_id,
+            "draw_date":      str(r.get("date") or ""),
+            "jackpot_position": jp,
+            "total_tickets":  total_tickets,
+            "error_rate":     error_rate,
+            "error_rate_pct": round(error_rate * 100, 4),
+            "model_source":   model_source,
+        })
+
+    # Compute rolling mean error (window=5) for trend line
+    for i, row in enumerate(rows):
+        window = rows[max(0, i - 4): i + 1]
+        row["rolling_mean_error_rate"] = round(
+            sum(w["error_rate"] for w in window) / len(window), 6
+        )
+
+    total_draws = len(rows)
+    avg_error = round(sum(r["error_rate"] for r in rows) / total_draws, 6) if total_draws else 0
+    best = min(rows, key=lambda x: x["jackpot_position"]) if rows else None
+    worst = max(rows, key=lambda x: x["jackpot_position"]) if rows else None
+
+    return JSONResponse(content={
+        "lottery":      lottery,
+        "total_draws":  total_draws,
+        "total_tickets": total_tickets,
+        "avg_error_rate": avg_error,
+        "avg_error_rate_pct": round(avg_error * 100, 4),
+        "best_draw":    {"draw_id": best["draw_id"], "jackpot_position": best["jackpot_position"], "draw_date": best["draw_date"]} if best else None,
+        "worst_draw":   {"draw_id": worst["draw_id"], "jackpot_position": worst["jackpot_position"], "draw_date": worst["draw_date"]} if worst else None,
+        "rows":         rows,
+    })
+
+
+@app.get("/api/validation/mean-error-chart")
+def api_validation_mean_error_chart(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    """
+    Mean error chart: distance between predicted position and actual jackpot position.
+
+    Returns per-draw error distance and cumulative moving average,
+    so the client can visualise whether the model is improving over time.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    compare_map = {
+        "euromillones": (EUROMILLONES_COMPARE_RESULTS_COLLECTION, 139_838_160),
+        "el-gordo":     (EL_GORDO_COMPARE_RESULTS_COLLECTION,     31_625_100),
+        "la-primitiva": (LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION, 139_838_160),
+    }
+    if lottery not in compare_map:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    coll_name, total_tickets = compare_map[lottery]
+    coll = db[coll_name]
+
+    rows_raw = list(
+        coll.find(
+            {"jackpot_position": {"$ne": None, "$exists": True}},
+            projection={"_id": 0, "current_id": 1, "date": 1, "jackpot_position": 1},
+            sort=[("date", 1)],
+            limit=limit,
+        )
+    )
+
+    rows = []
+    cumulative_sum = 0.0
+    for i, r in enumerate(rows_raw):
+        jp = r.get("jackpot_position")
+        if not jp:
+            continue
+        jp = int(jp)
+        error_distance = jp  # absolute distance from position 1 (perfect)
+        cumulative_sum += error_distance
+        cumulative_mean = round(cumulative_sum / (i + 1), 2)
+
+        rows.append({
+            "draw_id":          str(r.get("current_id") or ""),
+            "draw_date":        str(r.get("date") or ""),
+            "jackpot_position": jp,
+            "error_distance":   error_distance,
+            "cumulative_mean_error": cumulative_mean,
+        })
+
+    total_draws = len(rows)
+    overall_mean = round(sum(r["error_distance"] for r in rows) / total_draws, 2) if total_draws else 0
+
+    return JSONResponse(content={
+        "lottery":       lottery,
+        "total_draws":   total_draws,
+        "total_tickets": total_tickets,
+        "overall_mean_error": overall_mean,
+        "rows":          rows,
+    })
+
+
+@app.get("/api/validation/top-tickets")
+def api_validation_top_tickets(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    draw_id: str = Query(..., description="current_id of the draw to inspect"),
+    pre_id: str = Query(..., description="pre_id used for ranking"),
+    limit: int = Query(100, ge=1, le=25000),
+):
+    """
+    Top-N tickets from the ranked full wheel for a specific draw.
+
+    Loads the probability snapshot for pre_id, scores all tickets in memory,
+    returns the top `limit` tickets with their rank, numbers, and score.
+
+    The client can use this to show the top 100 or top 1000 tickets and
+    how many numbers they hit against the actual draw result.
+
+    Also returns how many of the top-N tickets matched 0/1/2/3/4/5 main numbers.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    lottery_cfg = {
+        "euromillones": {
+            "tickets_coll":  "euromillones_tickets",
+            "draw_probs_coll": "euromillones_draw_probs",
+            "draw_coll":     "euromillones",
+            "secondary_key": "stars_probs",
+            "secondary_field": "stars",
+            "mains_field":   "mains",
+            "secondary_type": "list",
+        },
+        "el-gordo": {
+            "tickets_coll":  "el_gordo_tickets",
+            "draw_probs_coll": "el_gordo_draw_probs",
+            "draw_coll":     "el_gordo",
+            "secondary_key": "clave_probs",
+            "secondary_field": "clave",
+            "mains_field":   "mains",
+            "secondary_type": "int",
+        },
+        "la-primitiva": {
+            "tickets_coll":  "la_primitiva_tickets",
+            "draw_probs_coll": "la_primitiva_draw_probs",
+            "draw_coll":     "la_primitiva",
+            "secondary_key": "rein_probs",
+            "secondary_field": "reintegro",
+            "mains_field":   "mains",
+            "secondary_type": "int",
+        },
+    }
+    if lottery not in lottery_cfg:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    cfg = lottery_cfg[lottery]
+    draw_id_clean = draw_id.strip()
+    pre_id_clean  = pre_id.strip()
+
+    # Load probability snapshot for pre_id
+    probs_doc = db[cfg["draw_probs_coll"]].find_one({"draw_id": pre_id_clean})
+    if not probs_doc:
+        raise HTTPException(404, detail=f"No probability snapshot for pre_id={pre_id_clean!r}")
+
+    mains_probs_raw = probs_doc.get("mains_probs") or {}
+    sec_probs_raw   = probs_doc.get(cfg["secondary_key"]) or {}
+    mains_probs = {int(k): float(v) for k, v in mains_probs_raw.items()}
+    sec_probs   = {int(k): float(v) for k, v in sec_probs_raw.items()}
+
+    if not mains_probs:
+        raise HTTPException(404, detail=f"Empty probability snapshot for pre_id={pre_id_clean!r}")
+
+    # Load actual draw result to compute hits
+    draw_doc = db[cfg["draw_coll"]].find_one({"id_sorteo": draw_id_clean})
+    if not draw_doc and draw_id_clean.isdigit():
+        draw_doc = db[cfg["draw_coll"]].find_one({"id_sorteo": int(draw_id_clean)})
+
+    actual_mains: set = set()
+    actual_secondary = None
+    if draw_doc:
+        nums = draw_doc.get("numbers") or []
+        if lottery == "euromillones":
+            actual_mains = {int(x) for x in nums[:5]}
+            actual_secondary = {int(x) for x in nums[5:7]} if len(nums) >= 7 else set()
+        elif lottery == "el-gordo":
+            actual_mains = {int(x) for x in nums[:5]}
+            rein = draw_doc.get("reintegro")
+            actual_secondary = int(rein) if rein is not None else None
+        else:  # la-primitiva
+            actual_mains = {int(x) for x in nums[:6]}
+            rein = draw_doc.get("reintegro")
+            actual_secondary = int(rein) if rein is not None else None
+
+    import math
+
+    def _score(mains, secondary):
+        s = sum(math.log(max(mains_probs.get(n, 1e-6), 1e-9)) for n in mains)
+        if isinstance(secondary, list):
+            s += sum(math.log(max(sec_probs.get(x, 1e-6), 1e-9)) for x in secondary)
+        elif secondary is not None:
+            s += math.log(max(sec_probs.get(int(secondary), 1e-6), 1e-9))
+        return s
+
+    # Stream and score all tickets, keep top-limit using a min-heap
+    import heapq
+    heap = []  # (score, mains, secondary)
+
+    tickets_coll = db[cfg["tickets_coll"]]
+    proj = {"_id": 0, "mains": 1, cfg["secondary_field"]: 1}
+
+    for doc in tickets_coll.find({}, projection=proj):
+        m = doc.get("mains") or []
+        sec = doc.get(cfg["secondary_field"])
+        if not m:
+            continue
+        sc = _score(m, sec)
+        if len(heap) < limit:
+            heapq.heappush(heap, (sc, m, sec))
+        elif sc > heap[0][0]:
+            heapq.heapreplace(heap, (sc, m, sec))
+
+    # Sort descending by score
+    top = sorted(heap, key=lambda x: x[0], reverse=True)
+
+    # Build result rows with hit counts
+    hit_distribution = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0}
+    result_rows = []
+    for rank, (sc, mains, secondary) in enumerate(top, 1):
+        hits_main = sum(1 for n in mains if n in actual_mains) if actual_mains else None
+        if lottery == "euromillones":
+            hits_sec = sum(1 for n in (secondary or []) if n in (actual_secondary or set())) if actual_secondary is not None else None
+        else:
+            hits_sec = (1 if secondary == actual_secondary else 0) if actual_secondary is not None else None
+
+        if hits_main is not None:
+            hit_distribution[hits_main] = hit_distribution.get(hits_main, 0) + 1
+
+        row: dict = {
+            "rank":   rank,
+            "mains":  mains,
+            "score":  round(sc, 6),
+            "hits_main": hits_main,
+            "hits_secondary": hits_sec,
+        }
+        if lottery == "euromillones":
+            row["stars"] = secondary
+        elif lottery == "el-gordo":
+            row["clave"] = secondary
+        else:
+            row["reintegro"] = secondary
+        result_rows.append(row)
+
+    return JSONResponse(content={
+        "lottery":          lottery,
+        "draw_id":          draw_id_clean,
+        "pre_id":           pre_id_clean,
+        "total_returned":   len(result_rows),
+        "limit":            limit,
+        "has_actual_draw":  bool(draw_doc),
+        "hit_distribution": hit_distribution,
+        "rows":             result_rows,
+    })
+
+
+@app.get("/api/validation/cross-validation")
+def api_validation_cross_validation(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    limit: int = Query(50, ge=5, le=500),
+):
+    """
+    Cross-validation report per draw.
+
+    For each draw with a compare result, computes:
+    - jackpot_position rank
+    - percentile rank (what % of tickets were ranked above the jackpot)
+    - whether the jackpot was in the top 1%, 5%, 10%, 25%
+
+    Returns summary statistics and per-draw breakdown.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    compare_map = {
+        "euromillones": (EUROMILLONES_COMPARE_RESULTS_COLLECTION, 139_838_160),
+        "el-gordo":     (EL_GORDO_COMPARE_RESULTS_COLLECTION,     31_625_100),
+        "la-primitiva": (LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION, 139_838_160),
+    }
+    if lottery not in compare_map:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    coll_name, total_tickets = compare_map[lottery]
+    coll = db[coll_name]
+
+    rows_raw = list(
+        coll.find(
+            {"jackpot_position": {"$ne": None, "$exists": True}},
+            projection={"_id": 0, "current_id": 1, "pre_id": 1, "date": 1, "jackpot_position": 1},
+            sort=[("date", -1)],
+            limit=limit,
+        )
+    )
+
+    rows = []
+    in_top_1pct = in_top_5pct = in_top_10pct = in_top_25pct = 0
+
+    for r in rows_raw:
+        jp = r.get("jackpot_position")
+        if not jp:
+            continue
+        jp = int(jp)
+        percentile = round(jp / total_tickets * 100, 4)
+        top_1  = jp <= total_tickets * 0.01
+        top_5  = jp <= total_tickets * 0.05
+        top_10 = jp <= total_tickets * 0.10
+        top_25 = jp <= total_tickets * 0.25
+
+        if top_1:  in_top_1pct  += 1
+        if top_5:  in_top_5pct  += 1
+        if top_10: in_top_10pct += 1
+        if top_25: in_top_25pct += 1
+
+        rows.append({
+            "draw_id":          str(r.get("current_id") or ""),
+            "pre_id":           str(r.get("pre_id") or ""),
+            "draw_date":        str(r.get("date") or ""),
+            "jackpot_position": jp,
+            "percentile":       percentile,
+            "in_top_1pct":      top_1,
+            "in_top_5pct":      top_5,
+            "in_top_10pct":     top_10,
+            "in_top_25pct":     top_25,
+        })
+
+    n = len(rows)
+    return JSONResponse(content={
+        "lottery":       lottery,
+        "total_draws":   n,
+        "total_tickets": total_tickets,
+        "summary": {
+            "in_top_1pct":  in_top_1pct,
+            "in_top_5pct":  in_top_5pct,
+            "in_top_10pct": in_top_10pct,
+            "in_top_25pct": in_top_25pct,
+            "pct_in_top_1pct":  round(in_top_1pct  / n * 100, 1) if n else 0,
+            "pct_in_top_5pct":  round(in_top_5pct  / n * 100, 1) if n else 0,
+            "pct_in_top_10pct": round(in_top_10pct / n * 100, 1) if n else 0,
+            "pct_in_top_25pct": round(in_top_25pct / n * 100, 1) if n else 0,
+        },
+        "rows": rows,
+    })
+
+
+@app.get("/api/validation/score-vs-position")
+def api_validation_score_vs_position(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    limit: int = Query(100, ge=5, le=500),
+):
+    """
+    Scatter data: model score (X) vs actual jackpot rank (Y) per draw.
+    One point per draw — winning combination scored with pre-draw probability snapshot.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    import math
+
+    cfg_map = {
+        "euromillones": {
+            "compare": EUROMILLONES_COMPARE_RESULTS_COLLECTION,
+            "probs": "euromillones_draw_probs",
+            "draw": "euromillones",
+            "sec_key": "stars_probs",
+            "sec_list": True,
+        },
+        "el-gordo": {
+            "compare": EL_GORDO_COMPARE_RESULTS_COLLECTION,
+            "probs": "el_gordo_draw_probs",
+            "draw": "el_gordo",
+            "sec_key": "clave_probs",
+            "sec_list": False,
+        },
+        "la-primitiva": {
+            "compare": LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION,
+            "probs": "la_primitiva_draw_probs",
+            "draw": "la_primitiva",
+            "sec_key": "rein_probs",
+            "sec_list": False,
+        },
+    }
+    if lottery not in cfg_map:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    cfg = cfg_map[lottery]
+    compare_coll = db[cfg["compare"]]
+    probs_coll = db[cfg["probs"]]
+    draw_coll = db[cfg["draw"]]
+
+    docs = list(
+        compare_coll.find(
+            {"jackpot_position": {"$gt": 0}},
+            projection={"_id": 0, "current_id": 1, "pre_id": 1, "date": 1, "jackpot_position": 1},
+            sort=[("date", -1)],
+            limit=limit,
+        )
+    )
+    docs.reverse()
+
+    points: List[Dict[str, Any]] = []
+    for doc in docs:
+        current_id = str(doc.get("current_id") or "").strip()
+        pre_id = str(doc.get("pre_id") or "").strip()
+        jp = int(doc.get("jackpot_position") or 0)
+        if not current_id or not pre_id or jp <= 0:
+            continue
+
+        prob_doc = probs_coll.find_one({"draw_id": pre_id})
+        if not prob_doc:
+            continue
+        mains_probs = {int(k): float(v) for k, v in (prob_doc.get("mains_probs") or {}).items()}
+        sec_probs = {int(k): float(v) for k, v in (prob_doc.get(cfg["sec_key"]) or {}).items()}
+        if not mains_probs:
+            continue
+
+        draw_doc = draw_coll.find_one({"id_sorteo": current_id})
+        if not draw_doc and current_id.isdigit():
+            draw_doc = draw_coll.find_one({"id_sorteo": int(current_id)})
+        if not draw_doc:
+            continue
+
+        nums = draw_doc.get("numbers") or []
+        if lottery == "euromillones":
+            mains = [int(x) for x in nums[:5]]
+            sec = [int(x) for x in nums[5:7]] if len(nums) >= 7 else []
+        elif lottery == "el-gordo":
+            mains = [int(x) for x in nums[:5]]
+            rein = draw_doc.get("reintegro")
+            sec = int(rein) if rein is not None else None
+        else:
+            mains = [int(x) for x in nums[:6]]
+            rein = draw_doc.get("reintegro")
+            sec = int(rein) if rein is not None else None
+
+        score = sum(math.log(max(mains_probs.get(n, 1e-6), 1e-9)) for n in mains)
+        if cfg["sec_list"] and isinstance(sec, list):
+            score += sum(math.log(max(sec_probs.get(x, 1e-6), 1e-9)) for x in sec)
+        elif sec is not None:
+            score += math.log(max(sec_probs.get(int(sec), 1e-6), 1e-9))
+
+        points.append({
+            "draw_id": current_id,
+            "pre_id": pre_id,
+            "draw_date": str(doc.get("date") or "")[:10],
+            "score": round(score, 6),
+            "jackpot_position": jp,
+        })
+
+    return JSONResponse(content={
+        "lottery": lottery,
+        "total_points": len(points),
+        "points": points,
+    })
+
+
+@app.get("/api/validation/model-performance")
+def api_validation_model_performance(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    limit: int = Query(50, ge=5, le=500),
+):
+    """
+    Combined learning report for the validation dashboard (client spec 1.md).
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    compare_map = {
+        "euromillones": (EUROMILLONES_COMPARE_RESULTS_COLLECTION, 139_838_160),
+        "el-gordo":     (EL_GORDO_COMPARE_RESULTS_COLLECTION,     31_625_100),
+        "la-primitiva": (LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION, 139_838_160),
+    }
+    if lottery not in compare_map:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    coll_name, total_tickets = compare_map[lottery]
+    coll = db[coll_name]
+
+    rows_raw = list(
+        coll.find(
+            {"jackpot_position": {"$gt": 0}},
+            projection={"_id": 0, "current_id": 1, "pre_id": 1, "date": 1, "jackpot_position": 1},
+            sort=[("date", 1)],
+            limit=limit,
+        )
+    )
+
+    error_history: List[int] = []
+    accuracy_history: List[float] = []
+    for r in rows_raw:
+        jp = int(r.get("jackpot_position") or 0)
+        if jp <= 0:
+            continue
+        error_history.append(jp)
+        accuracy_history.append(round((1.0 - jp / total_tickets) * 100, 4))
+
+    feedback_rows = list(
+        db["model_feedback_log"].find(
+            {"lottery": lottery},
+            projection={"_id": 0, "draw_id": 1, "error_rate": 1, "updated_at": 1},
+            sort=[("updated_at", -1)],
+            limit=10,
+        )
+    )
+
+    last_validation = None
+    if rows_raw:
+        last = rows_raw[-1]
+        jp = int(last.get("jackpot_position") or 0)
+        prev_jp = int(rows_raw[-2].get("jackpot_position") or 0) if len(rows_raw) >= 2 else jp
+        improvement = ""
+        if prev_jp > 0 and jp < prev_jp:
+            improvement = f"{round((prev_jp - jp) / prev_jp * 100, 1)}% better rank"
+        elif prev_jp > 0 and jp > prev_jp:
+            improvement = f"{round((jp - prev_jp) / prev_jp * 100, 1)}% worse rank"
+        else:
+            improvement = "stable"
+        last_validation = {
+            "draw_id": str(last.get("current_id") or ""),
+            "draw_date": str(last.get("date") or "")[:10],
+            "jackpot_position": jp,
+            "mean_error": jp,
+            "error_rate_pct": round(jp / total_tickets * 100, 4),
+            "improvement_since_last": improvement,
+        }
+
+    avg_error = int(mean(error_history)) if error_history else 0
+    learning_cycles = db["model_feedback_log"].count_documents({"lottery": lottery})
+
+    return JSONResponse(content={
+        "lottery": lottery,
+        "accuracy_history": accuracy_history,
+        "error_history": error_history,
+        "total_draws": len(error_history),
+        "avg_mean_error": avg_error,
+        "learning_cycles": learning_cycles,
+        "last_validation": last_validation,
+        "recent_feedback": feedback_rows,
     })
