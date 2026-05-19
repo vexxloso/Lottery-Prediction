@@ -2399,6 +2399,13 @@ _PUBLIC_API_PATHS = {
     "/api/euromillones/compare/full-wheel",
     "/api/el-gordo/compare/full-wheel",
     "/api/la-primitiva/compare/full-wheel",
+    # Online learning + train reset (daily automation / backfill scripts)
+    "/api/online-learning/pre-draw",
+    "/api/online-learning/post-draw",
+    "/api/online-learning/validate-hashes",
+    "/api/online-learning/history",
+    "/api/online-learning/orc-snapshots",
+    "/api/train/reset",
     # DB-based reorder/compare endpoints (new architecture)
     "/api/euromillones/compare/full-wheel/reorder",
     "/api/el-gordo/compare/full-wheel/reorder",
