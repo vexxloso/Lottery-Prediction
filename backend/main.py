@@ -13257,7 +13257,7 @@ def api_online_learning_history(
 ):
     """
     Return the online learning feedback history for a lottery.
-    Sorted newest first. Used by the validation dashboard.
+    Sorted newest draw first (by draw_date, then draw_id).
 
     Returns: {lottery, total, rows: [{draw_id, pre_draw_id, error_rate, updated_at, feedback_records}]}
     """
@@ -13272,12 +13272,21 @@ def api_online_learning_history(
             projection={"_id": 0, "lottery": 1, "draw_id": 1, "pre_draw_id": 1, "draw_date": 1,
                         "error_rate": 1, "updated_at": 1, "actual_jackpot_position": 1,
                         "feedback_records": 1, "new_orc_hash": 1},
-            sort=[("updated_at", -1)],
-            skip=skip,
-            limit=limit,
         )
     )
     rows = _enrich_feedback_rows(db, lottery, [_item_to_json(r) for r in rows_raw])
+
+    def _feedback_sort_key(row: dict) -> tuple:
+        date = str(row.get("draw_date") or "").strip()[:10]
+        did = str(row.get("draw_id") or "").strip()
+        try:
+            draw_num = int(did)
+        except ValueError:
+            draw_num = 0
+        return (date, draw_num)
+
+    rows.sort(key=_feedback_sort_key, reverse=True)
+    rows = rows[skip : skip + limit]
 
     compare_coll_map = {
         "euromillones": EUROMILLONES_COMPARE_RESULTS_COLLECTION,

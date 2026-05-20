@@ -979,13 +979,19 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
       ) : (
         <>
           <div style={{ background: '#fafafa', border: '1px solid #e8e8e8', borderRadius: 8, padding: '12px 16px', marginBottom: 16 }}>
-            <div style={{ fontSize: '0.72rem', color: '#888', marginBottom: 6 }}>Error rate per feedback cycle (lower = model ranked jackpot higher)</div>
+            <div style={{ fontSize: '0.72rem', color: '#888', marginBottom: 6 }}>
+              Error rate per feedback cycle — newest draws on the right
+            </div>
             <LineChart
-              rows={[...data.rows].reverse().map(r => ({
+              rows={data.rows.slice().reverse().map(r => ({
                 ...r,
                 chart_label: r.draw_date || r.draw_id,
               })) as unknown as Record<string, number | string>[]}
               valueKey="error_rate" labelKey="chart_label" color={color} height={120} />
+          </div>
+
+          <div style={{ marginBottom: 8, fontSize: '0.8rem', color: '#888' }}>
+            Newest draws first
           </div>
 
           <div style={{ overflowX: 'auto' }}>
