@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
+import { Pagination } from 'antd';
 import {
   ResponsiveContainer,
   ScatterChart,
@@ -37,6 +38,8 @@ interface AccuracyRow {
 interface AccuracyData {
   lottery: string;
   total_draws: number;
+  total_in_db?: number;
+  limit?: number;
   total_tickets: number;
   avg_error_rate: number;
   avg_error_rate_pct: number;
@@ -56,6 +59,8 @@ interface MeanErrorRow {
 interface MeanErrorData {
   lottery: string;
   total_draws: number;
+  total_in_db?: number;
+  limit?: number;
   total_tickets: number;
   overall_mean_error: number;
   rows: MeanErrorRow[];
@@ -107,13 +112,19 @@ interface FeedbackRow {
   updated_at: string;
   actual_jackpot_position: number;
   new_orc_hash: string;
-  feedback_records: { model: string; added_estimators: number; total_estimators: number }[];
+  feedback_records: { model: string; added_estimators?: number; gradient_steps?: number; total_estimators?: number }[];
 }
 
 interface FeedbackData {
   lottery: string;
   total: number;
   rows: FeedbackRow[];
+  diagnostics?: {
+    compare_count: number;
+    orc_count: number;
+    feedback_count: number;
+    pending_feedback: number;
+  };
 }
 
 interface HashValidation {
@@ -164,6 +175,33 @@ function Badge({ ok, label }: { ok: boolean; label: string }) {
       background: ok ? '#dcfce7' : '#fee2e2',
       color: ok ? '#16a34a' : '#dc2626',
     }}>{label}</span>
+  );
+}
+
+function TablePagination({
+  page,
+  pageSize,
+  total,
+  onChange,
+}: {
+  page: number;
+  pageSize: number;
+  total: number;
+  onChange: (page: number, pageSize: number) => void;
+}) {
+  if (total <= 0) return null;
+  return (
+    <div style={{ marginTop: 12, display: 'flex', justifyContent: 'flex-end' }}>
+      <Pagination
+        current={page}
+        pageSize={pageSize}
+        total={total}
+        showSizeChanger
+        pageSizeOptions={['20', '50', '100', '200']}
+        onChange={onChange}
+        showTotal={(t, range) => `${range[0]}-${range[1]} of ${fmt(t)} draws`}
+      />
+    </div>
   );
 }
 
@@ -289,6 +327,11 @@ function AccuracySection({ lottery, color }: { lottery: LotterySlug; color: stri
   const [data, setData] = useState<AccuracyData | null>(null);
   const [loading, setLoading] = useState(false);
   const [limit, setLimit] = useState(100);
+  const [tableRows, setTableRows] = useState<AccuracyRow[]>([]);
+  const [tableTotal, setTableTotal] = useState(0);
+  const [tableLoading, setTableLoading] = useState(false);
+  const [tablePage, setTablePage] = useState(1);
+  const [tablePageSize, setTablePageSize] = useState(50);
 
   useEffect(() => {
     setLoading(true);
@@ -300,13 +343,41 @@ function AccuracySection({ lottery, color }: { lottery: LotterySlug; color: stri
       .finally(() => setLoading(false));
   }, [lottery, limit]);
 
-  if (loading) return <div style={{ color: '#888', padding: 16 }}>Loading accuracy data...</div>;
+  useEffect(() => {
+    setTableLoading(true);
+    const skip = (tablePage - 1) * tablePageSize;
+    fetch(`${API_URL}/api/validation/accuracy-rows?lottery=${lottery}&skip=${skip}&limit=${tablePageSize}`)
+      .then(r => r.json())
+      .then(d => {
+        setTableRows(d.rows ?? []);
+        setTableTotal(d.total ?? 0);
+      })
+      .catch(() => {
+        setTableRows([]);
+        setTableTotal(0);
+      })
+      .finally(() => setTableLoading(false));
+  }, [lottery, tablePage, tablePageSize]);
+
+  useEffect(() => {
+    setTablePage(1);
+  }, [lottery]);
+
+  const handleTablePageChange = (page: number, pageSize: number) => {
+    setTablePage(page);
+    setTablePageSize(pageSize);
+  };
+
+  if (loading && !data) return <div style={{ color: '#888', padding: 16 }}>Loading accuracy data...</div>;
   if (!data) return <div style={{ color: '#aaa', padding: 16 }}>No accuracy data available.</div>;
+
+  const totalInDb = data.total_in_db ?? tableTotal;
 
   return (
     <div>
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
-        <StatCard label="Draws analysed" value={fmt(data.total_draws)} color={color} />
+        <StatCard label="Draws in chart" value={fmt(data.total_draws)} color={color}
+          sub={totalInDb > data.total_draws ? `last ${data.limit ?? limit} of ${fmt(totalInDb)} in DB` : undefined} />
         <StatCard label="Avg error rate" value={data.avg_error_rate_pct.toFixed(4) + '%'}
           sub="lower = model ranked jackpot higher" color="#f59e0b" />
         <StatCard label="Best draw" value={data.best_draw ? fmt(data.best_draw.jackpot_position) : '—'}
@@ -315,11 +386,13 @@ function AccuracySection({ lottery, color }: { lottery: LotterySlug; color: stri
           sub={data.worst_draw?.draw_date ?? ''} color="#ef4444" />
       </div>
 
-      <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 12 }}>
-        <span style={{ fontSize: '0.8rem', color: '#888' }}>Jackpot position per draw (lower = better)</span>
+      <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: '0.8rem', color: '#888' }}>
+          Most recent draws — jackpot position (lower = better)
+        </span>
         <select value={limit} onChange={e => setLimit(Number(e.target.value))}
           style={{ fontSize: '0.8rem', padding: '2px 6px', borderRadius: 4, border: '1px solid #ddd' }}>
-          {[50, 100, 200, 500].map(v => <option key={v} value={v}>Last {v}</option>)}
+          {[50, 100, 200, 500].map(v => <option key={v} value={v}>Chart: last {v}</option>)}
         </select>
       </div>
 
@@ -335,7 +408,13 @@ function AccuracySection({ lottery, color }: { lottery: LotterySlug; color: stri
           valueKey="rolling_mean_error_rate" labelKey="draw_date" color={color} height={130} maxRows={limit} />
       </div>
 
-      {/* Table: last 20 draws */}
+      {/* Table: all draws via pagination */}
+      <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{ fontSize: '0.8rem', color: '#888' }}>
+          All draws — {fmt(tableTotal)} total
+        </span>
+        {tableLoading && <span style={{ fontSize: '0.78rem', color: '#aaa' }}>Loading table…</span>}
+      </div>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
           <thead>
@@ -346,7 +425,11 @@ function AccuracySection({ lottery, color }: { lottery: LotterySlug; color: stri
             </tr>
           </thead>
           <tbody>
-            {[...data.rows].reverse().slice(0, 20).map((row, i) => (
+            {tableRows.length === 0 && !tableLoading ? (
+              <tr>
+                <td colSpan={5} style={{ padding: 16, textAlign: 'center', color: '#aaa' }}>No draws found</td>
+              </tr>
+            ) : tableRows.map((row, i) => (
               <tr key={row.draw_id} style={{ background: i % 2 === 0 ? '#fff' : '#fafafa' }}>
                 <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0' }}>{row.draw_date}</td>
                 <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0', color: '#888' }}>{row.draw_id}</td>
@@ -362,6 +445,12 @@ function AccuracySection({ lottery, color }: { lottery: LotterySlug; color: stri
           </tbody>
         </table>
       </div>
+      <TablePagination
+        page={tablePage}
+        pageSize={tablePageSize}
+        total={tableTotal}
+        onChange={handleTablePageChange}
+      />
     </div>
   );
 }
@@ -371,42 +460,124 @@ function AccuracySection({ lottery, color }: { lottery: LotterySlug; color: stri
 function MeanErrorSection({ lottery, color }: { lottery: LotterySlug; color: string }) {
   const [data, setData] = useState<MeanErrorData | null>(null);
   const [loading, setLoading] = useState(false);
+  const [limit, setLimit] = useState(100);
+  const [tableRows, setTableRows] = useState<MeanErrorRow[]>([]);
+  const [tableTotal, setTableTotal] = useState(0);
+  const [tableLoading, setTableLoading] = useState(false);
+  const [tablePage, setTablePage] = useState(1);
+  const [tablePageSize, setTablePageSize] = useState(50);
 
   useEffect(() => {
     setLoading(true);
     setData(null);
-    fetch(`${API_URL}/api/validation/mean-error-chart?lottery=${lottery}&limit=100`)
+    fetch(`${API_URL}/api/validation/mean-error-chart?lottery=${lottery}&limit=${limit}`)
       .then(r => r.json())
       .then(setData)
       .catch(() => {})
       .finally(() => setLoading(false));
+  }, [lottery, limit]);
+
+  useEffect(() => {
+    setTableLoading(true);
+    const skip = (tablePage - 1) * tablePageSize;
+    fetch(`${API_URL}/api/validation/mean-error-rows?lottery=${lottery}&skip=${skip}&limit=${tablePageSize}`)
+      .then(r => r.json())
+      .then(d => {
+        setTableRows(d.rows ?? []);
+        setTableTotal(d.total ?? 0);
+      })
+      .catch(() => {
+        setTableRows([]);
+        setTableTotal(0);
+      })
+      .finally(() => setTableLoading(false));
+  }, [lottery, tablePage, tablePageSize]);
+
+  useEffect(() => {
+    setTablePage(1);
   }, [lottery]);
 
-  if (loading) return <div style={{ color: '#888', padding: 16 }}>Loading mean error data...</div>;
+  const handleTablePageChange = (page: number, pageSize: number) => {
+    setTablePage(page);
+    setTablePageSize(pageSize);
+  };
+
+  if (loading && !data) return <div style={{ color: '#888', padding: 16 }}>Loading mean error data...</div>;
   if (!data) return <div style={{ color: '#aaa', padding: 16 }}>No mean error data available.</div>;
+
+  const totalInDb = data.total_in_db ?? tableTotal;
 
   return (
     <div>
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
-        <StatCard label="Draws analysed" value={fmt(data.total_draws)} color={color} />
+        <StatCard label="Draws in chart" value={fmt(data.total_draws)} color={color}
+          sub={totalInDb > data.total_draws ? `last ${data.limit ?? limit} of ${fmt(totalInDb)} in DB` : undefined} />
         <StatCard label="Overall mean error" value={fmt(Math.round(data.overall_mean_error))}
           sub={`avg jackpot position across ${data.total_draws} draws`} color="#f59e0b" />
         <StatCard label="Total tickets" value={fmt(data.total_tickets)} color="#6366f1" />
       </div>
 
-      <div style={{ background: '#fafafa', border: '1px solid #e8e8e8', borderRadius: 8, padding: '12px 16px', marginBottom: 12 }}>
-        <div style={{ fontSize: '0.72rem', color: '#888', marginBottom: 6 }}>
-          Cumulative mean error (jackpot position) — should decrease as model learns
-        </div>
-        <LineChart rows={data.rows as unknown as Record<string, number | string>[]}
-          valueKey="cumulative_mean_error" labelKey="draw_date" color={color} height={140} />
+      <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: '0.8rem', color: '#888' }}>
+          Most recent draws — cumulative mean error (should decrease as model learns)
+        </span>
+        <select value={limit} onChange={e => setLimit(Number(e.target.value))}
+          style={{ fontSize: '0.8rem', padding: '2px 6px', borderRadius: 4, border: '1px solid #ddd' }}>
+          {[50, 100, 200, 500].map(v => <option key={v} value={v}>Chart: last {v}</option>)}
+        </select>
       </div>
 
-      <div style={{ background: '#fafafa', border: '1px solid #e8e8e8', borderRadius: 8, padding: '12px 16px' }}>
+      <div style={{ background: '#fafafa', border: '1px solid #e8e8e8', borderRadius: 8, padding: '12px 16px', marginBottom: 12 }}>
+        <div style={{ fontSize: '0.72rem', color: '#888', marginBottom: 6 }}>
+          Cumulative mean error (jackpot position)
+        </div>
+        <LineChart rows={data.rows as unknown as Record<string, number | string>[]}
+          valueKey="cumulative_mean_error" labelKey="draw_date" color={color} height={140} maxRows={limit} />
+      </div>
+
+      <div style={{ background: '#fafafa', border: '1px solid #e8e8e8', borderRadius: 8, padding: '12px 16px', marginBottom: 12 }}>
         <div style={{ fontSize: '0.72rem', color: '#888', marginBottom: 6 }}>Per-draw jackpot position (distance from rank 1)</div>
         <MiniBarChart rows={data.rows as unknown as Record<string, number | string>[]}
-          valueKey="error_distance" labelKey="draw_date" color={color} height={90} />
+          valueKey="error_distance" labelKey="draw_date" color={color} height={90} maxRows={limit} />
       </div>
+
+      <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{ fontSize: '0.8rem', color: '#888' }}>
+          All draws — {fmt(tableTotal)} total
+        </span>
+        {tableLoading && <span style={{ fontSize: '0.78rem', color: '#aaa' }}>Loading table…</span>}
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
+          <thead>
+            <tr style={{ background: '#f5f5f5' }}>
+              {['Draw date', 'Draw ID', 'Jackpot position', 'Error distance'].map(h => (
+                <th key={h} style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 600, borderBottom: '1px solid #e0e0e0' }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {tableRows.length === 0 && !tableLoading ? (
+              <tr>
+                <td colSpan={4} style={{ padding: 16, textAlign: 'center', color: '#aaa' }}>No draws found</td>
+              </tr>
+            ) : tableRows.map((row, i) => (
+              <tr key={row.draw_id} style={{ background: i % 2 === 0 ? '#fff' : '#fafafa' }}>
+                <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0' }}>{row.draw_date}</td>
+                <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0', color: '#888' }}>{row.draw_id}</td>
+                <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0', fontWeight: 600 }}>{fmt(row.jackpot_position)}</td>
+                <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0' }}>{fmt(row.error_distance)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <TablePagination
+        page={tablePage}
+        pageSize={tablePageSize}
+        total={tableTotal}
+        onChange={handleTablePageChange}
+      />
     </div>
   );
 }
@@ -711,24 +882,68 @@ function CrossValidationSection({ lottery, color }: { lottery: LotterySlug; colo
 function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color: string }) {
   const [data, setData] = useState<FeedbackData | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+
+  useEffect(() => {
+    setPage(1);
+  }, [lottery]);
 
   useEffect(() => {
     setLoading(true);
-    setData(null);
-    fetch(`${API_URL}/api/online-learning/history?lottery=${lottery}&limit=50`)
-      .then(r => r.json())
+    setError('');
+    const skip = (page - 1) * pageSize;
+    fetch(`${API_URL}/api/online-learning/history?lottery=${lottery}&skip=${skip}&limit=${pageSize}`)
+      .then(async r => {
+        const body = await r.json();
+        if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+        return body;
+      })
       .then(setData)
-      .catch(() => {})
+      .catch(e => {
+        setData(null);
+        setError(String(e.message || e));
+      })
       .finally(() => setLoading(false));
-  }, [lottery]);
+  }, [lottery, page, pageSize]);
 
-  if (loading) return <div style={{ color: '#888', padding: 16 }}>Loading learning history...</div>;
+  const handlePageChange = (nextPage: number, nextPageSize: number) => {
+    setPage(nextPage);
+    setPageSize(nextPageSize);
+  };
+
+  if (loading && !data) return <div style={{ color: '#888', padding: 16 }}>Loading learning history...</div>;
+  if (error) return <div style={{ color: '#dc2626', padding: 16 }}>Could not load learning history: {error}</div>;
   if (!data) return <div style={{ color: '#aaa', padding: 16 }}>No learning history available.</div>;
+
+  const diag = data.diagnostics;
 
   return (
     <div>
+      <p style={{ fontSize: '0.85rem', color: '#666', margin: '0 0 16px', lineHeight: 1.5 }}>
+        Each row is one <strong>post-draw feedback cycle</strong>: after a compare result exists, the system loads the
+        ORC snapshot from the pre-draw, updates GBM/LSTM weights, and logs the result here. Compare results alone do not
+        appear in this tab.
+      </p>
+
+      {diag && (
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
+          <StatCard label="Compare results" value={fmt(diag.compare_count)} color={color}
+            sub="draws with jackpot position" />
+          <StatCard label="ORC snapshots" value={fmt(diag.orc_count)} color="#6366f1"
+            sub="model state before each draw" />
+          <StatCard label="Feedback cycles" value={fmt(diag.feedback_count)} color="#22c55e"
+            sub="post-draw learning runs logged" />
+          {diag.pending_feedback > 0 && (
+            <StatCard label="Missing feedback" value={fmt(diag.pending_feedback)} color="#ef4444"
+              sub="compares without a feedback log yet" />
+          )}
+        </div>
+      )}
+
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
-        <StatCard label="Feedback cycles" value={fmt(data.total)} color={color}
+        <StatCard label="Total logged" value={fmt(data.total)} color={color}
           sub="each cycle = one draw result processed" />
         {data.rows.length > 0 && (
           <StatCard label="Latest error rate"
@@ -739,8 +954,26 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
       </div>
 
       {data.rows.length === 0 ? (
-        <div style={{ color: '#aaa', fontSize: '0.85rem', padding: '12px 0' }}>
-          No feedback cycles yet. The daily automation will run the post-draw feedback loop automatically after each draw.
+        <div style={{ color: '#555', fontSize: '0.85rem', padding: '12px 14px', background: '#fffbeb',
+          border: '1px solid #fde68a', borderRadius: 8, lineHeight: 1.6 }}>
+          <strong>No feedback cycles yet.</strong>
+          {diag && diag.compare_count > 0 ? (
+            <>
+              {' '}You have {fmt(diag.compare_count)} compare result{diag.compare_count !== 1 ? 's' : ''} but
+              {diag.orc_count === 0 ? ' no ORC snapshots' : ` only ${fmt(diag.orc_count)} ORC snapshot${diag.orc_count !== 1 ? 's' : ''}`}.
+              Post-draw feedback needs both. Run the repair script to backfill:
+              <pre style={{ margin: '10px 0 0', padding: '10px 12px', background: '#fef3c7', borderRadius: 6,
+                fontSize: '0.78rem', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
+{`python scripts/backfill_learning_pipeline.py \\
+  --lottery ${lottery} \\
+  --mode repair-feedback \\
+  --last 24 \\
+  --api-url http://localhost:8000`}
+              </pre>
+            </>
+          ) : (
+            <> The daily automation runs post-draw feedback after each full pipeline (train → wheel → compare → feedback).</>
+          )}
         </div>
       ) : (
         <>
@@ -774,7 +1007,12 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
                       {(row.feedback_records || []).map(fr => (
                         <span key={fr.model} style={{ fontSize: '0.7rem', background: '#e0f2fe', color: '#0369a1',
                           borderRadius: 4, padding: '1px 5px', marginRight: 4 }}>
-                          {fr.model.split('_').slice(-2).join('_')} +{fr.added_estimators}
+                          {fr.model.split('_').slice(-2).join('_')}
+                          {'added_estimators' in fr && fr.added_estimators != null
+                            ? ` +${fr.added_estimators}`
+                            : 'gradient_steps' in fr && fr.gradient_steps != null
+                              ? ` grad×${fr.gradient_steps}`
+                              : ''}
                         </span>
                       ))}
                     </td>
@@ -786,6 +1024,7 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
               </tbody>
             </table>
           </div>
+          <TablePagination page={page} pageSize={pageSize} total={data.total} onChange={handlePageChange} />
         </>
       )}
     </div>

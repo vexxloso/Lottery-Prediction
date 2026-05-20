@@ -13278,7 +13278,29 @@ def api_online_learning_history(
         )
     )
     rows = [_item_to_json(r) for r in rows_raw]
-    return JSONResponse(content={"lottery": lottery, "total": total, "rows": rows})
+
+    compare_coll_map = {
+        "euromillones": EUROMILLONES_COMPARE_RESULTS_COLLECTION,
+        "el-gordo":     EL_GORDO_COMPARE_RESULTS_COLLECTION,
+        "la-primitiva": LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION,
+    }
+    compare_filt = {"jackpot_position": {"$gt": 0}, "pre_id": {"$ne": "__synthetic__"}}
+    compare_count = db[compare_coll_map[lottery]].count_documents(compare_filt)
+    orc_count = db["model_orc_snapshots"].count_documents({"lottery": lottery})
+
+    return JSONResponse(content={
+        "lottery": lottery,
+        "total": total,
+        "rows": rows,
+        "skip": skip,
+        "limit": limit,
+        "diagnostics": {
+            "compare_count": compare_count,
+            "orc_count": orc_count,
+            "feedback_count": total,
+            "pending_feedback": max(0, compare_count - total),
+        },
+    })
 
 
 @app.get("/api/online-learning/orc-snapshots")
@@ -13327,6 +13349,55 @@ def _compare_difference(special: Any, first: Any) -> Optional[int]:
     return s - f
 
 
+def _compare_rows_filter(*, exclude_synthetic: bool = True) -> dict:
+    filt: dict = {"jackpot_position": {"$ne": None, "$exists": True}}
+    if exclude_synthetic:
+        filt["pre_id"] = {"$ne": "__synthetic__"}
+    return filt
+
+
+def _fetch_recent_compare_rows(
+    coll,
+    limit: int,
+    projection: dict,
+    *,
+    exclude_synthetic: bool = True,
+) -> tuple[list, int]:
+    """
+    Return the most recent `limit` compare rows, oldest→newest (for charts).
+    Also returns total count of valid rows in the collection.
+    """
+    filt = _compare_rows_filter(exclude_synthetic=exclude_synthetic)
+    total_in_db = coll.count_documents(filt)
+    rows_raw = list(
+        coll.find(filt, projection=projection)
+        .sort([("date", -1), ("current_id", -1)])
+        .limit(limit)
+    )
+    rows_raw.reverse()
+    return rows_raw, total_in_db
+
+
+def _fetch_compare_rows_page(
+    coll,
+    skip: int,
+    limit: int,
+    projection: dict,
+    *,
+    exclude_synthetic: bool = True,
+) -> tuple[list, int]:
+    """Paginated compare rows, newest→oldest (for tables)."""
+    filt = _compare_rows_filter(exclude_synthetic=exclude_synthetic)
+    total_in_db = coll.count_documents(filt)
+    rows_raw = list(
+        coll.find(filt, projection=projection)
+        .sort([("date", -1), ("current_id", -1)])
+        .skip(skip)
+        .limit(limit)
+    )
+    return rows_raw, total_in_db
+
+
 @app.get("/api/validation/accuracy-chart")
 def api_validation_accuracy_chart(
     lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
@@ -13343,7 +13414,7 @@ def api_validation_accuracy_chart(
     - error_rate_pct (error_rate * 100)
     - model_source (ml_model | freq_gap)
 
-    Sorted oldest → newest so charts render left-to-right chronologically.
+    Sorted oldest → newest (most recent `limit` draws in DB).
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
@@ -13359,15 +13430,12 @@ def api_validation_accuracy_chart(
     coll_name, total_tickets = compare_map[lottery]
     coll = db[coll_name]
 
-    # Fetch compare results sorted by date ascending
-    rows_raw = list(
-        coll.find(
-            {"jackpot_position": {"$ne": None, "$exists": True}},
-            projection={"_id": 0, "current_id": 1, "pre_id": 1, "date": 1,
-                        "jackpot_position": 1, "source": 1},
-            sort=[("date", 1)],
-            limit=limit,
-        )
+    # Most recent compare rows (not the oldest in DB)
+    rows_raw, total_in_db = _fetch_recent_compare_rows(
+        coll,
+        limit,
+        projection={"_id": 0, "current_id": 1, "pre_id": 1, "date": 1,
+                    "jackpot_position": 1, "source": 1},
     )
 
     # Enrich with model source from draw_probs
@@ -13417,6 +13485,8 @@ def api_validation_accuracy_chart(
     return JSONResponse(content={
         "lottery":      lottery,
         "total_draws":  total_draws,
+        "total_in_db":  total_in_db,
+        "limit":        limit,
         "total_tickets": total_tickets,
         "avg_error_rate": avg_error,
         "avg_error_rate_pct": round(avg_error * 100, 4),
@@ -13436,6 +13506,7 @@ def api_validation_mean_error_chart(
 
     Returns per-draw error distance and cumulative moving average,
     so the client can visualise whether the model is improving over time.
+    Uses the most recent `limit` compare rows (oldest→newest in response).
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
@@ -13451,13 +13522,10 @@ def api_validation_mean_error_chart(
     coll_name, total_tickets = compare_map[lottery]
     coll = db[coll_name]
 
-    rows_raw = list(
-        coll.find(
-            {"jackpot_position": {"$ne": None, "$exists": True}},
-            projection={"_id": 0, "current_id": 1, "date": 1, "jackpot_position": 1},
-            sort=[("date", 1)],
-            limit=limit,
-        )
+    rows_raw, total_in_db = _fetch_recent_compare_rows(
+        coll,
+        limit,
+        projection={"_id": 0, "current_id": 1, "date": 1, "jackpot_position": 1},
     )
 
     rows = []
@@ -13485,8 +13553,127 @@ def api_validation_mean_error_chart(
     return JSONResponse(content={
         "lottery":       lottery,
         "total_draws":   total_draws,
+        "total_in_db":   total_in_db,
+        "limit":         limit,
         "total_tickets": total_tickets,
         "overall_mean_error": overall_mean,
+        "rows":          rows,
+    })
+
+
+@app.get("/api/validation/accuracy-rows")
+def api_validation_accuracy_rows(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=500),
+):
+    """Paginated accuracy table rows (newest draw first)."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    compare_map = {
+        "euromillones": (EUROMILLONES_COMPARE_RESULTS_COLLECTION, 139_838_160),
+        "el-gordo":     (EL_GORDO_COMPARE_RESULTS_COLLECTION,     31_625_100),
+        "la-primitiva": (LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION, 139_838_160),
+    }
+    if lottery not in compare_map:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    coll_name, total_tickets = compare_map[lottery]
+    coll = db[coll_name]
+
+    rows_raw, total_in_db = _fetch_compare_rows_page(
+        coll,
+        skip,
+        limit,
+        projection={"_id": 0, "current_id": 1, "pre_id": 1, "date": 1,
+                    "jackpot_position": 1, "source": 1},
+    )
+
+    draw_probs_map = {
+        "euromillones": "euromillones_draw_probs",
+        "el-gordo":     "el_gordo_draw_probs",
+        "la-primitiva": "la_primitiva_draw_probs",
+    }
+    probs_coll = db[draw_probs_map[lottery]]
+
+    rows = []
+    for r in rows_raw:
+        jp = r.get("jackpot_position")
+        if not jp:
+            continue
+        jp = int(jp)
+        error_rate = round(jp / total_tickets, 6)
+        pre_id = str(r.get("pre_id") or "").strip()
+        prob_doc = probs_coll.find_one({"draw_id": pre_id}, projection={"source": 1}) if pre_id else None
+        model_source = str(prob_doc.get("source") or "unknown") if prob_doc else "unknown"
+        rows.append({
+            "draw_id":          str(r.get("current_id") or ""),
+            "pre_id":           pre_id,
+            "draw_date":        str(r.get("date") or ""),
+            "jackpot_position": jp,
+            "total_tickets":    total_tickets,
+            "error_rate":       error_rate,
+            "error_rate_pct":   round(error_rate * 100, 4),
+            "model_source":     model_source,
+        })
+
+    return JSONResponse(content={
+        "lottery":     lottery,
+        "total":       total_in_db,
+        "skip":        skip,
+        "limit":       limit,
+        "rows":        rows,
+    })
+
+
+@app.get("/api/validation/mean-error-rows")
+def api_validation_mean_error_rows(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=500),
+):
+    """Paginated mean-error table rows (newest draw first)."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+
+    compare_map = {
+        "euromillones": (EUROMILLONES_COMPARE_RESULTS_COLLECTION, 139_838_160),
+        "el-gordo":     (EL_GORDO_COMPARE_RESULTS_COLLECTION,     31_625_100),
+        "la-primitiva": (LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION, 139_838_160),
+    }
+    if lottery not in compare_map:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    coll_name, total_tickets = compare_map[lottery]
+    coll = db[coll_name]
+
+    rows_raw, total_in_db = _fetch_compare_rows_page(
+        coll,
+        skip,
+        limit,
+        projection={"_id": 0, "current_id": 1, "date": 1, "jackpot_position": 1},
+    )
+
+    rows = []
+    for r in rows_raw:
+        jp = r.get("jackpot_position")
+        if not jp:
+            continue
+        jp = int(jp)
+        rows.append({
+            "draw_id":          str(r.get("current_id") or ""),
+            "draw_date":        str(r.get("date") or ""),
+            "jackpot_position": jp,
+            "error_distance":   jp,
+        })
+
+    return JSONResponse(content={
+        "lottery":       lottery,
+        "total":         total_in_db,
+        "skip":          skip,
+        "limit":         limit,
+        "total_tickets": total_tickets,
         "rows":          rows,
     })
 
