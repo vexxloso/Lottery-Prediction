@@ -13269,7 +13269,7 @@ def api_online_learning_history(
     rows_raw = list(
         coll.find(
             {"lottery": lottery},
-            projection={"_id": 0, "lottery": 1, "draw_id": 1, "pre_draw_id": 1,
+            projection={"_id": 0, "lottery": 1, "draw_id": 1, "pre_draw_id": 1, "draw_date": 1,
                         "error_rate": 1, "updated_at": 1, "actual_jackpot_position": 1,
                         "feedback_records": 1, "new_orc_hash": 1},
             sort=[("updated_at", -1)],
@@ -13277,7 +13277,7 @@ def api_online_learning_history(
             limit=limit,
         )
     )
-    rows = [_item_to_json(r) for r in rows_raw]
+    rows = _enrich_feedback_rows(db, lottery, [_item_to_json(r) for r in rows_raw])
 
     compare_coll_map = {
         "euromillones": EUROMILLONES_COMPARE_RESULTS_COLLECTION,
@@ -13347,6 +13347,75 @@ def _compare_difference(special: Any, first: Any) -> Optional[int]:
     if s <= 0 or f <= 0:
         return None
     return s - f
+
+
+def _compare_coll_for_lottery(lottery: str) -> str:
+    return {
+        "euromillones": EUROMILLONES_COMPARE_RESULTS_COLLECTION,
+        "el-gordo":     EL_GORDO_COMPARE_RESULTS_COLLECTION,
+        "la-primitiva": LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION,
+    }[lottery]
+
+
+def _draw_coll_for_lottery(lottery: str) -> str:
+    return {
+        "euromillones": "euromillones",
+        "el-gordo":     "el_gordo",
+        "la-primitiva": "la_primitiva",
+    }[lottery]
+
+
+def _resolve_draw_dates(db, lottery: str, draw_ids: list[str]) -> dict[str, str]:
+    """Map draw_id → YYYY-MM-DD from compare results, then draw collections."""
+    ids = [str(d).strip() for d in draw_ids if str(d).strip()]
+    if not ids:
+        return {}
+
+    dates: dict[str, str] = {}
+    compare_coll = db[_compare_coll_for_lottery(lottery)]
+    for doc in compare_coll.find(
+        {"current_id": {"$in": ids}},
+        projection={"current_id": 1, "date": 1},
+    ):
+        did = str(doc.get("current_id") or "").strip()
+        d = str(doc.get("date") or "").strip()[:10]
+        if did and d and did not in dates:
+            dates[did] = d
+
+    missing = [d for d in ids if d not in dates]
+    if missing:
+        draw_coll = db[_draw_coll_for_lottery(lottery)]
+        id_variants: list = list(missing)
+        for d in missing:
+            if d.isdigit():
+                id_variants.append(int(d))
+        for doc in draw_coll.find(
+            {"id_sorteo": {"$in": id_variants}},
+            projection={"id_sorteo": 1, "fecha_sorteo": 1},
+        ):
+            did = str(doc.get("id_sorteo") or "").strip()
+            d = str(doc.get("fecha_sorteo") or "").strip()[:10]
+            if did and d:
+                dates[did] = d
+
+    return dates
+
+
+def _enrich_feedback_rows(db, lottery: str, rows: list[dict]) -> list[dict]:
+    missing_ids = [
+        str(r.get("draw_id") or "").strip()
+        for r in rows
+        if not str(r.get("draw_date") or "").strip()[:10]
+    ]
+    lookup = _resolve_draw_dates(db, lottery, missing_ids)
+    enriched: list[dict] = []
+    for r in rows:
+        row = dict(r)
+        did = str(row.get("draw_id") or "").strip()
+        existing = str(row.get("draw_date") or "").strip()[:10]
+        row["draw_date"] = existing or lookup.get(did, "")
+        enriched.append(row)
+    return enriched
 
 
 def _compare_rows_filter(*, exclude_synthetic: bool = True) -> dict:
@@ -14079,13 +14148,15 @@ def api_validation_model_performance(
         error_history.append(jp)
         accuracy_history.append(round((1.0 - jp / total_tickets) * 100, 4))
 
-    feedback_rows = list(
-        db["model_feedback_log"].find(
+    feedback_rows = _enrich_feedback_rows(
+        db,
+        lottery,
+        [_item_to_json(r) for r in db["model_feedback_log"].find(
             {"lottery": lottery},
-            projection={"_id": 0, "draw_id": 1, "error_rate": 1, "updated_at": 1},
+            projection={"_id": 0, "draw_id": 1, "draw_date": 1, "error_rate": 1, "updated_at": 1},
             sort=[("updated_at", -1)],
             limit=10,
-        )
+        )],
     )
 
     last_validation = None

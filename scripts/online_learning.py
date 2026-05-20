@@ -442,6 +442,8 @@ def apply_feedback_loop(
     actual_jackpot_position: int,
     actual_main_numbers: List[int],
     actual_secondary: "int | List[int]",
+    *,
+    draw_date: str | None = None,
 ) -> dict:
     """
     Online learning feedback loop — updates ALL three model types after each draw.
@@ -529,10 +531,12 @@ def apply_feedback_loop(
     new_orc = generate_orc(lottery, draw_id)
 
     # 7. Store feedback record
+    draw_date_str = str(draw_date or "").strip()[:10] or None
     feedback_doc = {
         "lottery":                 lottery,
         "draw_id":                 draw_id,
         "pre_draw_id":             pre_draw_id,
+        "draw_date":               draw_date_str,
         "actual_jackpot_position": actual_jackpot_position,
         "actual_main_numbers":     actual_main_numbers,
         "actual_secondary":        sec_list,
@@ -618,6 +622,8 @@ def post_draw(lottery: str, current_id: str, pre_id: str) -> dict:
     if not draw_doc:
         raise RuntimeError(f"Draw document not found for {lottery} id_sorteo={current_id}")
 
+    draw_date = str(compare.get("date") or draw_doc.get("fecha_sorteo") or "").strip()[:10] or None
+
     numbers = draw_doc.get("numbers") or []
     reintegro = draw_doc.get("reintegro")
 
@@ -638,6 +644,7 @@ def post_draw(lottery: str, current_id: str, pre_id: str) -> dict:
         actual_jackpot_position=jackpot_pos,
         actual_main_numbers=main_numbers,
         actual_secondary=secondary,
+        draw_date=draw_date,
     )
     return result
 

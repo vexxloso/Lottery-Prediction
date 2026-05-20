@@ -108,6 +108,7 @@ interface OrcData {
 interface FeedbackRow {
   draw_id: string;
   pre_draw_id: string;
+  draw_date?: string;
   error_rate: number;
   updated_at: string;
   actual_jackpot_position: number;
@@ -948,7 +949,7 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
         {data.rows.length > 0 && (
           <StatCard label="Latest error rate"
             value={(data.rows[0].error_rate * 100).toFixed(4) + '%'}
-            sub={`draw ${data.rows[0].draw_id} — ${data.rows[0].updated_at?.slice(0, 10)}`}
+            sub={`${data.rows[0].draw_date || data.rows[0].draw_id} · draw ${data.rows[0].draw_id}`}
             color={data.rows[0].error_rate < 0.1 ? '#22c55e' : '#f59e0b'} />
         )}
       </div>
@@ -980,15 +981,18 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
           <div style={{ background: '#fafafa', border: '1px solid #e8e8e8', borderRadius: 8, padding: '12px 16px', marginBottom: 16 }}>
             <div style={{ fontSize: '0.72rem', color: '#888', marginBottom: 6 }}>Error rate per feedback cycle (lower = model ranked jackpot higher)</div>
             <LineChart
-              rows={[...data.rows].reverse() as unknown as Record<string, number | string>[]}
-              valueKey="error_rate" labelKey="draw_id" color={color} height={120} />
+              rows={[...data.rows].reverse().map(r => ({
+                ...r,
+                chart_label: r.draw_date || r.draw_id,
+              })) as unknown as Record<string, number | string>[]}
+              valueKey="error_rate" labelKey="chart_label" color={color} height={120} />
           </div>
 
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem' }}>
               <thead>
                 <tr style={{ background: '#f5f5f5' }}>
-                  {['Draw ID', 'Pre-draw ID', 'Jackpot position', 'Error rate', 'Models updated', 'Updated at'].map(h => (
+                  {['Draw date', 'Draw ID', 'Pre-draw ID', 'Jackpot position', 'Error rate', 'Models updated', 'Updated at'].map(h => (
                     <th key={h} style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 600, borderBottom: '1px solid #e0e0e0' }}>{h}</th>
                   ))}
                 </tr>
@@ -996,7 +1000,8 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
               <tbody>
                 {data.rows.map((row, i) => (
                   <tr key={row.draw_id} style={{ background: i % 2 === 0 ? '#fff' : '#fafafa' }}>
-                    <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0', fontWeight: 600 }}>{row.draw_id}</td>
+                    <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0' }}>{row.draw_date || '—'}</td>
+                    <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0', fontWeight: 600, color: '#888' }}>{row.draw_id}</td>
                     <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0', color: '#888' }}>{row.pre_draw_id}</td>
                     <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0' }}>{fmt(row.actual_jackpot_position)}</td>
                     <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0',
@@ -1102,7 +1107,7 @@ interface ModelPerformanceData {
     error_rate_pct: number;
     improvement_since_last: string;
   } | null;
-  recent_feedback: { draw_id: string; error_rate: number; updated_at: string }[];
+  recent_feedback: { draw_id: string; draw_date?: string; error_rate: number; updated_at: string }[];
 }
 
 function ModelPerformanceSection({ lottery, color }: { lottery: LotterySlug; color: string }) {
@@ -1156,7 +1161,7 @@ function ModelPerformanceSection({ lottery, color }: { lottery: LotterySlug; col
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
             <thead>
               <tr style={{ background: '#f5f5f5' }}>
-                {['Draw ID', 'Error rate', 'Updated'].map(h => (
+                {['Draw date', 'Draw ID', 'Error rate', 'Updated'].map(h => (
                   <th key={h} style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 600 }}>{h}</th>
                 ))}
               </tr>
@@ -1164,7 +1169,8 @@ function ModelPerformanceSection({ lottery, color }: { lottery: LotterySlug; col
             <tbody>
               {data.recent_feedback.map((row, i) => (
                 <tr key={row.draw_id} style={{ background: i % 2 === 0 ? '#fff' : '#fafafa' }}>
-                  <td style={{ padding: '5px 10px' }}>{row.draw_id}</td>
+                  <td style={{ padding: '5px 10px' }}>{row.draw_date || '—'}</td>
+                  <td style={{ padding: '5px 10px', color: '#888' }}>{row.draw_id}</td>
                   <td style={{ padding: '5px 10px' }}>{(row.error_rate * 100).toFixed(4)}%</td>
                   <td style={{ padding: '5px 10px', color: '#888' }}>{row.updated_at}</td>
                 </tr>
