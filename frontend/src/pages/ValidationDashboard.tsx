@@ -992,7 +992,7 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem' }}>
               <thead>
                 <tr style={{ background: '#f5f5f5' }}>
-                  {['Draw date', 'Draw ID', 'Pre-draw ID', 'Jackpot position', 'Error rate', 'Models updated', 'Updated at'].map(h => (
+                  {['Draw date', 'Draw ID', 'Pre-draw ID', 'Jackpot position', 'Error rate', 'Models updated'].map(h => (
                     <th key={h} style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 600, borderBottom: '1px solid #e0e0e0' }}>{h}</th>
                   ))}
                 </tr>
@@ -1020,9 +1020,6 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
                               : ''}
                         </span>
                       ))}
-                    </td>
-                    <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0', color: '#888' }}>
-                      {row.updated_at?.slice(0, 16)}
                     </td>
                   </tr>
                 ))}
