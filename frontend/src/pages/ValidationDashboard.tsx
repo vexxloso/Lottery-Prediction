@@ -420,7 +420,7 @@ function AccuracySection({ lottery, color }: { lottery: LotterySlug; color: stri
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
           <thead>
             <tr style={{ background: '#f5f5f5' }}>
-              {['Draw date', 'Draw ID', 'Jackpot position', 'Error rate %', 'Model source'].map(h => (
+              {['Draw date', 'Draw ID', 'Jackpot position', 'Error rate %'].map(h => (
                 <th key={h} style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 600, borderBottom: '1px solid #e0e0e0' }}>{h}</th>
               ))}
             </tr>
@@ -428,7 +428,7 @@ function AccuracySection({ lottery, color }: { lottery: LotterySlug; color: stri
           <tbody>
             {tableRows.length === 0 && !tableLoading ? (
               <tr>
-                <td colSpan={5} style={{ padding: 16, textAlign: 'center', color: '#aaa' }}>No draws found</td>
+                <td colSpan={4} style={{ padding: 16, textAlign: 'center', color: '#aaa' }}>No draws found</td>
               </tr>
             ) : tableRows.map((row, i) => (
               <tr key={row.draw_id} style={{ background: i % 2 === 0 ? '#fff' : '#fafafa' }}>
@@ -437,9 +437,6 @@ function AccuracySection({ lottery, color }: { lottery: LotterySlug; color: stri
                 <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0', fontWeight: 600 }}>{fmt(row.jackpot_position)}</td>
                 <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0', color: row.error_rate_pct < 10 ? '#22c55e' : '#f59e0b' }}>
                   {row.error_rate_pct.toFixed(4)}%
-                </td>
-                <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0' }}>
-                  <Badge ok={row.model_source === 'ml_model'} label={row.model_source === 'ml_model' ? '🤖 ML' : '📊 Freq/Gap'} />
                 </td>
               </tr>
             ))}
