@@ -36,6 +36,10 @@ type AnalysisRowElGordo = {
   pos_2th: number | null;
   pos_3th: number | null;
   pos_4th: number | null;
+  pos_5th?: number | null;
+  pos_6th?: number | null;
+  pos_7th?: number | null;
+  pos_8th?: number | null;
   categories: CategoryRow[];
 };
 
@@ -232,30 +236,19 @@ export function ElGordoAnalysisPage() {
             <thead>
               <tr>
                 <th>Fecha</th>
-                <th>Special pos (5+1)</th>
-                <th>1ª pos (5+0)</th>
+                <th>1ª (5+1)</th>
+                <th>2ª (5+0)</th>
                 <th>Diff vs prev draw (Special)</th>
-                <th>2ª pos (4+1)</th>
-                <th>4ª pos (4+0)</th>
-                <th>5ª pos (3+1)</th>
-                <th>6ª pos (3+0)</th>
-                <th>7ª pos (2+1)</th>
-                <th>8ª pos (2+0)</th>
+                <th>3ª (4+1)</th>
+                <th>4ª (4+0)</th>
+                <th>5ª (3+1)</th>
+                <th>6ª (3+0)</th>
+                <th>7ª (2+1)</th>
+                <th>8ª (2+0)</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => {
-                const getFirstPos = (hm: number, hc: number): number | null => {
-                  const cat = (r.categories || []).find(
-                    (c) => c.main_hits === hm && c.clave_hit === hc && c.first_position > 0,
-                  );
-                  return cat ? cat.first_position : null;
-                };
-                const pos5 = getFirstPos(3, 1);
-                const pos6 = getFirstPos(3, 0);
-                const pos7 = getFirstPos(2, 1);
-                const pos8 = getFirstPos(2, 0);
-                return (
+              {rows.map((r) => (
                   <tr key={`${r.date}-${r.current_id}-${r.pre_id}`}>
                     <td>{r.date || '—'}</td>
                     <td>{formatPosition(r.special_position ?? r.jackpot_position)}</td>
@@ -264,13 +257,12 @@ export function ElGordoAnalysisPage() {
                     <td>{formatPosition(r.pos_2th)}</td>
                     <td>{formatPosition(r.pos_3th)}</td>
                     <td>{formatPosition(r.pos_4th)}</td>
-                    <td>{pos5 != null ? pos5.toLocaleString() : '—'}</td>
-                    <td>{pos6 != null ? pos6.toLocaleString() : '—'}</td>
-                    <td>{pos7 != null ? pos7.toLocaleString() : '—'}</td>
-                    <td>{pos8 != null ? pos8.toLocaleString() : '—'}</td>
+                    <td>{formatPosition(r.pos_5th)}</td>
+                    <td>{formatPosition(r.pos_6th)}</td>
+                    <td>{formatPosition(r.pos_7th)}</td>
+                    <td>{formatPosition(r.pos_8th)}</td>
                   </tr>
-                );
-              })}
+                ))}
             </tbody>
           </table>
         </div>

@@ -4833,6 +4833,10 @@ def _el_gordo_full_wheel_compare(
     second_first: Optional[int] = None
     third_first: Optional[int] = None
     fourth_first: Optional[int] = None
+    # All official tiers through 8ª + reintegro (must scan past jackpot — lower tiers appear later in TXT).
+    _tier_keys: Tuple[Tuple[int, int], ...] = (
+        (5, 1), (5, 0), (4, 1), (4, 0), (3, 1), (3, 0), (2, 1), (2, 0), (0, 1),
+    )
 
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -4856,20 +4860,16 @@ def _el_gordo_full_wheel_compare(
             if key not in category_first_pos:
                 category_first_pos[key] = position
             category_counts[key] = category_counts.get(key, 0) + 1
-            if hits_main == 5 and hits_clave == 1:
-                if jackpot_position is None:
-                    jackpot_position = position
-                # Stop scanning once jackpot (5+clave) is found, like Euromillones.
+            if hits_main == 5 and hits_clave == 1 and jackpot_position is None:
+                jackpot_position = position
+            elif hits_main == 5 and hits_clave == 0 and second_first is None:
+                second_first = position
+            elif hits_main == 4 and hits_clave == 1 and third_first is None:
+                third_first = position
+            elif hits_main == 4 and hits_clave == 0 and fourth_first is None:
+                fourth_first = position
+            if jackpot_position is not None and all(k in category_first_pos for k in _tier_keys):
                 break
-            elif hits_main == 5 and hits_clave == 0:
-                if second_first is None:
-                    second_first = position
-            elif hits_main == 4 and hits_clave == 1:
-                if third_first is None:
-                    third_first = position
-            elif hits_main == 4 and hits_clave == 0:
-                if fourth_first is None:
-                    fourth_first = position
 
     if jackpot_position is None:
         raise HTTPException(
@@ -4890,6 +4890,9 @@ def _el_gordo_full_wheel_compare(
             }
         )
 
+    fifth_first = category_first_pos.get((3, 1))
+    sixth_first = category_first_pos.get((3, 0))
+
     result = {
         "current_id": current_id,
         "date": draw.get("fecha_sorteo"),
@@ -4898,6 +4901,8 @@ def _el_gordo_full_wheel_compare(
         "pos_2th": second_first,
         "pos_3th": third_first,
         "pos_4th": fourth_first,
+        "pos_5th": fifth_first,
+        "pos_6th": sixth_first,
         "categories": categories_out,
         "total_categories": len(categories_out),
     }
@@ -4908,6 +4913,66 @@ def _el_gordo_full_wheel_compare(
     )
     print(f"[el-gordo-compare] saved result for current_id={current_id} pre_id={pre_id_clean} jackpot_position={jackpot_position}", flush=True)
     return result
+
+
+def _el_gordo_category_first_position(
+    categories: List[Dict[str, Any]], main_hits: int, clave_hit: int
+) -> Optional[int]:
+    for c in categories or []:
+        if not isinstance(c, dict):
+            continue
+        if int(c.get("main_hits") or 0) == main_hits and int(c.get("clave_hit") or 0) == clave_hit:
+            fp = int(c.get("first_position") or 0)
+            return fp if fp > 0 else None
+    return None
+
+
+def _el_gordo_analysis_row_from_compare_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Map el_gordo_compare_results doc to analysis table fields (1ª–8ª tiers)."""
+    date_str = (doc.get("date") or "")[:10]
+    cats: List[Dict[str, Any]] = []
+    for c in doc.get("categories") or []:
+        if not isinstance(c, dict):
+            continue
+        cats.append(
+            {
+                "category": str(c.get("category") or ""),
+                "main_hits": int(c.get("main_hits") or 0),
+                "clave_hit": int(c.get("clave_hit") or 0),
+                "first_position": int(c.get("first_position") or 0),
+                "count": int(c.get("count") or 0),
+            }
+        )
+
+    def _pos(field: str, hm: int, hc: int) -> Optional[int]:
+        raw = doc.get(field)
+        if raw is not None:
+            try:
+                v = int(raw)
+                if v > 0:
+                    return v
+            except (TypeError, ValueError):
+                pass
+        return _el_gordo_category_first_position(cats, hm, hc)
+
+    jackpot_pos = int(doc.get("jackpot_position") or 0) or None
+    pos_5p0 = _pos("pos_2th", 5, 0)
+    return {
+        "date": date_str,
+        "current_id": str(doc.get("current_id") or ""),
+        "pre_id": str(doc.get("pre_id") or ""),
+        "special_position": jackpot_pos,
+        "jackpot_position": jackpot_pos,
+        "pos_1th": pos_5p0 if pos_5p0 else 0,
+        "pos_2th": _pos("pos_3th", 4, 1),
+        "pos_3th": _pos("pos_4th", 4, 0),
+        "pos_4th": _pos("pos_5th", 3, 1),
+        "pos_5th": _pos("pos_6th", 3, 0),
+        "pos_6th": _el_gordo_category_first_position(cats, 2, 1),
+        "pos_7th": _el_gordo_category_first_position(cats, 2, 0),
+        "pos_8th": _el_gordo_category_first_position(cats, 0, 1),
+        "categories": cats,
+    }
 
 
 def _la_primitiva_full_wheel_compare(
@@ -5413,7 +5478,7 @@ def api_el_gordo_compare_reorder(
     if len(main_draw) != 5 or clave_draw is None:
         raise HTTPException(400, detail="El Gordo draw main/clave numbers missing or invalid")
 
-    draw_date = (draw.get("fecha_sorteo") or "")[:10] or None
+    draw_date = (draw_doc.get("fecha_sorteo") or "")[:10] or None
 
     # 3) Load probabilities from training progress
     coll_progress = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
@@ -6086,6 +6151,8 @@ def api_el_gordo_compare_analysis(
                 "pos_2th": 1,
                 "pos_3th": 1,
                 "pos_4th": 1,
+                "pos_5th": 1,
+                "pos_6th": 1,
                 "categories": 1,
             },
         )
@@ -6095,38 +6162,7 @@ def api_el_gordo_compare_analysis(
     )
     rows: List[Dict[str, Any]] = []
     for doc in cursor:
-        date_str = (doc.get("date") or "")[:10]
-        cats = doc.get("categories") or []
-        # Ensure categories is always a list of dicts
-        norm_cats: List[Dict[str, Any]] = []
-        for c in cats:
-            if not isinstance(c, dict):
-                continue
-            norm_cats.append(
-                {
-                    "category": str(c.get("category") or ""),
-                    "main_hits": int(c.get("main_hits") or 0),
-                    "clave_hit": int(c.get("clave_hit") or 0),
-                    "first_position": int(c.get("first_position") or 0),
-                    "count": int(c.get("count") or 0),
-                }
-            )
-        jackpot_pos = int(doc.get("jackpot_position") or 0) or None
-        pos_5p0 = int(doc.get("pos_2th") or 0) if doc.get("pos_2th") is not None else None
-        rows.append(
-            {
-                "date": date_str,
-                "current_id": str(doc.get("current_id") or ""),
-                "pre_id": str(doc.get("pre_id") or ""),
-                "special_position": jackpot_pos,
-                "jackpot_position": jackpot_pos,
-                "pos_1th": pos_5p0 if pos_5p0 and pos_5p0 > 0 else 0,
-                "pos_2th": int(doc.get("pos_3th") or 0) if doc.get("pos_3th") is not None else None,
-                "pos_3th": int(doc.get("pos_4th") or 0) if doc.get("pos_4th") is not None else None,
-                "pos_4th": None,
-                "categories": norm_cats,
-            }
-        )
+        rows.append(_el_gordo_analysis_row_from_compare_doc(doc))
     rows = _annotate_special_draw_differences(rows, order="desc")
     return JSONResponse(content={"rows": rows, "total": total, "skip": skip, "limit": limit})
 
@@ -6225,20 +6261,6 @@ def api_el_gordo_compare_analysis_graph(
                 alloc[y] += 1
                 remaining -= 1
 
-    def _extract_row(doc: Dict[str, Any]) -> Dict[str, Any]:
-        date_str = (doc.get("date") or "")[:10]
-        special = int(doc.get("jackpot_position") or 0)
-        return {
-            "date": date_str,
-            "current_id": str(doc.get("current_id") or ""),
-            "pre_id": str(doc.get("pre_id") or ""),
-            "special_position": special,
-            "jackpot_position": special,
-            "pos_2th": int(doc.get("pos_2th") or 0) if doc.get("pos_2th") is not None else None,
-            "pos_3th": int(doc.get("pos_3th") or 0) if doc.get("pos_3th") is not None else None,
-            "pos_4th": int(doc.get("pos_4th") or 0) if doc.get("pos_4th") is not None else None,
-        }
-
     out_rows: List[Dict[str, Any]] = []
     for y in years_sorted:
         year_docs = by_year[y]
@@ -6262,10 +6284,10 @@ def api_el_gordo_compare_analysis_graph(
                 chosen.append(year_docs[idx])
 
         for doc in chosen:
-            out_rows.append(_extract_row(doc))
+            out_rows.append(_el_gordo_analysis_row_from_compare_doc(doc))
 
     last_doc = docs[-1]
-    last_row = _extract_row(last_doc)
+    last_row = _el_gordo_analysis_row_from_compare_doc(last_doc)
     already_has_last = any(
         (row.get("date") or "")[:10] == (last_row.get("date") or "")[:10]
         and str(row.get("current_id") or "") == str(last_row.get("current_id") or "")

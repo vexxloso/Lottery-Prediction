@@ -438,7 +438,7 @@ export function SimulationPage() {
     };
   }, [slug, view, compareEuromillonesSource, searchParams, drawId, API_URL]);
 
-  // El Gordo compare: load aggregated full-wheel result (from backend compare endpoint) when needed
+  // El Gordo compare: cached TXT compare (GET) or reorder when ready (POST may return 202)
   useEffect(() => {
     if (
       slug !== 'el-gordo' ||
@@ -452,66 +452,74 @@ export function SimulationPage() {
     const prevId = searchParams.get('prev_id')?.trim();
     if (!drawId || !prevId) {
       setElGordoFullWheelResult(null);
-      setElGordoFullWheelError('');
+      setElGordoFullWheelError(
+        !drawId ? '' : 'Falta prev_id: vuelve a la tabla de predicción y pulsa comparar de nuevo.',
+      );
       setElGordoFullWheelLoading(false);
       return;
     }
     let cancelled = false;
-    setElGordoFullWheelLoading(true);
-    setElGordoFullWheelError('');
     const params = new URLSearchParams({ current_id: drawId, pre_id: prevId });
-    const url = `${API_URL}/api/el-gordo/compare/full-wheel/reorder?${params.toString()}`;
-    const maxRetries = 3;
-    const retryDelayMs = 2000;
+    const reorderUrl = `${API_URL}/api/el-gordo/compare/full-wheel/reorder?${params.toString()}`;
+    const fallbackUrl = `${API_URL}/api/el-gordo/compare/full-wheel?${params.toString()}`;
 
-    const tryFetch = (attempt: number): Promise<void> =>
-      fetch(url, { method: 'POST' })
-        .then((res) => res.json().then((data) => ({ ok: res.ok, status: res.status, data })))
-        .then(({ ok, status, data }) => {
-          if (cancelled) return;
-          if (status === 503 && attempt < maxRetries) {
-            setElGordoFullWheelError(
-              `Calculando comparación full wheel El Gordo… (${attempt + 1}/${maxRetries})`,
-            );
-            return new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs)).then(() =>
-              tryFetch(attempt + 1),
-            );
-          }
-          if (!ok || data.detail) {
-            setElGordoFullWheelResult(null);
-            setElGordoFullWheelError(
-              status === 503
-                ? 'Calculando comparación full wheel El Gordo…'
-                : typeof data.detail === 'string'
-                  ? data.detail
-                  : 'Error al cargar comparación full wheel El Gordo',
-            );
-            return;
-          }
-          setElGordoFullWheelResult({
-            current_id: String(data.current_id ?? drawId),
-            date: data.date ?? null,
-            pre_id: String(data.pre_id ?? prevId),
-            jackpot_position:
-              typeof data.jackpot_position === 'number' ? data.jackpot_position : null,
-            pos_2th: typeof data.pos_2th === 'number' ? data.pos_2th : null,
-            pos_3th: typeof data.pos_3th === 'number' ? data.pos_3th : null,
-            pos_4th: typeof data.pos_4th === 'number' ? data.pos_4th : null,
-            categories: Array.isArray(data.categories) ? data.categories : [],
-          });
-        })
-        .catch((e) => {
-          if (cancelled) return;
+    const applyComparePayload = (data: Record<string, unknown>) => {
+      setElGordoFullWheelResult({
+        current_id: String(data.current_id ?? drawId),
+        date: (data.date as string | null) ?? null,
+        pre_id: String(data.pre_id ?? prevId),
+        jackpot_position:
+          typeof data.jackpot_position === 'number' ? data.jackpot_position : null,
+        pos_2th: typeof data.pos_2th === 'number' ? data.pos_2th : null,
+        pos_3th: typeof data.pos_3th === 'number' ? data.pos_3th : null,
+        pos_4th: typeof data.pos_4th === 'number' ? data.pos_4th : null,
+        categories: Array.isArray(data.categories) ? data.categories : [],
+      });
+    };
+
+    const load = async () => {
+      setElGordoFullWheelLoading(true);
+      setElGordoFullWheelError('');
+      try {
+        const reorderRes = await fetch(reorderUrl, { method: 'POST' });
+        const reorderData = (await reorderRes.json().catch(() => ({}))) as Record<string, unknown>;
+        if (
+          !cancelled &&
+          reorderRes.ok &&
+          !reorderData.detail &&
+          typeof reorderData.jackpot_position === 'number'
+        ) {
+          applyComparePayload(reorderData);
+          return;
+        }
+
+        const cmpRes = await fetch(fallbackUrl, { method: 'GET' });
+        const cmpData = (await cmpRes.json().catch(() => ({}))) as Record<string, unknown> & {
+          detail?: string;
+        };
+        if (cancelled) return;
+        if (!cmpRes.ok || cmpData.detail) {
           setElGordoFullWheelResult(null);
           setElGordoFullWheelError(
-            e instanceof Error ? e.message : 'Error al cargar comparación full wheel El Gordo',
+            typeof cmpData.detail === 'string'
+              ? cmpData.detail
+              : 'Error al cargar comparación full wheel El Gordo',
           );
-        })
-        .finally(() => {
-          if (!cancelled) setElGordoFullWheelLoading(false);
-        });
+          return;
+        }
+        applyComparePayload(cmpData);
+      } catch (e) {
+        if (cancelled) return;
+        setElGordoFullWheelResult(null);
+        setElGordoFullWheelError(
+          e instanceof Error ? e.message : 'Error al cargar comparación full wheel El Gordo',
+        );
+      } finally {
+        if (!cancelled) setElGordoFullWheelLoading(false);
+      }
+    };
 
-    void tryFetch(0);
+    void load();
     return () => {
       cancelled = true;
     };

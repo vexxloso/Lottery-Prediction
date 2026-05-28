@@ -335,7 +335,8 @@ def compare_el_gordo_from_db(
     scored.sort(key=lambda x: x[0], reverse=True)
 
     category_stats: Dict[Tuple[int,int], Tuple[int,int]] = {}
-    jackpot_position = pos_2th = pos_3th = pos_4th = None
+    jackpot_position = pos_2th = pos_3th = pos_4th = pos_5th = pos_6th = None
+    _tier_keys = ((5, 1), (5, 0), (4, 1), (4, 0), (3, 1), (3, 0), (2, 1), (2, 0), (0, 1))
 
     for rank, (_, mains, clave) in enumerate(scored, 1):
         hits_main  = sum(1 for n in mains if n in main_set)
@@ -343,10 +344,20 @@ def compare_el_gordo_from_db(
         key = (hits_main, hits_clave)
         prev_count, prev_first = category_stats.get(key, (0, rank))
         category_stats[key] = (prev_count + 1, prev_first if prev_count > 0 else rank)
-        if hits_main == 5 and hits_clave == 1: jackpot_position = rank; break
-        if hits_main == 5 and hits_clave == 0 and pos_2th is None: pos_2th = rank
-        if hits_main == 4 and hits_clave == 1 and pos_3th is None: pos_3th = rank
-        if hits_main == 4 and hits_clave == 0 and pos_4th is None: pos_4th = rank
+        if hits_main == 5 and hits_clave == 1 and jackpot_position is None:
+            jackpot_position = rank
+        elif hits_main == 5 and hits_clave == 0 and pos_2th is None:
+            pos_2th = rank
+        elif hits_main == 4 and hits_clave == 1 and pos_3th is None:
+            pos_3th = rank
+        elif hits_main == 4 and hits_clave == 0 and pos_4th is None:
+            pos_4th = rank
+        elif hits_main == 3 and hits_clave == 1 and pos_5th is None:
+            pos_5th = rank
+        elif hits_main == 3 and hits_clave == 0 and pos_6th is None:
+            pos_6th = rank
+        if jackpot_position is not None and all(k in category_stats for k in _tier_keys):
+            break
 
     if jackpot_position is None:
         raise ValueError("Jackpot not found")
@@ -358,6 +369,7 @@ def compare_el_gordo_from_db(
     return {"current_id": current_id, "date": draw_date, "pre_id": pre_id,
             "jackpot_position": jackpot_position,
             "pos_2th": pos_2th, "pos_3th": pos_3th, "pos_4th": pos_4th,
+            "pos_5th": pos_5th, "pos_6th": pos_6th,
             "categories": categories_out, "source": "db"}
 
 
