@@ -21,7 +21,8 @@ type AnalysisRow = {
   current_id: string;
   pre_id: string;
   special_position?: number | null;
-  difference_special_1st?: number | null;
+  prev_special_position?: number | null;
+  difference_prev_special?: number | null;
   pos_1th: number;
   pos_2th: number | null;
   pos_3th: number | null;
@@ -93,7 +94,7 @@ export function EuromillonesAnalysisPage() {
           label: r.date || r.current_id,
           special_position: r.special_position ?? null,
           pos_1th: r.pos_1th || null,
-          difference_special_1st: differenceFromRow(r),
+          difference_prev_special: differenceFromRow(r),
           pos_2th: r.pos_2th,
           pos_3th: r.pos_3th,
           pos_4th: r.pos_4th,
@@ -215,7 +216,7 @@ export function EuromillonesAnalysisPage() {
                 <th>Fecha</th>
                 <th>Special pos (5+2)</th>
                 <th>1ª pos (5+0)</th>
-                <th>Difference (Special − 1ª)</th>
+                <th>Diff vs prev draw (Special)</th>
                 <th>2ª pos (5+1)</th>
                 <th>3ª pos (4+2)</th>
               </tr>
@@ -272,7 +273,7 @@ export function EuromillonesAnalysisPage() {
                 <Legend />
                 <Line type="monotone" dataKey="special_position" name="Special (5+2)" stroke="#7c3aed" dot={false} />
                 <Line type="monotone" dataKey="pos_1th" name="1ª (5+0)" stroke="#dc2626" dot={false} />
-                <Line type="monotone" dataKey="difference_special_1st" name="Difference" stroke="#9333ea" strokeDasharray="4 4" dot={false} />
+                <Line type="monotone" dataKey="difference_prev_special" name="Special diff vs prev draw" stroke="#9333ea" strokeDasharray="4 4" dot={false} />
                 <Line type="monotone" dataKey="pos_2th" name="2ª (5+1)" stroke="#f59e0b" dot={false} />
                 <Line type="monotone" dataKey="pos_3th" name="3ª (4+2)" stroke="#2563eb" dot={false} />
               </LineChart>

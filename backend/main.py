@@ -5867,9 +5867,9 @@ def api_euromillones_compare_analysis(
                 "pos_2th": pos_5p1,
                 "pos_3th": pos_4p2,
                 "pos_4th": None,
-                "difference_special_1st": _compare_difference(special_pos, pos_5p0),
             }
         )
+    rows = _annotate_special_draw_differences(rows, order="desc")
     return JSONResponse(content={"rows": rows, "total": total, "skip": skip, "limit": limit})
 
 
@@ -6005,6 +6005,7 @@ def api_euromillones_compare_analysis_graph(
                     "date": date_str,
                     "current_id": str(doc.get("current_id") or ""),
                     "pre_id": str(doc.get("pre_id") or ""),
+                    "special_position": int(doc.get("jackpot_position") or 0),
                     "pos_1th": int(doc.get("jackpot_position") or 0),
                     "pos_2th": int(second_positions[0]) if second_positions else None,
                     "pos_3th": int(third_positions[0]) if third_positions else None,
@@ -6029,6 +6030,7 @@ def api_euromillones_compare_analysis_graph(
                 "date": last_date_str,
                 "current_id": str(last_doc.get("current_id") or ""),
                 "pre_id": str(last_doc.get("pre_id") or ""),
+                "special_position": int(last_doc.get("jackpot_position") or 0),
                 "pos_1th": int(last_doc.get("jackpot_position") or 0),
                 "pos_2th": int(last_second_positions[0]) if last_second_positions else None,
                 "pos_3th": int(last_third_positions[0]) if last_third_positions else None,
@@ -6038,6 +6040,7 @@ def api_euromillones_compare_analysis_graph(
 
     # Ensure final rows are sorted chronologically.
     out_rows.sort(key=lambda r: (r.get("date") or "", r.get("current_id") or ""))
+    out_rows = _annotate_special_draw_differences(out_rows, order="asc")
 
     return JSONResponse(content={"rows": out_rows, "total": total})
 
@@ -6112,10 +6115,10 @@ def api_el_gordo_compare_analysis(
                 "pos_2th": int(doc.get("pos_3th") or 0) if doc.get("pos_3th") is not None else None,
                 "pos_3th": int(doc.get("pos_4th") or 0) if doc.get("pos_4th") is not None else None,
                 "pos_4th": None,
-                "difference_special_1st": _compare_difference(jackpot_pos, pos_5p0),
                 "categories": norm_cats,
             }
         )
+    rows = _annotate_special_draw_differences(rows, order="desc")
     return JSONResponse(content={"rows": rows, "total": total, "skip": skip, "limit": limit})
 
 
@@ -6215,11 +6218,13 @@ def api_el_gordo_compare_analysis_graph(
 
     def _extract_row(doc: Dict[str, Any]) -> Dict[str, Any]:
         date_str = (doc.get("date") or "")[:10]
+        special = int(doc.get("jackpot_position") or 0)
         return {
             "date": date_str,
             "current_id": str(doc.get("current_id") or ""),
             "pre_id": str(doc.get("pre_id") or ""),
-            "jackpot_position": int(doc.get("jackpot_position") or 0),
+            "special_position": special,
+            "jackpot_position": special,
             "pos_2th": int(doc.get("pos_2th") or 0) if doc.get("pos_2th") is not None else None,
             "pos_3th": int(doc.get("pos_3th") or 0) if doc.get("pos_3th") is not None else None,
             "pos_4th": int(doc.get("pos_4th") or 0) if doc.get("pos_4th") is not None else None,
@@ -6261,6 +6266,7 @@ def api_el_gordo_compare_analysis_graph(
         out_rows.append(last_row)
 
     out_rows.sort(key=lambda r: (r.get("date") or "", r.get("current_id") or ""))
+    out_rows = _annotate_special_draw_differences(out_rows, order="asc")
 
     return JSONResponse(content={"rows": out_rows, "total": total})
 
@@ -6332,9 +6338,9 @@ def api_la_primitiva_compare_analysis(
                 "pos_3th": positions[2] if positions[2] and positions[2] > 0 else None,
                 "pos_4th": positions[3] if positions[3] and positions[3] > 0 else None,
                 "pos_5th": positions[4] if positions[4] and positions[4] > 0 else None,
-                "difference_special_1st": _compare_difference(special_pos, pos_1th),
             }
         )
+    rows = _annotate_special_draw_differences(rows, order="desc")
     return JSONResponse(content={"rows": rows, "total": total, "skip": skip, "limit": limit})
 
 
@@ -6443,10 +6449,12 @@ def api_la_primitiva_compare_analysis_graph(
                 fp = int(c.get("first_position") or 0)
                 cat_by_key[(hm, rh)] = fp
         positions = [cat_by_key.get(key) for key in _LA_PRIMITIVA_ANALYSIS_KEYS]
+        special_pos = int(doc.get("special_position") or 0) or None
         return {
             "date": date_str,
             "current_id": str(doc.get("current_id") or ""),
             "pre_id": str(doc.get("pre_id") or ""),
+            "special_position": special_pos,
             "pos_1th": positions[0] if positions[0] is not None and positions[0] > 0 else 0,
             "pos_2th": positions[1] if positions[1] and positions[1] > 0 else None,
             "pos_3th": positions[2] if positions[2] and positions[2] > 0 else None,
@@ -6491,6 +6499,7 @@ def api_la_primitiva_compare_analysis_graph(
         out_rows.append(last_row)
 
     out_rows.sort(key=lambda r: (r.get("date") or "", r.get("current_id") or ""))
+    out_rows = _annotate_special_draw_differences(out_rows, order="asc")
 
     return JSONResponse(content={"rows": out_rows, "total": total})
 
@@ -13356,6 +13365,44 @@ def _compare_difference(special: Any, first: Any) -> Optional[int]:
     if s <= 0 or f <= 0:
         return None
     return s - f
+
+
+def _annotate_special_draw_differences(
+    rows: List[Dict[str, Any]],
+    *,
+    order: str,
+) -> List[Dict[str, Any]]:
+    """
+    Add cross-draw difference fields based on Special position.
+
+    order='desc' means rows are newest -> oldest.
+    order='asc' means rows are oldest -> newest.
+    """
+    if not rows:
+        return rows
+
+    if order == "desc":
+        for i, row in enumerate(rows):
+            curr = row.get("special_position")
+            nxt = rows[i + 1].get("special_position") if i + 1 < len(rows) else None
+            row["prev_special_position"] = nxt if isinstance(nxt, int) and nxt > 0 else None
+            row["difference_prev_special"] = (
+                int(curr) - int(nxt)
+                if isinstance(curr, int) and curr > 0 and isinstance(nxt, int) and nxt > 0
+                else None
+            )
+    else:
+        prev = None
+        for row in rows:
+            curr = row.get("special_position")
+            row["prev_special_position"] = prev if isinstance(prev, int) and prev > 0 else None
+            row["difference_prev_special"] = (
+                int(curr) - int(prev)
+                if isinstance(curr, int) and curr > 0 and isinstance(prev, int) and prev > 0
+                else None
+            )
+            prev = curr if isinstance(curr, int) and curr > 0 else None
+    return rows
 
 
 def _compare_coll_for_lottery(lottery: str) -> str:

@@ -1,4 +1,4 @@
-/** Client metric: gap between top prize rank and 1st secondary tier rank. */
+/** Client metric: gap between Special position and previous draw's Special position. */
 
 export function formatPosition(value: number | null | undefined): string {
   if (value == null || value <= 0) return '—';
@@ -7,19 +7,19 @@ export function formatPosition(value: number | null | undefined): string {
 
 export function computeDifference(
   special: number | null | undefined,
-  first: number | null | undefined,
+  prevSpecial: number | null | undefined,
 ): number | null {
-  if (special == null || first == null || special <= 0 || first <= 0) return null;
-  return special - first;
+  if (special == null || prevSpecial == null || special <= 0 || prevSpecial <= 0) return null;
+  return special - prevSpecial;
 }
 
 export function differenceFromRow(row: {
-  difference_special_1st?: number | null;
+  difference_prev_special?: number | null;
   special_position?: number | null;
-  pos_1th?: number | null;
+  prev_special_position?: number | null;
 }): number | null {
-  if (row.difference_special_1st != null && row.difference_special_1st > 0) {
-    return row.difference_special_1st;
+  if (row.difference_prev_special != null) {
+    return row.difference_prev_special;
   }
-  return computeDifference(row.special_position, row.pos_1th);
+  return computeDifference(row.special_position, row.prev_special_position);
 }

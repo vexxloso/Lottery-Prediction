@@ -22,7 +22,8 @@ type AnalysisRowLaPrimitiva = {
   pre_id: string;
   special_position?: number | null;
   jackpot_position?: number | null;
-  difference_special_1st?: number | null;
+  prev_special_position?: number | null;
+  difference_prev_special?: number | null;
   pos_1th: number;
   pos_2th: number | null;
   pos_3th: number | null;
@@ -99,7 +100,7 @@ export function LaPrimitivaAnalysisPage() {
           label: r.date || r.current_id,
           special_position: r.special_position ?? r.jackpot_position ?? null,
           pos_1th: r.pos_1th || null,
-          difference_special_1st: differenceFromRow(r),
+          difference_prev_special: differenceFromRow(r),
           pos_2th: r.pos_2th,
           pos_3th: r.pos_3th,
           pos_4th: r.pos_4th,
@@ -220,7 +221,7 @@ export function LaPrimitivaAnalysisPage() {
       )}
       {rows.length > 0 && (
         <p style={{ margin: '0 0 0.5rem', fontSize: '0.82rem', color: '#666' }}>
-          <strong>Difference (Special − 1ª)</strong> — client validation metric (Especial minus 1ª position).
+          <strong>Diff vs prev draw (Special)</strong> — Special position of current draw minus previous draw.
         </p>
       )}
       {rows.length > 0 && (
@@ -231,7 +232,7 @@ export function LaPrimitivaAnalysisPage() {
                 <th>Fecha</th>
                 <th>Especial pos (6 + R)</th>
                 <th>1ª pos (6)</th>
-                <th>Difference (Special − 1ª)</th>
+                <th>Diff vs prev draw (Special)</th>
                 <th>2ª pos (5 + C)</th>
                 <th>3ª pos (5)</th>
                 <th>4ª pos (4)</th>
@@ -306,8 +307,8 @@ export function LaPrimitivaAnalysisPage() {
                 />
                 <Line
                   type="monotone"
-                  dataKey="difference_special_1st"
-                  name="Difference (Special − 1ª)"
+                  dataKey="difference_prev_special"
+                  name="Special diff vs prev draw"
                   stroke="#7c3aed"
                   strokeDasharray="4 4"
                   dot={false}

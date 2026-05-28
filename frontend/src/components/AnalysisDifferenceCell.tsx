@@ -2,13 +2,13 @@ import { differenceFromRow, formatPosition } from '../utils/compareAnalysis';
 
 type Props = {
   row: {
-    difference_special_1st?: number | null;
+    difference_prev_special?: number | null;
     special_position?: number | null;
-    pos_1th?: number | null;
+    prev_special_position?: number | null;
   };
 };
 
-/** Renders Special − 1st difference (client spreadsheet column). */
+/** Renders current Special minus previous draw Special. */
 export function AnalysisDifferenceCell({ row }: Props) {
   const diff = differenceFromRow(row);
   if (diff == null) return <td>—</td>;

@@ -30,7 +30,8 @@ type AnalysisRowElGordo = {
   pre_id: string;
   special_position?: number | null;
   jackpot_position: number;
-  difference_special_1st?: number | null;
+  prev_special_position?: number | null;
+  difference_prev_special?: number | null;
   pos_1th: number;
   pos_2th: number | null;
   pos_3th: number | null;
@@ -107,7 +108,7 @@ export function ElGordoAnalysisPage() {
           label: r.date || r.current_id,
           special_position: r.special_position ?? r.jackpot_position ?? null,
           pos_1th: r.pos_1th || null,
-          difference_special_1st: differenceFromRow(r),
+          difference_prev_special: differenceFromRow(r),
           pos_2th: r.pos_2th,
           pos_3th: r.pos_3th,
           pos_4th: r.pos_4th,
@@ -233,7 +234,7 @@ export function ElGordoAnalysisPage() {
                 <th>Fecha</th>
                 <th>Special pos (5+1)</th>
                 <th>1ª pos (5+0)</th>
-                <th>Difference (Special − 1ª)</th>
+                <th>Diff vs prev draw (Special)</th>
                 <th>2ª pos (4+1)</th>
                 <th>4ª pos (4+0)</th>
                 <th>5ª pos (3+1)</th>
@@ -311,7 +312,7 @@ export function ElGordoAnalysisPage() {
                 <Legend />
                 <Line type="monotone" dataKey="special_position" name="Special (5+1)" stroke="#7c3aed" dot={false} />
                 <Line type="monotone" dataKey="pos_1th" name="1ª (5+0)" stroke="#dc2626" dot={false} />
-                <Line type="monotone" dataKey="difference_special_1st" name="Difference" stroke="#9333ea" strokeDasharray="4 4" dot={false} />
+                <Line type="monotone" dataKey="difference_prev_special" name="Special diff vs prev draw" stroke="#9333ea" strokeDasharray="4 4" dot={false} />
                 <Line type="monotone" dataKey="pos_2th" name="2ª (4+1)" stroke="#f59e0b" dot={false} />
                 <Line type="monotone" dataKey="pos_3th" name="3ª (4+0)" stroke="#2563eb" dot={false} />
               </LineChart>
