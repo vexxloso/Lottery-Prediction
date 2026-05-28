@@ -2457,6 +2457,7 @@ _PUBLIC_API_PATHS = {
     "/api/la-primitiva/train/full-wheel",
     "/api/euromillones/compare/full-wheel",
     "/api/el-gordo/compare/full-wheel",
+    "/api/el-gordo/compare/cached",
     "/api/la-primitiva/compare/full-wheel",
     # Online learning + train reset (daily automation / backfill scripts)
     "/api/online-learning/pre-draw",
@@ -4770,6 +4771,34 @@ def _euromillones_full_wheel_compare(
     return result
 
 
+def _find_el_gordo_compare_doc(
+    db_instance, current_id: str, pre_id: str
+) -> Optional[Dict[str, Any]]:
+    """Load saved compare from MongoDB (string or int id_sorteo keys)."""
+    coll = db_instance[EL_GORDO_COMPARE_RESULTS_COLLECTION]
+    cid = current_id.strip()
+    pid = pre_id.strip()
+    keys: List[Tuple[Any, Any]] = [(cid, pid)]
+    if cid.isdigit():
+        ic = int(cid)
+        keys.append((ic, pid))
+        if pid.isdigit():
+            ip = int(pid)
+            keys.extend([(cid, ip), (ic, ip)])
+    elif pid.isdigit():
+        keys.append((cid, int(pid)))
+    seen: set[Tuple[str, str]] = set()
+    for ck, pk in keys:
+        sig = (str(ck), str(pk))
+        if sig in seen:
+            continue
+        seen.add(sig)
+        doc = coll.find_one({"current_id": ck, "pre_id": pk})
+        if doc and doc.get("jackpot_position") is not None:
+            return doc
+    return None
+
+
 def _el_gordo_full_wheel_compare(
     current_id: str,
     pre_id: str,
@@ -4786,8 +4815,8 @@ def _el_gordo_full_wheel_compare(
     - Save summary to el_gordo_compare_results; if result already exists, return it.
     """
     pre_id_clean = pre_id.strip()
-    coll_compare = db_instance[EL_GORDO_COMPARE_RESULTS_COLLECTION]
-    existing = coll_compare.find_one({"current_id": current_id, "pre_id": pre_id_clean})
+    current_id_clean = current_id.strip()
+    existing = _find_el_gordo_compare_doc(db_instance, current_id_clean, pre_id_clean)
     if existing:
         out = {k: v for k, v in existing.items() if k != "_id"}
         return _item_to_json(out)
@@ -5236,25 +5265,22 @@ def api_euromillones_compare_full_wheel(
         raise HTTPException(500, detail=f"Euromillones compare failed: {e}")
 
 
-@app.get("/api/el-gordo/compare/full-wheel")
-def api_el_gordo_compare_full_wheel(
-    current_id: str = Query(..., description="id_sorteo of the El Gordo draw to evaluate (result)."),
-    pre_id: str = Query(..., description="cutoff_draw_id or probs_draw_id for the El Gordo full wheel run."),
+@app.get("/api/el-gordo/compare/cached")
+def api_el_gordo_compare_cached(
+    current_id: str = Query(..., description="id_sorteo of the El Gordo draw (result)."),
+    pre_id: str = Query(..., description="cutoff_draw_id for the full wheel run."),
 ):
-    """
-    Compare El Gordo full wheel TXT (from pre_id) against draw result (current_id).
-    Returns and saves summary: jackpot_position, 2th/3th/4th first positions,
-    and first_position + count for every (main_hits, clave_hit) category.
-    """
+    """Return saved compare only (no TXT scan). Fast path for the simulation UI."""
     if db is None:
         raise HTTPException(500, detail="Database not connected")
-    try:
-        result = _el_gordo_full_wheel_compare(current_id.strip(), pre_id.strip(), db)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, detail=f"El Gordo compare failed: {e}")
-    return JSONResponse(content=_item_to_json(result))
+    doc = _find_el_gordo_compare_doc(db, current_id.strip(), pre_id.strip())
+    if not doc:
+        raise HTTPException(
+            404,
+            detail="No cached El Gordo compare for this draw pair; run full-wheel compare first",
+        )
+    out = {k: v for k, v in doc.items() if k != "_id"}
+    return JSONResponse(content=_item_to_json(out))
 
 
 @app.get("/api/la-primitiva/compare/full-wheel")
@@ -5295,13 +5321,18 @@ def api_el_gordo_compare_full_wheel(
 ):
     """
     Compare El Gordo full wheel TXT (from pre_id) against draw result (current_id).
-    Returns and saves summary: jackpot_position, 2th/3th/4th first positions,
-    and first_position + count for every (main_hits, clave_hit) category.
+    Returns cached (current_id, pre_id) when present; otherwise scans TXT (slow).
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
+    current_id_clean = current_id.strip()
+    pre_id_clean = pre_id.strip()
+    existing = _find_el_gordo_compare_doc(db, current_id_clean, pre_id_clean)
+    if existing:
+        out = {k: v for k, v in existing.items() if k != "_id"}
+        return JSONResponse(content=_item_to_json(out))
     try:
-        result = _el_gordo_full_wheel_compare(current_id.strip(), pre_id.strip(), db)
+        result = _el_gordo_full_wheel_compare(current_id_clean, pre_id_clean, db)
     except HTTPException:
         raise
     except Exception as e:
@@ -5459,9 +5490,8 @@ def api_el_gordo_compare_reorder(
     pre_id_clean = pre_id.strip()
 
     # 1) Return cached result if available
-    coll_compare = db[EL_GORDO_COMPARE_RESULTS_COLLECTION]
-    existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
-    if existing and existing.get("jackpot_position") is not None:
+    existing = _find_el_gordo_compare_doc(db, current_id_clean, pre_id_clean)
+    if existing:
         out = {k: v for k, v in existing.items() if k != "_id"}
         return JSONResponse(content=_item_to_json(out))
 

@@ -460,54 +460,84 @@ export function SimulationPage() {
     }
     let cancelled = false;
     const params = new URLSearchParams({ current_id: drawId, pre_id: prevId });
+    const cachedUrl = `${API_URL}/api/el-gordo/compare/cached?${params.toString()}`;
     const reorderUrl = `${API_URL}/api/el-gordo/compare/full-wheel/reorder?${params.toString()}`;
-    const fallbackUrl = `${API_URL}/api/el-gordo/compare/full-wheel?${params.toString()}`;
+
+    const parseJackpot = (data: Record<string, unknown>): number | null => {
+      const jp = data.jackpot_position;
+      if (typeof jp === 'number' && jp > 0) return jp;
+      if (typeof jp === 'string' && jp.trim()) {
+        const n = Number(jp);
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+      return null;
+    };
 
     const applyComparePayload = (data: Record<string, unknown>) => {
+      const num = (v: unknown): number | null =>
+        typeof v === 'number' && v > 0 ? v : null;
       setElGordoFullWheelResult({
         current_id: String(data.current_id ?? drawId),
         date: (data.date as string | null) ?? null,
         pre_id: String(data.pre_id ?? prevId),
-        jackpot_position:
-          typeof data.jackpot_position === 'number' ? data.jackpot_position : null,
-        pos_2th: typeof data.pos_2th === 'number' ? data.pos_2th : null,
-        pos_3th: typeof data.pos_3th === 'number' ? data.pos_3th : null,
-        pos_4th: typeof data.pos_4th === 'number' ? data.pos_4th : null,
+        jackpot_position: parseJackpot(data),
+        pos_2th: num(data.pos_2th),
+        pos_3th: num(data.pos_3th),
+        pos_4th: num(data.pos_4th),
         categories: Array.isArray(data.categories) ? data.categories : [],
       });
     };
+
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
     const load = async () => {
       setElGordoFullWheelLoading(true);
       setElGordoFullWheelError('');
       try {
+        const cachedRes = await fetch(cachedUrl, { method: 'GET' });
+        const cachedData = (await cachedRes.json().catch(() => ({}))) as Record<string, unknown>;
+        if (!cancelled && cachedRes.ok && parseJackpot(cachedData)) {
+          applyComparePayload(cachedData);
+          return;
+        }
+
         const reorderRes = await fetch(reorderUrl, { method: 'POST' });
         const reorderData = (await reorderRes.json().catch(() => ({}))) as Record<string, unknown>;
-        if (
-          !cancelled &&
-          reorderRes.ok &&
-          !reorderData.detail &&
-          typeof reorderData.jackpot_position === 'number'
-        ) {
+        if (!cancelled && reorderRes.ok && parseJackpot(reorderData)) {
           applyComparePayload(reorderData);
           return;
         }
 
-        const cmpRes = await fetch(fallbackUrl, { method: 'GET' });
-        const cmpData = (await cmpRes.json().catch(() => ({}))) as Record<string, unknown> & {
-          detail?: string;
-        };
-        if (cancelled) return;
-        if (!cmpRes.ok || cmpData.detail) {
+        if (!cancelled && reorderRes.status === 202) {
+          for (let attempt = 0; attempt < 30; attempt += 1) {
+            await sleep(2000);
+            if (cancelled) return;
+            const pollRes = await fetch(cachedUrl, { method: 'GET' });
+            const pollData = (await pollRes.json().catch(() => ({}))) as Record<string, unknown>;
+            if (pollRes.ok && parseJackpot(pollData)) {
+              applyComparePayload(pollData);
+              return;
+            }
+          }
           setElGordoFullWheelResult(null);
           setElGordoFullWheelError(
-            typeof cmpData.detail === 'string'
-              ? cmpData.detail
-              : 'Error al cargar comparación full wheel El Gordo',
+            'Comparación en segundo plano. Espera un minuto y recarga la página.',
           );
           return;
         }
-        applyComparePayload(cmpData);
+
+        if (cancelled) return;
+        setElGordoFullWheelResult(null);
+        const detail =
+          typeof reorderData.detail === 'string'
+            ? reorderData.detail
+            : typeof cachedData.detail === 'string'
+              ? cachedData.detail
+              : null;
+        setElGordoFullWheelError(
+          detail ??
+            'No hay comparación guardada para este par de sorteos. Ejecuta el pipeline (full wheel + compare) desde Predicción.',
+        );
       } catch (e) {
         if (cancelled) return;
         setElGordoFullWheelResult(null);
@@ -1368,6 +1398,104 @@ export function SimulationPage() {
               </p>
             )}
 
+            {slug === 'el-gordo' && compareElGordoSource === 'fullwheel' && (
+              <section
+                className="card resultados-features-card resultados-theme-el-gordo"
+                style={{ marginTop: 'var(--space-md)', width: '100%' }}
+              >
+                <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '0.95rem' }}>
+                  Comparación full wheel (El Gordo)
+                </h4>
+                {elGordoFullWheelLoading && !elGordoFullWheelResult && (
+                  <p style={{ margin: 0 }}>Cargando comparación full wheel El Gordo…</p>
+                )}
+                {elGordoFullWheelError && !elGordoFullWheelLoading && (
+                  <p style={{ margin: 0, color: 'var(--color-error)' }}>{elGordoFullWheelError}</p>
+                )}
+                {elGordoFullWheelResult && (() => {
+                  const r = elGordoFullWheelResult;
+                  const byKey = new Map<string, (typeof r.categories)[number]>();
+                  r.categories.forEach((row) => {
+                    const key = `${row.main_hits}-${row.clave_hit}`;
+                    if (!byKey.has(key)) byKey.set(key, row);
+                  });
+                  const orderedKeys: { key: string; label: string }[] = [
+                    { key: '5-1', label: '1ª (5 + 1)' },
+                    { key: '5-0', label: '2ª (5 + 0)' },
+                    { key: '4-1', label: '3ª (4 + 1)' },
+                    { key: '4-0', label: '4ª (4 + 0)' },
+                    { key: '3-1', label: '5ª (3 + 1)' },
+                    { key: '3-0', label: '6ª (3 + 0)' },
+                    { key: '2-1', label: '7ª (2 + 1)' },
+                    { key: '2-0', label: '8ª (2 + 0)' },
+                    { key: '0-1', label: 'Reintegro' },
+                  ];
+                  const hasRows = orderedKeys.some(({ key }) => byKey.has(key));
+                  return (
+                    <div>
+                      {r.jackpot_position != null && r.jackpot_position > 0 && (
+                        <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem' }}>
+                          <strong>1ª (5+1):</strong> posición{' '}
+                          {r.jackpot_position.toLocaleString()}
+                          {r.pos_2th != null && (
+                            <>
+                              {' '}
+                              · <strong>2ª (5+0):</strong> {r.pos_2th.toLocaleString()}
+                            </>
+                          )}
+                          {r.pos_3th != null && (
+                            <>
+                              {' '}
+                              · <strong>3ª (4+1):</strong> {r.pos_3th.toLocaleString()}
+                            </>
+                          )}
+                          {r.pos_4th != null && (
+                            <>
+                              {' '}
+                              · <strong>4ª (4+0):</strong> {r.pos_4th.toLocaleString()}
+                            </>
+                          )}
+                        </p>
+                      )}
+                      {hasRows ? (
+                        <div className="resultados-features-table-wrap">
+                          <table className="resultados-features-table">
+                            <thead>
+                              <tr>
+                                <th>Categoría</th>
+                                <th>Hits (main+clave)</th>
+                                <th>First position</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {orderedKeys.map(({ key, label }) => {
+                                const row = byKey.get(key);
+                                if (!row) return null;
+                                return (
+                                  <tr key={key}>
+                                    <td>{label}</td>
+                                    <td>
+                                      {row.main_hits}+{row.clave_hit}
+                                    </td>
+                                    <td>{row.first_position.toLocaleString()}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+                          Resultado guardado sin detalle por categoría. Vuelve a ejecutar compare para
+                          actualizar.
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
+              </section>
+            )}
+
             {(compareDraw || compareProgress) && (
               <div className="euromillones-compare-layout">
                 <section className={`card resultados-features-card resultados-theme-${slug} euromillones-compare-table-col`}>
@@ -1898,7 +2026,12 @@ export function SimulationPage() {
                             );
                           }
                           if (!elGordoFullWheelResult) {
-                            return null;
+                            return (
+                              <p style={{ margin: '0.5rem 0 0', color: 'var(--color-text-muted)' }}>
+                                Usa la sección «Comparación full wheel» arriba cuando no hay pool de
+                                predicción cargado.
+                              </p>
+                            );
                           }
                           const r = elGordoFullWheelResult;
                           // Build lookup by (main_hits, clave_hit) so we can show 1ª–8ª + Reintegro in fixed order.
