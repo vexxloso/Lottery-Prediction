@@ -1481,10 +1481,69 @@ def parse_combinacion(combinacion: str) -> dict:
     return {"numbers": numbers, "complementario": complementario, "reintegro": reintegro}
 
 
+def _parse_el_gordo_mains_clave(doc: dict) -> tuple[list[int], int | None]:
+    """
+    Parse El Gordo draw: 5 mains (1–54) and clave (0–9).
+    Uses numbers + reintegro, then combinacion / combinacion_acta (incl. R(n)).
+    """
+    mains: list[int] = []
+    clave: int | None = None
+    raw_numbers = doc.get("numbers") or []
+    if isinstance(raw_numbers, list) and len(raw_numbers) >= 5:
+        try:
+            mains = [int(x) for x in raw_numbers[:5]]
+        except (TypeError, ValueError):
+            mains = []
+    raw_reintegro = doc.get("reintegro")
+    try:
+        if raw_reintegro is not None and str(raw_reintegro).strip() != "":
+            clave = int(raw_reintegro)
+    except (TypeError, ValueError):
+        clave = None
+
+    if len(mains) == 5 and clave is not None and 0 <= clave <= 9:
+        return mains, clave
+
+    for field in ("combinacion", "combinacion_acta"):
+        text = (doc.get(field) or "").strip()
+        if not text:
+            continue
+        parsed = parse_combinacion(text)
+        if len(parsed.get("numbers") or []) >= 5:
+            try:
+                mains = [int(x) for x in parsed["numbers"][:5]]
+            except (TypeError, ValueError):
+                mains = []
+        if parsed.get("reintegro") is not None:
+            try:
+                clave = int(parsed["reintegro"])
+            except (TypeError, ValueError):
+                pass
+        if len(mains) == 5 and clave is not None:
+            return mains, clave
+        match_r = re.search(r"R\s*\(\s*(\d+)\s*\)", text, re.I)
+        if match_r:
+            try:
+                clave = int(match_r.group(1))
+            except (TypeError, ValueError):
+                pass
+        main_part = re.split(r"\s+R\s*\(", text, flags=re.I)[0].strip()
+        parts = re.split(r"[\s\-]+", main_part)
+        fallback_mains = [int(p) for p in parts if p.isdigit()][:5]
+        if len(fallback_mains) == 5:
+            mains = fallback_mains
+        if len(mains) == 5 and clave is not None:
+            return mains, clave
+
+    if len(mains) == 5 and clave is not None and 0 <= clave <= 9:
+        return mains, clave
+    return mains if len(mains) == 5 else [], clave if clave is not None and 0 <= clave <= 9 else None
+
+
 def normalize_draw(draw: dict) -> dict:
     """Add parsed numbers, C, R, and joker_combinacion; keep all original fields."""
     out = dict(draw)
-    combinacion = draw.get("combinacion") or ""
+    combinacion = draw.get("combinacion") or draw.get("combinacion_acta") or ""
     parsed = parse_combinacion(combinacion)
     out["numbers"] = parsed["numbers"]
     out["complementario"] = parsed["complementario"]
@@ -4739,51 +4798,12 @@ def _el_gordo_full_wheel_compare(
         doc = coll_draws.find_one({"id_sorteo": int(current_id)})
     if not doc:
         raise HTTPException(404, detail="El Gordo draw not found")
-    # Normalized draw (used later for fecha_sorteo and optional fallbacks)
     draw = _build_draw(doc, "ELGR")
-    # Use raw collection fields so we exactly match the UI:
-    # - doc["numbers"]: first 5 entries = mains
-    # - doc["reintegro"]: clave
-    raw_numbers = doc.get("numbers") or []
-    raw_reintegro = doc.get("reintegro")
+    main_draw, clave_draw = _parse_el_gordo_mains_clave(doc)
     print(
-        f"[el-gordo-compare] raw draw current_id={current_id!r} numbers={raw_numbers} reintegro={raw_reintegro}",
+        f"[el-gordo-compare] current_id={current_id!r} mains={main_draw} clave={clave_draw}",
         flush=True,
     )
-
-    main_draw: list[int] = [int(x) for x in raw_numbers[:5]]
-    clave_draw: int | None = None
-    try:
-        if raw_reintegro is not None and str(raw_reintegro).strip():
-            clave_draw = int(raw_reintegro)
-    except (TypeError, ValueError):
-        clave_draw = None
-    print(
-        f"[el-gordo-compare] parsed from raw -> mains={main_draw} clave={clave_draw}",
-        flush=True,
-    )
-
-    # Fallback: if reintegro missing, try from normalized numbers / combinacion_acta.
-    if len(main_draw) != 5 or clave_draw is None:
-        draw_norm = normalize_draw(draw)
-        numbers = draw_norm.get("numbers") or []
-        combinacion_acta = draw.get("combinacion_acta") or ""
-        if len(numbers) >= 6:
-            main_draw = [int(x) for x in numbers[:5]]
-            try:
-                clave_draw = int(numbers[-1])
-            except (TypeError, ValueError):
-                clave_draw = None
-        elif isinstance(combinacion_acta, str) and combinacion_acta.strip():
-            parts = re.findall(r"\b\d{1,2}\b", combinacion_acta)
-            nums = [int(p) for p in parts if p.isdigit()]
-            if len(nums) >= 6:
-                main_draw = nums[:5]
-                clave_draw = nums[-1]
-        print(
-            f"[el-gordo-compare] parsed from fallback -> mains={main_draw} clave={clave_draw}",
-            flush=True,
-        )
 
     if len(main_draw) != 5 or clave_draw is None:
         print(
@@ -5388,18 +5408,7 @@ def api_el_gordo_compare_reorder(
     if not draw_doc:
         raise HTTPException(404, detail="El Gordo draw not found")
 
-    draw = _build_draw(draw_doc, "ELGR")
-    numbers = draw.get("numbers") or []
-    combinacion = draw.get("combinacion_acta") or draw.get("combinacion") or ""
-    if len(numbers) >= 6:
-        main_draw = [int(x) for x in numbers[:5]]
-        clave_raw = numbers[5]
-        clave_draw = int(clave_raw) if clave_raw is not None else None
-    else:
-        parts = re.split(r"[\s\-]+", str(combinacion))
-        nums = [int(p) for p in parts if p.isdigit()]
-        main_draw = nums[:5] if len(nums) >= 5 else []
-        clave_draw = nums[5] if len(nums) >= 6 else None
+    main_draw, clave_draw = _parse_el_gordo_mains_clave(draw_doc)
 
     if len(main_draw) != 5 or clave_draw is None:
         raise HTTPException(400, detail="El Gordo draw main/clave numbers missing or invalid")
@@ -6665,16 +6674,7 @@ def api_el_gordo_compare_full_wheel_tickets(
     if not doc:
         raise HTTPException(404, detail="El Gordo draw not found")
 
-    raw_numbers = doc.get("numbers") or []
-    raw_reintegro = doc.get("reintegro")
-    main_draw: List[int] = [int(x) for x in raw_numbers[:5]]
-    clave_draw: Optional[int] = None
-    try:
-        if raw_reintegro is not None and str(raw_reintegro).strip():
-            clave_draw = int(raw_reintegro)
-    except (TypeError, ValueError):
-        clave_draw = None
-
+    main_draw, clave_draw = _parse_el_gordo_mains_clave(doc)
     if len(main_draw) != 5 or clave_draw is None:
         raise HTTPException(400, detail="El Gordo draw mains/clave missing or invalid")
 

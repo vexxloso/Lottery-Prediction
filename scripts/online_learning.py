@@ -631,8 +631,14 @@ def post_draw(lottery: str, current_id: str, pre_id: str) -> dict:
         main_numbers = [int(x) for x in numbers[:5]]
         secondary = [int(x) for x in numbers[5:7]] if len(numbers) >= 7 else []
     elif lottery == "el-gordo":
-        main_numbers = [int(x) for x in numbers[:5]]
-        secondary = int(reintegro) if reintegro is not None else 0
+        from build_el_gordo_feature import _parse_main_and_clave
+
+        main_numbers, clave = _parse_main_and_clave(draw_doc)
+        if len(main_numbers) != 5 or clave is None:
+            raise RuntimeError(
+                f"El Gordo draw main/clave missing or invalid for id_sorteo={current_id}"
+            )
+        secondary = int(clave)
     else:  # la-primitiva
         main_numbers = [int(x) for x in numbers[:6]]
         secondary = int(reintegro) if reintegro is not None else 0
