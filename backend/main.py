@@ -13353,35 +13353,17 @@ def api_online_learning_history(
 
     rows: list[dict] = []
     for c in compares_raw:
-        cid = str(c.get("current_id") or "").strip()
-        pid = str(c.get("pre_id") or "").strip()
-        jp = int(c.get("jackpot_position") or 0)
-        fb = feedback_by_draw.get(cid)
-        if fb:
-            row = dict(fb)
-            row["pre_draw_id"] = str(row.get("pre_draw_id") or pid)
-            row["feedback_status"] = "complete"
-        else:
-            er = c.get("error_rate")
-            if er is None and jp > 0:
-                er = round(jp / total_tickets, 6)
-            row = {
-                "draw_id": cid,
-                "pre_draw_id": pid,
-                "draw_date": str(c.get("date") or ""),
-                "actual_jackpot_position": jp,
-                "error_rate": float(er) if er is not None else 0.0,
-                "updated_at": str(c.get("updated_at") or ""),
-                "feedback_records": [],
-                "new_orc_hash": "",
-                "feedback_status": "pending",
-            }
-        rows.append(row)
+        rows.append(
+            _compare_doc_to_learning_row(
+                db, lottery, c, feedback_by_draw, total_tickets
+            )
+        )
+
+    if skip == 0:
+        rows = _prepend_latest_feature_gaps(db, lottery, rows, feedback_by_draw)
 
     rows = _enrich_feedback_rows(db, lottery, rows)
-
-    feedback_count = db["model_feedback_log"].count_documents({"lottery": lottery})
-    orc_count = db["model_orc_snapshots"].count_documents({"lottery": lottery})
+    diag = _learning_history_diagnostics(db, lottery)
 
     return JSONResponse(content={
         "lottery": lottery,
@@ -13389,12 +13371,7 @@ def api_online_learning_history(
         "rows": rows,
         "skip": skip,
         "limit": limit,
-        "diagnostics": {
-            "compare_count": total,
-            "orc_count": orc_count,
-            "feedback_count": feedback_count,
-            "pending_feedback": max(0, total - feedback_count),
-        },
+        "diagnostics": diag,
     })
 
 
@@ -13472,12 +13449,9 @@ def api_online_learning_sync_pending(
             if doc:
                 effective_pre_id = str(doc.get("pre_id") or pre_id).strip()
                 before_fb = _feedback_log_exists(db, lottery, current_id)
-                _save_compare_result(db, lottery, doc)
+                _save_compare_result(db, lottery, doc, touch_updated_at=False)
                 refreshed += 1
-                if not before_fb and db["model_orc_snapshots"].find_one(
-                    {"lottery": lottery, "draw_id": effective_pre_id},
-                    projection={"_id": 1},
-                ):
+                if not before_fb and _orc_exists_for_pre_draw(db, lottery, effective_pre_id):
                     feedback_scheduled += 1
         except Exception as exc:
             errors.append(f"{label}: {exc}")
@@ -13881,7 +13855,7 @@ def _find_compare_for_draw(
     for ck in _draw_id_variants(current_id):
         doc = coll.find_one(
             {**filt, "current_id": ck},
-            sort=[("updated_at", -1), ("date", -1), ("current_id", -1)],
+            sort=_compare_chronological_sort(),
         )
         if doc:
             return doc
@@ -13951,10 +13925,182 @@ def _load_recent_draw_pairs(db_instance, lottery: str, last_n: int) -> List[Dict
     return pairs[-last_n:] if last_n > 0 else pairs
 
 
+def _latest_feature_draw(db_instance, lottery: str) -> Optional[Dict[str, str]]:
+    pairs = _load_recent_draw_pairs(db_instance, lottery, 1)
+    return pairs[-1] if pairs else None
+
+
+def _orc_exists_for_pre_draw(db_instance, lottery: str, pre_id: str) -> bool:
+    variants = _draw_id_variants(pre_id)
+    if not variants:
+        return False
+    return (
+        db_instance["model_orc_snapshots"].find_one(
+            {"lottery": lottery, "draw_id": {"$in": variants}},
+            projection={"_id": 1},
+        )
+        is not None
+    )
+
+
+def _learning_feedback_status(
+    db_instance,
+    lottery: str,
+    *,
+    draw_id: str,
+    pre_id: str,
+    has_feedback: bool,
+) -> str:
+    """
+    complete — feedback log exists (model weights updated).
+    pending — compare exists, ORC exists, feedback not run yet (new pipeline).
+    legacy — old compare only (no ORC); error rate from compare is still valid.
+    """
+    if has_feedback:
+        return "complete"
+    if _orc_exists_for_pre_draw(db_instance, lottery, pre_id):
+        return "pending"
+    return "legacy"
+
+
+def _learning_history_diagnostics(db_instance, lottery: str) -> dict:
+    compare_coll = db_instance[_validation_compare_collection(lottery)]
+    filt = _compare_rows_filter()
+    latest_feature = _latest_feature_draw(db_instance, lottery)
+    latest_compare_doc = compare_coll.find_one(
+        filt,
+        projection={"current_id": 1, "date": 1, "pre_id": 1},
+        sort=_compare_chronological_sort(),
+    )
+    latest_feature_has_compare = False
+    if latest_feature:
+        latest_feature_has_compare = (
+            _find_compare_for_draw(
+                compare_coll,
+                latest_feature["current_id"],
+                latest_feature["pre_id"],
+                allow_current_id_only=True,
+            )
+            is not None
+        )
+    feedback_count = db_instance["model_feedback_log"].count_documents({"lottery": lottery})
+    compare_count = compare_coll.count_documents(filt)
+    return {
+        "compare_count": compare_count,
+        "orc_count": db_instance["model_orc_snapshots"].count_documents({"lottery": lottery}),
+        "feedback_count": feedback_count,
+        "pending_feedback": max(0, compare_count - feedback_count),
+        "latest_feature_draw": latest_feature,
+        "latest_feature_has_compare": latest_feature_has_compare,
+        "latest_compare_in_db": (
+            {
+                "draw_id": str(latest_compare_doc.get("current_id") or ""),
+                "draw_date": str(latest_compare_doc.get("date") or ""),
+                "pre_id": str(latest_compare_doc.get("pre_id") or ""),
+            }
+            if latest_compare_doc
+            else None
+        ),
+    }
+
+
+def _compare_doc_to_learning_row(
+    db_instance,
+    lottery: str,
+    c: dict,
+    feedback_by_draw: Dict[str, dict],
+    total_tickets: int,
+) -> dict:
+    cid = str(c.get("current_id") or "").strip()
+    pid = str(c.get("pre_id") or "").strip()
+    jp = int(c.get("jackpot_position") or 0)
+    fb = feedback_by_draw.get(cid)
+    if fb:
+        row = dict(fb)
+        row["pre_draw_id"] = str(row.get("pre_draw_id") or pid)
+        row["feedback_status"] = "complete"
+        return row
+    er = c.get("error_rate")
+    if er is None and jp > 0:
+        er = round(jp / total_tickets, 6)
+    return {
+        "draw_id": cid,
+        "pre_draw_id": pid,
+        "draw_date": str(c.get("date") or ""),
+        "actual_jackpot_position": jp,
+        "error_rate": float(er) if er is not None else 0.0,
+        "updated_at": str(c.get("updated_at") or ""),
+        "feedback_records": [],
+        "new_orc_hash": "",
+        "feedback_status": _learning_feedback_status(
+            db_instance, lottery, draw_id=cid, pre_id=pid, has_feedback=False
+        ),
+    }
+
+
+def _prepend_latest_feature_gaps(
+    db_instance,
+    lottery: str,
+    rows: list[dict],
+    feedback_by_draw: Dict[str, dict],
+    *,
+    check_last_n: int = 5,
+) -> list[dict]:
+    """On page 1, show newest feature draws even when compare or feedback is missing."""
+    pairs = _load_recent_draw_pairs(db_instance, lottery, check_last_n)
+    if not pairs:
+        return rows
+    compare_coll = db_instance[_validation_compare_collection(lottery)]
+    total_tickets = _VALIDATION_TOTAL_TICKETS[lottery]
+    seen = {str(r.get("draw_id") or "").strip() for r in rows}
+    prepend: list[dict] = []
+    for pair in reversed(pairs):
+        cid = pair["current_id"]
+        if cid in seen:
+            continue
+        doc = _find_compare_for_draw(
+            compare_coll, cid, pair["pre_id"], allow_current_id_only=True
+        )
+        if doc:
+            row = _compare_doc_to_learning_row(
+                db_instance, lottery, doc, feedback_by_draw, total_tickets
+            )
+            row["draw_date"] = row.get("draw_date") or pair.get("draw_date") or ""
+        else:
+            row = {
+                "draw_id": cid,
+                "pre_draw_id": pair["pre_id"],
+                "draw_date": pair.get("draw_date") or "",
+                "actual_jackpot_position": 0,
+                "error_rate": 0.0,
+                "updated_at": "",
+                "feedback_records": [],
+                "new_orc_hash": "",
+                "feedback_status": "no_compare",
+            }
+        prepend.append(row)
+        seen.add(cid)
+    if not prepend:
+        return rows
+    merged = prepend + rows
+    merged.sort(
+        key=lambda r: (str(r.get("draw_date") or ""), str(r.get("draw_id") or "")),
+        reverse=True,
+    )
+    return merged
+
+
+def _compare_chronological_sort() -> List[Tuple[str, int]]:
+    """Newest draw first (by official date, then draw id). Do not sort by ``updated_at``."""
+    return [("date", -1), ("current_id", -1)]
+
+
 def _enrich_compare_result_for_validation(
     db_instance,
     lottery: str,
     result: Dict[str, Any],
+    *,
+    touch_updated_at: bool = True,
 ) -> Dict[str, Any]:
     """Normalize date + precomputed validation metrics whenever a compare is saved."""
     out = {k: v for k, v in result.items() if k != "_id"}
@@ -13985,7 +14131,8 @@ def _enrich_compare_result_for_validation(
     out["error_rate"] = error_rate
     out["error_rate_pct"] = error_rate_pct
     out["validation_ready"] = bool(jp_int > 0 and len(date_norm) >= 10)
-    out["updated_at"] = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    if touch_updated_at or not str(out.get("updated_at") or "").strip():
+        out["updated_at"] = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     return out
 
 
@@ -14033,9 +14180,17 @@ def _maybe_schedule_post_draw_feedback(db_instance, lottery: str, compare_doc: D
     ).start()
 
 
-def _save_compare_result(db_instance, lottery: str, result: Dict[str, Any]) -> Dict[str, Any]:
+def _save_compare_result(
+    db_instance,
+    lottery: str,
+    result: Dict[str, Any],
+    *,
+    touch_updated_at: bool = True,
+) -> Dict[str, Any]:
     """Persist compare result and refresh fields used by /api/validation/*."""
-    enriched = _enrich_compare_result_for_validation(db_instance, lottery, result)
+    enriched = _enrich_compare_result_for_validation(
+        db_instance, lottery, result, touch_updated_at=touch_updated_at
+    )
     coll = db_instance[_validation_compare_collection(lottery)]
     _delete_compare_pair_variants(
         coll, enriched["current_id"], enriched["pre_id"]
@@ -14071,7 +14226,7 @@ def _fetch_recent_compare_rows(
     total_in_db = coll.count_documents(filt)
     rows_raw = list(
         coll.find(filt, projection=projection)
-        .sort([("updated_at", -1), ("date", -1), ("current_id", -1)])
+        .sort(_compare_chronological_sort())
         .limit(limit)
     )
     rows_raw.reverse()
@@ -14083,7 +14238,7 @@ def _latest_compare_snapshot(coll, *, exclude_synthetic: bool = True) -> Optiona
     doc = coll.find_one(
         _compare_rows_filter(exclude_synthetic=exclude_synthetic),
         projection={"current_id": 1, "date": 1, "jackpot_position": 1},
-        sort=[("updated_at", -1), ("date", -1), ("current_id", -1)],
+        sort=_compare_chronological_sort(),
     )
     if not doc:
         return None
@@ -14110,7 +14265,7 @@ def _fetch_compare_rows_page(
     total_in_db = coll.count_documents(filt)
     rows_raw = list(
         coll.find(filt, projection=projection)
-        .sort([("updated_at", -1), ("date", -1), ("current_id", -1)])
+        .sort(_compare_chronological_sort())
         .skip(skip)
         .limit(limit)
     )

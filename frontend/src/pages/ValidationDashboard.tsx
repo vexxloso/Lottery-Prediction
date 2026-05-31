@@ -114,7 +114,7 @@ interface FeedbackRow {
   updated_at: string;
   actual_jackpot_position: number;
   new_orc_hash: string;
-  feedback_status?: 'complete' | 'pending';
+  feedback_status?: 'complete' | 'pending' | 'legacy' | 'no_compare';
   feedback_records: { model: string; added_estimators?: number; gradient_steps?: number; total_estimators?: number }[];
 }
 
@@ -127,6 +127,9 @@ interface FeedbackData {
     orc_count: number;
     feedback_count: number;
     pending_feedback: number;
+    latest_feature_draw?: { current_id: string; pre_id: string; draw_date?: string } | null;
+    latest_feature_has_compare?: boolean;
+    latest_compare_in_db?: { draw_id: string; draw_date: string; pre_id: string } | null;
   };
 }
 
@@ -926,9 +929,10 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
   return (
     <div>
       <p style={{ fontSize: '0.85rem', color: '#666', margin: '0 0 16px', lineHeight: 1.5 }}>
-        Each row is one draw with a <strong>compare result</strong> (newest first). When an ORC snapshot exists for the
-        pre-draw, post-draw learning runs automatically and the row becomes <strong>complete</strong>; otherwise it stays
-        <strong>pending</strong> until you run repair-feedback or the daily pipeline finishes.
+        Sorted by <strong>draw date</strong> (newest first). <strong>Complete</strong> = model feedback ran.
+        <strong>Legacy (compare only)</strong> = old data with compare in DB but no ORC (normal for history).
+        <strong>Pending</strong> = compare + ORC exist, feedback not run yet. <strong>No compare</strong> = latest draw
+        has no compare row yet (run daily automation or compare with train progress).
       </p>
 
       {diag && (
@@ -941,7 +945,19 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
             sub="post-draw learning runs logged" />
           {diag.pending_feedback > 0 && (
             <StatCard label="Missing feedback" value={fmt(diag.pending_feedback)} color="#ef4444"
-              sub="compares without a feedback log yet" />
+              sub="mostly legacy compares (compare only, no ORC)" />
+          )}
+          {diag.latest_feature_draw && (
+            <StatCard
+              label="Latest feature draw"
+              value={diag.latest_feature_draw.draw_date || diag.latest_feature_draw.current_id}
+              color={color}
+              sub={
+                diag.latest_feature_has_compare
+                  ? `id ${diag.latest_feature_draw.current_id} · compare OK`
+                  : `id ${diag.latest_feature_draw.current_id} · no compare yet`
+              }
+            />
           )}
         </div>
       )}
@@ -994,7 +1010,7 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
               Error rate per feedback cycle — newest draws on the right
             </div>
             <LineChart
-              rows={data.rows.slice().reverse().map(r => ({
+              rows={data.rows.filter(r => r.feedback_status !== 'no_compare').slice().reverse().map(r => ({
                 ...r,
                 chart_label: r.draw_date || r.draw_id,
               })) as unknown as Record<string, number | string>[]}
@@ -1026,7 +1042,17 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
                       {(row.error_rate * 100).toFixed(4)}%
                     </td>
                     <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0' }}>
-                      {row.feedback_status === 'pending' ? (
+                      {row.feedback_status === 'no_compare' ? (
+                        <span style={{ fontSize: '0.7rem', background: '#fee2e2', color: '#b91c1c',
+                          borderRadius: 4, padding: '1px 6px' }}>
+                          No compare
+                        </span>
+                      ) : row.feedback_status === 'legacy' ? (
+                        <span style={{ fontSize: '0.7rem', background: '#f3f4f6', color: '#4b5563',
+                          borderRadius: 4, padding: '1px 6px' }}>
+                          Compare only (legacy)
+                        </span>
+                      ) : row.feedback_status === 'pending' ? (
                         <span style={{ fontSize: '0.7rem', background: '#fef3c7', color: '#b45309',
                           borderRadius: 4, padding: '1px 6px' }}>
                           Pending learning
