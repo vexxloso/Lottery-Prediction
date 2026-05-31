@@ -965,7 +965,15 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
             <>
               {' '}You have {fmt(diag.compare_count)} compare result{diag.compare_count !== 1 ? 's' : ''} but
               {diag.orc_count === 0 ? ' no ORC snapshots' : ` only ${fmt(diag.orc_count)} ORC snapshot${diag.orc_count !== 1 ? 's' : ''}`}.
-              Post-draw feedback needs both. Run the repair script to backfill:
+              Post-draw feedback needs both. Sync recent pending rows (Euromillones / La Primitiva):
+              <pre style={{ margin: '10px 0 0', padding: '10px 12px', background: '#fef3c7', borderRadius: 6,
+                fontSize: '0.78rem', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
+{`python scripts/sync_pending_learning.py \\
+  --lottery ${lottery} \\
+  --last 30 \\
+  --api-url http://localhost:8000`}
+              </pre>
+              Or repair feedback only:
               <pre style={{ margin: '10px 0 0', padding: '10px 12px', background: '#fef3c7', borderRadius: 6,
                 fontSize: '0.78rem', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
 {`python scripts/backfill_learning_pipeline.py \\

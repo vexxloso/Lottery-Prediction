@@ -2471,6 +2471,7 @@ _PUBLIC_API_PATHS = {
     "/api/online-learning/validate-hashes",
     "/api/validation/rebuild-metrics",
     "/api/online-learning/history",
+    "/api/online-learning/sync-pending",
     "/api/online-learning/orc-snapshots",
     "/api/train/reset",
     # DB-based reorder/compare endpoints (new architecture)
@@ -13320,10 +13321,18 @@ def api_online_learning_history(
     )
 
     draw_ids = [str(c.get("current_id") or "").strip() for c in compares_raw if c.get("current_id")]
+    feedback_id_query: List[Any] = []
+    _seen_fb_ids: set = set()
+    for did in draw_ids:
+        for v in _draw_id_variants(did):
+            key = (type(v).__name__, v)
+            if key not in _seen_fb_ids:
+                _seen_fb_ids.add(key)
+                feedback_id_query.append(v)
     feedback_by_draw: Dict[str, dict] = {}
-    if draw_ids:
+    if feedback_id_query:
         for fb in db["model_feedback_log"].find(
-            {"lottery": lottery, "draw_id": {"$in": draw_ids}},
+            {"lottery": lottery, "draw_id": {"$in": feedback_id_query}},
             projection={
                 "_id": 0,
                 "draw_id": 1,
@@ -13336,7 +13345,11 @@ def api_online_learning_history(
                 "new_orc_hash": 1,
             },
         ):
-            feedback_by_draw[str(fb.get("draw_id") or "").strip()] = _item_to_json(fb)
+            fb_json = _item_to_json(fb)
+            did = str(fb_json.get("draw_id") or "").strip()
+            feedback_by_draw[did] = fb_json
+            if did.isdigit():
+                feedback_by_draw[str(int(did))] = fb_json
 
     rows: list[dict] = []
     for c in compares_raw:
@@ -13383,6 +13396,99 @@ def api_online_learning_history(
             "pending_feedback": max(0, total - feedback_count),
         },
     })
+
+
+@app.post("/api/online-learning/sync-pending")
+def api_online_learning_sync_pending(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    last: int = Query(30, ge=1, le=100),
+    run_compare: bool = Query(
+        True,
+        description="Run full-wheel compare when missing (slow if TXT is large)",
+    ),
+):
+    """
+    Ensure recent draws appear in Learning history (compare + pending/complete rows).
+
+    For each of the last ``last`` draw pairs from the feature table:
+    - Refreshes existing compare docs (validation fields + ``updated_at``)
+    - Optionally runs full-wheel compare when missing
+    - Schedules post-draw feedback when ORC exists and feedback is missing
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if lottery not in _VALIDATION_TOTAL_TICKETS:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    pairs = _load_recent_draw_pairs(db, lottery, last)
+    if not pairs:
+        raise HTTPException(404, detail=f"No draw pairs found for {lottery}")
+
+    compare_coll = db[_validation_compare_collection(lottery)]
+    compare_runners = {
+        "euromillones": _euromillones_full_wheel_compare,
+        "el-gordo": _el_gordo_full_wheel_compare,
+        "la-primitiva": _la_primitiva_full_wheel_compare,
+    }
+    runner = compare_runners[lottery]
+
+    refreshed = 0
+    compared = 0
+    feedback_scheduled = 0
+    errors: List[str] = []
+
+    for pair in pairs:
+        current_id = pair["current_id"]
+        pre_id = pair["pre_id"]
+        label = f"{current_id} (pre={pre_id})"
+        try:
+            doc = _find_compare_doc(compare_coll, current_id, pre_id)
+            if doc is None and run_compare:
+                try:
+                    runner(current_id, pre_id, db)
+                    compared += 1
+                    doc = _find_compare_doc(compare_coll, current_id, pre_id)
+                except HTTPException as exc:
+                    errors.append(f"{label}: compare — {exc.detail}")
+                    continue
+                except Exception as exc:
+                    errors.append(f"{label}: compare — {exc}")
+                    continue
+            elif doc is None:
+                errors.append(f"{label}: no compare result (enable run_compare or run full wheel)")
+                continue
+
+            if doc:
+                before_fb = _feedback_log_exists(db, lottery, current_id)
+                _save_compare_result(db, lottery, doc)
+                refreshed += 1
+                if not before_fb and db["model_orc_snapshots"].find_one(
+                    {"lottery": lottery, "draw_id": pre_id},
+                    projection={"_id": 1},
+                ):
+                    feedback_scheduled += 1
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+
+    compare_filt = _compare_rows_filter()
+    total_compares = compare_coll.count_documents(compare_filt)
+    feedback_count = db["model_feedback_log"].count_documents({"lottery": lottery})
+
+    return JSONResponse(
+        content={
+            "lottery": lottery,
+            "pairs_checked": len(pairs),
+            "refreshed": refreshed,
+            "compared_new": compared,
+            "feedback_scheduled": feedback_scheduled,
+            "errors": errors,
+            "diagnostics": {
+                "compare_count": total_compares,
+                "feedback_count": feedback_count,
+                "pending_feedback": max(0, total_compares - feedback_count),
+            },
+        }
+    )
 
 
 @app.get("/api/online-learning/orc-snapshots")
@@ -13708,6 +13814,100 @@ def _validation_compare_collection(lottery: str) -> str:
     }[lottery]
 
 
+def _draw_id_variants(value: Any) -> List[Any]:
+    """String and int forms for Mongo keys (id_sorteo stored both ways)."""
+    s = str(value or "").strip()
+    if not s:
+        return []
+    out: List[Any] = [s]
+    if s.isdigit():
+        out.append(int(s))
+    return out
+
+
+def _compare_pair_keys(current_id: str, pre_id: str) -> List[Tuple[Any, Any]]:
+    keys: List[Tuple[Any, Any]] = []
+    seen: set = set()
+    for ck in _draw_id_variants(current_id):
+        for pk in _draw_id_variants(pre_id):
+            pair = (ck, pk)
+            if pair not in seen:
+                seen.add(pair)
+                keys.append(pair)
+    return keys
+
+
+def _find_compare_doc(coll, current_id: str, pre_id: str) -> Optional[Dict[str, Any]]:
+    for ck, pk in _compare_pair_keys(current_id, pre_id):
+        doc = coll.find_one({"current_id": ck, "pre_id": pk})
+        if doc:
+            return doc
+    return None
+
+
+def _delete_compare_pair_variants(coll, current_id: str, pre_id: str) -> int:
+    deleted = 0
+    for ck, pk in _compare_pair_keys(current_id, pre_id):
+        res = coll.delete_many({"current_id": ck, "pre_id": pk})
+        deleted += res.deleted_count
+    return deleted
+
+
+def _feedback_log_exists(db_instance, lottery: str, draw_id: str) -> bool:
+    variants = _draw_id_variants(draw_id)
+    if not variants:
+        return False
+    return (
+        db_instance["model_feedback_log"].find_one(
+            {"lottery": lottery, "draw_id": {"$in": variants}},
+            projection={"_id": 1},
+        )
+        is not None
+    )
+
+
+def _load_recent_draw_pairs(db_instance, lottery: str, last_n: int) -> List[Dict[str, str]]:
+    feature_map = {
+        "euromillones": "euromillones_feature",
+        "el-gordo": "el_gordo_feature",
+        "la-primitiva": "la_primitiva_feature",
+    }
+    coll_name = feature_map.get(lottery)
+    if not coll_name:
+        return []
+    docs = list(
+        db_instance[coll_name]
+        .find(
+            {},
+            projection={
+                "id_sorteo": 1,
+                "pre_id_sorteo": 1,
+                "fecha_sorteo": 1,
+                "source_index": 1,
+            },
+        )
+        .sort("source_index", 1)
+    )
+    if len(docs) < 2:
+        return []
+    pairs: List[Dict[str, str]] = []
+    for i in range(1, len(docs)):
+        cur, prev = docs[i], docs[i - 1]
+        current_id = str(cur.get("id_sorteo") or "").strip()
+        pre_id = str(cur.get("pre_id_sorteo") or prev.get("id_sorteo") or "").strip()
+        if not current_id or not pre_id:
+            continue
+        fecha = str(cur.get("fecha_sorteo") or "").strip()
+        pairs.append(
+            {
+                "current_id": current_id,
+                "pre_id": pre_id,
+                "draw_date": fecha.split()[0][:10] if fecha else "",
+            }
+        )
+    return pairs[-last_n:] if last_n > 0 else pairs
+
+
 def _enrich_compare_result_for_validation(
     db_instance,
     lottery: str,
@@ -13756,10 +13956,7 @@ def _maybe_schedule_post_draw_feedback(db_instance, lottery: str, compare_doc: D
         jp_int = 0
     if not current_id or not pre_id or pre_id == "__synthetic__" or jp_int <= 0:
         return
-    if db_instance["model_feedback_log"].find_one(
-        {"lottery": lottery, "draw_id": current_id},
-        projection={"_id": 1},
-    ):
+    if _feedback_log_exists(db_instance, lottery, current_id):
         return
     if not db_instance["model_orc_snapshots"].find_one(
         {"lottery": lottery, "draw_id": pre_id},
@@ -13797,6 +13994,9 @@ def _save_compare_result(db_instance, lottery: str, result: Dict[str, Any]) -> D
     """Persist compare result and refresh fields used by /api/validation/*."""
     enriched = _enrich_compare_result_for_validation(db_instance, lottery, result)
     coll = db_instance[_validation_compare_collection(lottery)]
+    _delete_compare_pair_variants(
+        coll, enriched["current_id"], enriched["pre_id"]
+    )
     coll.replace_one(
         {"current_id": enriched["current_id"], "pre_id": enriched["pre_id"]},
         enriched,

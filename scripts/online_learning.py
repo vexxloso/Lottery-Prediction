@@ -597,13 +597,24 @@ def post_draw(lottery: str, current_id: str, pre_id: str) -> dict:
 
     client = MongoClient(MONGO_URI)
     db = client[MONGO_DB]
-    compare = db[cfg["compare_col"]].find_one({"current_id": current_id, "pre_id": pre_id})
+    compare = None
+    id_pairs = [(current_id, pre_id)]
+    if str(current_id).isdigit():
+        cid = int(current_id)
+        id_pairs.append((cid, pre_id))
+        if str(pre_id).isdigit():
+            id_pairs.append((cid, int(pre_id)))
+            id_pairs.append((current_id, int(pre_id)))
+    for ck, pk in id_pairs:
+        compare = db[cfg["compare_col"]].find_one({"current_id": ck, "pre_id": pk})
+        if compare:
+            break
     client.close()
 
     if not compare:
         raise RuntimeError(f"No compare result found for {lottery} current_id={current_id} pre_id={pre_id}")
 
-    jackpot_pos = compare.get("jackpot_position")
+    jackpot_pos = compare.get("jackpot_position") or compare.get("special_position")
     if not jackpot_pos:
         raise RuntimeError(f"jackpot_position missing in compare result for {lottery} {current_id}")
 
