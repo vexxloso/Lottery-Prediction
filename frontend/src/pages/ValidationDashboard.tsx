@@ -43,6 +43,7 @@ interface AccuracyData {
   total_tickets: number;
   avg_error_rate: number;
   avg_error_rate_pct: number;
+  latest_draw?: { draw_id: string; jackpot_position: number; draw_date: string } | null;
   best_draw: { draw_id: string; jackpot_position: number; draw_date: string } | null;
   worst_draw: { draw_id: string; jackpot_position: number; draw_date: string } | null;
   rows: AccuracyRow[];
@@ -337,7 +338,7 @@ function AccuracySection({ lottery, color }: { lottery: LotterySlug; color: stri
   useEffect(() => {
     setLoading(true);
     setData(null);
-    fetch(`${API_URL}/api/validation/accuracy-chart?lottery=${lottery}&limit=${limit}`)
+    fetch(`${API_URL}/api/validation/accuracy-chart?lottery=${lottery}&limit=${limit}`, { cache: 'no-store' })
       .then(r => r.json())
       .then(setData)
       .catch(() => {})
@@ -347,7 +348,7 @@ function AccuracySection({ lottery, color }: { lottery: LotterySlug; color: stri
   useEffect(() => {
     setTableLoading(true);
     const skip = (tablePage - 1) * tablePageSize;
-    fetch(`${API_URL}/api/validation/accuracy-rows?lottery=${lottery}&skip=${skip}&limit=${tablePageSize}`)
+    fetch(`${API_URL}/api/validation/accuracy-rows?lottery=${lottery}&skip=${skip}&limit=${tablePageSize}`, { cache: 'no-store' })
       .then(r => r.json())
       .then(d => {
         setTableRows(d.rows ?? []);
@@ -379,6 +380,10 @@ function AccuracySection({ lottery, color }: { lottery: LotterySlug; color: stri
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
         <StatCard label="Draws in chart" value={fmt(data.total_draws)} color={color}
           sub={totalInDb > data.total_draws ? `last ${data.limit ?? limit} of ${fmt(totalInDb)} in DB` : undefined} />
+        {data.latest_draw && (
+          <StatCard label="Latest compare" value={data.latest_draw.draw_date || '—'} color={color}
+            sub={`draw ${data.latest_draw.draw_id} · pos ${fmt(data.latest_draw.jackpot_position)}`} />
+        )}
         <StatCard label="Avg error rate" value={data.avg_error_rate_pct.toFixed(4) + '%'}
           sub="lower = model ranked jackpot higher" color="#f59e0b" />
         <StatCard label="Best draw" value={data.best_draw ? fmt(data.best_draw.jackpot_position) : '—'}
@@ -468,7 +473,7 @@ function MeanErrorSection({ lottery, color }: { lottery: LotterySlug; color: str
   useEffect(() => {
     setLoading(true);
     setData(null);
-    fetch(`${API_URL}/api/validation/mean-error-chart?lottery=${lottery}&limit=${limit}`)
+    fetch(`${API_URL}/api/validation/mean-error-chart?lottery=${lottery}&limit=${limit}`, { cache: 'no-store' })
       .then(r => r.json())
       .then(setData)
       .catch(() => {})
@@ -478,7 +483,7 @@ function MeanErrorSection({ lottery, color }: { lottery: LotterySlug; color: str
   useEffect(() => {
     setTableLoading(true);
     const skip = (tablePage - 1) * tablePageSize;
-    fetch(`${API_URL}/api/validation/mean-error-rows?lottery=${lottery}&skip=${skip}&limit=${tablePageSize}`)
+    fetch(`${API_URL}/api/validation/mean-error-rows?lottery=${lottery}&skip=${skip}&limit=${tablePageSize}`, { cache: 'no-store' })
       .then(r => r.json())
       .then(d => {
         setTableRows(d.rows ?? []);
@@ -599,7 +604,7 @@ function TopTicketsSection({ lottery, color }: { lottery: LotterySlug; color: st
     setError('');
     setLoading(true);
     setData(null);
-    fetch(`${API_URL}/api/validation/top-tickets?lottery=${lottery}&draw_id=${drawId.trim()}&pre_id=${preId.trim()}&limit=${limit}`)
+    fetch(`${API_URL}/api/validation/top-tickets?lottery=${lottery}&draw_id=${drawId.trim()}&pre_id=${preId.trim()}&limit=${limit}`, { cache: 'no-store' })
       .then(r => r.json())
       .then(d => { if (d.detail) setError(d.detail); else setData(d); })
       .catch(e => setError(String(e)))
@@ -712,7 +717,7 @@ function HashValidationSection({ lottery, color }: { lottery: LotterySlug; color
   useEffect(() => {
     setOrcLoading(true);
     setOrcData(null);
-    fetch(`${API_URL}/api/online-learning/orc-snapshots?lottery=${lottery}&limit=20`)
+    fetch(`${API_URL}/api/online-learning/orc-snapshots?lottery=${lottery}&limit=20`, { cache: 'no-store' })
       .then(r => r.json())
       .then(setOrcData)
       .catch(() => {})
@@ -814,7 +819,7 @@ function CrossValidationSection({ lottery, color }: { lottery: LotterySlug; colo
   useEffect(() => {
     setLoading(true);
     setCvData(null);
-    fetch(`${API_URL}/api/validation/cross-validation?lottery=${lottery}&limit=50`)
+    fetch(`${API_URL}/api/validation/cross-validation?lottery=${lottery}&limit=50`, { cache: 'no-store' })
       .then(r => r.json())
       .then(setCvData)
       .catch(() => {})
@@ -892,7 +897,7 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
     setLoading(true);
     setError('');
     const skip = (page - 1) * pageSize;
-    fetch(`${API_URL}/api/online-learning/history?lottery=${lottery}&skip=${skip}&limit=${pageSize}`)
+    fetch(`${API_URL}/api/online-learning/history?lottery=${lottery}&skip=${skip}&limit=${pageSize}`, { cache: 'no-store' })
       .then(async r => {
         const body = await r.json();
         if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
@@ -1047,7 +1052,7 @@ function ScoreScatterSection({ lottery, color }: { lottery: LotterySlug; color: 
 
   useEffect(() => {
     setLoading(true);
-    fetch(`${API_URL}/api/validation/score-vs-position?lottery=${lottery}&limit=120`)
+    fetch(`${API_URL}/api/validation/score-vs-position?lottery=${lottery}&limit=120`, { cache: 'no-store' })
       .then(r => r.json())
       .then(setData)
       .catch(() => setData(null))
@@ -1116,7 +1121,7 @@ function ModelPerformanceSection({ lottery, color }: { lottery: LotterySlug; col
 
   useEffect(() => {
     setLoading(true);
-    fetch(`${API_URL}/api/validation/model-performance?lottery=${lottery}&limit=100`)
+    fetch(`${API_URL}/api/validation/model-performance?lottery=${lottery}&limit=100`, { cache: 'no-store' })
       .then(r => r.json())
       .then(setData)
       .catch(() => setData(null))
@@ -1209,7 +1214,8 @@ export function ValidationDashboard() {
       {/* Header */}
       <h2 style={{ margin: '0 0 4px', fontSize: '1.4rem' }}>🔬 Validation Dashboard</h2>
       <p style={{ margin: '0 0 20px', color: '#888', fontSize: '0.88rem' }}>
-        Model accuracy, learning evolution, top-ticket analysis, and hash validation per draw
+        Model accuracy, learning evolution, top-ticket analysis, and hash validation per draw.
+        Updates automatically when a new compare result is saved (daily automation or manual compare).
       </p>
 
       {/* Lottery selector */}

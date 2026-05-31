@@ -1440,9 +1440,12 @@ async def lifespan(app: FastAPI):
     db[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION].create_index(
         [("current_id", 1), ("pre_id", 1)], unique=True
     )
-    db[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION].create_index(
-        [("current_id", 1), ("pre_id", 1)], unique=True
-    )
+    for _compare_coll in (
+        EUROMILLONES_COMPARE_RESULTS_COLLECTION,
+        EL_GORDO_COMPARE_RESULTS_COLLECTION,
+        LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION,
+    ):
+        db[_compare_coll].create_index([("updated_at", -1), ("date", -1), ("current_id", -1)])
     db[EL_GORDO_BUY_QUEUE_COLLECTION].create_index([("status", 1), ("created_at", 1)])
     # DB-based ticket pool indexes (new architecture)
     for _tc in [EUROMILLONES_TICKETS_COLLECTION, EL_GORDO_TICKETS_COLLECTION, LA_PRIMITIVA_TICKETS_COLLECTION]:
@@ -2463,6 +2466,7 @@ _PUBLIC_API_PATHS = {
     "/api/online-learning/pre-draw",
     "/api/online-learning/post-draw",
     "/api/online-learning/validate-hashes",
+    "/api/validation/rebuild-metrics",
     "/api/online-learning/history",
     "/api/online-learning/orc-snapshots",
     "/api/train/reset",
@@ -4761,13 +4765,7 @@ def _euromillones_full_wheel_compare(
         "earning": round(total_earning, 2),
         "ticket_cost": round(ticket_cost, 2),
     }
-    # Persist
-    coll_compare = db_instance[EUROMILLONES_COMPARE_RESULTS_COLLECTION]
-    coll_compare.replace_one(
-        {"current_id": current_id, "pre_id": pre_id.strip()},
-        {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
-        upsert=True,
-    )
+    _save_compare_result(db_instance, "euromillones", result)
     return result
 
 
@@ -4922,9 +4920,10 @@ def _el_gordo_full_wheel_compare(
     fifth_first = category_first_pos.get((3, 1))
     sixth_first = category_first_pos.get((3, 0))
 
+    draw_date_norm = (doc.get("fecha_sorteo") or draw.get("fecha_sorteo") or "")[:10] or None
     result = {
         "current_id": current_id,
-        "date": draw.get("fecha_sorteo"),
+        "date": draw_date_norm,
         "pre_id": pre_id_clean,
         "jackpot_position": jackpot_position,
         "pos_2th": second_first,
@@ -4935,11 +4934,7 @@ def _el_gordo_full_wheel_compare(
         "categories": categories_out,
         "total_categories": len(categories_out),
     }
-    coll_compare.replace_one(
-        {"current_id": current_id, "pre_id": pre_id_clean},
-        {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
-        upsert=True,
-    )
+    _save_compare_result(db_instance, "el-gordo", result)
     print(f"[el-gordo-compare] saved result for current_id={current_id} pre_id={pre_id_clean} jackpot_position={jackpot_position}", flush=True)
     return result
 
@@ -5229,11 +5224,7 @@ def _la_primitiva_full_wheel_compare(
         "categories": categories_out,
         "total_categories": len(categories_out),
     }
-    coll_compare.replace_one(
-        {"current_id": current_id_clean, "pre_id": pre_id_clean},
-        {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
-        upsert=True,
-    )
+    _save_compare_result(db_instance, "la-primitiva", result)
     print(
         f"[la-prim-compare] saved result for current_id={current_id_clean} pre_id={pre_id_clean} special_position={special_position}",
         flush=True,
@@ -5456,11 +5447,7 @@ def api_euromillones_compare_reorder(
                 main_draw=main_draw, star_draw=star_draw, prize_map=prize_map,
                 draw_date=draw_date, ticket_cost_eur=EUROMILLONES_TICKET_COST_EUR,
             )
-            coll_compare.replace_one(
-                {"current_id": current_id_clean, "pre_id": pre_id_clean},
-                {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
-                upsert=True,
-            )
+            _save_compare_result(db, "euromillones", result)
             logging.info("[reorder/euromillones] done jackpot_position=%s", result.get("jackpot_position"))
         except Exception as e:
             logging.exception("[reorder/euromillones] background compare failed: %s", e)
@@ -5558,11 +5545,7 @@ def api_el_gordo_compare_reorder(
                 db=db, current_id=current_id_clean, pre_id=pre_id_clean,
                 main_draw=main_draw, clave_draw=clave_draw, draw_date=draw_date,
             )
-            coll_compare.replace_one(
-                {"current_id": current_id_clean, "pre_id": pre_id_clean},
-                {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
-                upsert=True,
-            )
+            _save_compare_result(db, "el-gordo", result)
             logging.info("[reorder/el-gordo] done jackpot_position=%s", result.get("jackpot_position"))
         except Exception as e:
             logging.exception("[reorder/el-gordo] background compare failed: %s", e)
@@ -5686,11 +5669,7 @@ def api_la_primitiva_compare_reorder(
                 main_draw=main_draw, reintegro_draw=reintegro_draw,
                 complementario_draw=complementario, draw_date=draw_date,
             )
-            coll_compare.replace_one(
-                {"current_id": current_id_clean, "pre_id": pre_id_clean},
-                {**result, "updated_at": dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")},
-                upsert=True,
-            )
+            _save_compare_result(db, "la-primitiva", result)
             logging.info("[reorder/la-primitiva] done jackpot_position=%s", result.get("jackpot_position"))
         except Exception as e:
             logging.exception("[reorder/la-primitiva] background compare failed: %s", e)
@@ -13669,8 +13648,73 @@ def _enrich_feedback_rows(db, lottery: str, rows: list[dict]) -> list[dict]:
     return enriched
 
 
+_VALIDATION_TOTAL_TICKETS: Dict[str, int] = {
+    "euromillones": 139_838_160,
+    "el-gordo": 31_625_100,
+    "la-primitiva": 139_838_160,
+}
+
+
+def _validation_compare_collection(lottery: str) -> str:
+    return {
+        "euromillones": EUROMILLONES_COMPARE_RESULTS_COLLECTION,
+        "el-gordo": EL_GORDO_COMPARE_RESULTS_COLLECTION,
+        "la-primitiva": LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION,
+    }[lottery]
+
+
+def _enrich_compare_result_for_validation(
+    db_instance,
+    lottery: str,
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Normalize date + precomputed validation metrics whenever a compare is saved."""
+    out = {k: v for k, v in result.items() if k != "_id"}
+    current_id = str(out.get("current_id") or "").strip()
+    pre_id = str(out.get("pre_id") or "").strip()
+
+    date_norm = str(out.get("date") or "").strip()[:10]
+    if len(date_norm) < 10 and current_id:
+        date_norm = _resolve_draw_dates(db_instance, lottery, [current_id]).get(current_id, "")
+
+    jp_raw = out.get("jackpot_position")
+    if jp_raw is None:
+        jp_raw = out.get("special_position")
+    try:
+        jp_int = int(jp_raw) if jp_raw is not None else 0
+    except (TypeError, ValueError):
+        jp_int = 0
+
+    total_tickets = _VALIDATION_TOTAL_TICKETS[lottery]
+    error_rate = round(jp_int / total_tickets, 6) if jp_int > 0 else None
+    error_rate_pct = round(error_rate * 100, 4) if error_rate is not None else None
+
+    out["current_id"] = current_id
+    out["pre_id"] = pre_id
+    out["date"] = date_norm
+    if jp_int > 0:
+        out["jackpot_position"] = jp_int
+    out["error_rate"] = error_rate
+    out["error_rate_pct"] = error_rate_pct
+    out["validation_ready"] = bool(jp_int > 0 and len(date_norm) >= 10)
+    out["updated_at"] = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return out
+
+
+def _save_compare_result(db_instance, lottery: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist compare result and refresh fields used by /api/validation/*."""
+    enriched = _enrich_compare_result_for_validation(db_instance, lottery, result)
+    coll = db_instance[_validation_compare_collection(lottery)]
+    coll.replace_one(
+        {"current_id": enriched["current_id"], "pre_id": enriched["pre_id"]},
+        enriched,
+        upsert=True,
+    )
+    return enriched
+
+
 def _compare_rows_filter(*, exclude_synthetic: bool = True) -> dict:
-    filt: dict = {"jackpot_position": {"$ne": None, "$exists": True}}
+    filt: dict = {"jackpot_position": {"$gt": 0}}
     if exclude_synthetic:
         filt["pre_id"] = {"$ne": "__synthetic__"}
     return filt
@@ -13691,11 +13735,30 @@ def _fetch_recent_compare_rows(
     total_in_db = coll.count_documents(filt)
     rows_raw = list(
         coll.find(filt, projection=projection)
-        .sort([("date", -1), ("current_id", -1)])
+        .sort([("updated_at", -1), ("date", -1), ("current_id", -1)])
         .limit(limit)
     )
     rows_raw.reverse()
     return rows_raw, total_in_db
+
+
+def _latest_compare_snapshot(coll, *, exclude_synthetic: bool = True) -> Optional[dict]:
+    """Most recent compare row in the collection (for validation dashboard header)."""
+    doc = coll.find_one(
+        _compare_rows_filter(exclude_synthetic=exclude_synthetic),
+        projection={"current_id": 1, "date": 1, "jackpot_position": 1},
+        sort=[("updated_at", -1), ("date", -1), ("current_id", -1)],
+    )
+    if not doc:
+        return None
+    jp = doc.get("jackpot_position")
+    if not jp:
+        return None
+    return {
+        "draw_id": str(doc.get("current_id") or ""),
+        "draw_date": str(doc.get("date") or ""),
+        "jackpot_position": int(jp),
+    }
 
 
 def _fetch_compare_rows_page(
@@ -13711,11 +13774,32 @@ def _fetch_compare_rows_page(
     total_in_db = coll.count_documents(filt)
     rows_raw = list(
         coll.find(filt, projection=projection)
-        .sort([("date", -1), ("current_id", -1)])
+        .sort([("updated_at", -1), ("date", -1), ("current_id", -1)])
         .skip(skip)
         .limit(limit)
     )
     return rows_raw, total_in_db
+
+
+@app.post("/api/validation/rebuild-metrics")
+def api_validation_rebuild_metrics(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+):
+    """
+    Recompute validation fields (date, error_rate, updated_at) on all compare rows.
+    Run once after deploy so /validation shows the latest draws.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if lottery not in _VALIDATION_TOTAL_TICKETS:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    coll = db[_validation_compare_collection(lottery)]
+    updated = 0
+    for doc in coll.find({}):
+        _save_compare_result(db, lottery, doc)
+        updated += 1
+    return JSONResponse(content={"lottery": lottery, "updated": updated})
 
 
 @app.get("/api/validation/accuracy-chart")
@@ -13772,7 +13856,11 @@ def api_validation_accuracy_chart(
         if not jp:
             continue
         jp = int(jp)
-        error_rate = round(jp / total_tickets, 6)
+        error_rate = r.get("error_rate")
+        if error_rate is None:
+            error_rate = round(jp / total_tickets, 6)
+        else:
+            error_rate = float(error_rate)
 
         # Get model source from draw_probs for the pre_id (the model used to rank)
         pre_id = str(r.get("pre_id") or "").strip()
@@ -13801,6 +13889,7 @@ def api_validation_accuracy_chart(
     avg_error = round(sum(r["error_rate"] for r in rows) / total_draws, 6) if total_draws else 0
     best = min(rows, key=lambda x: x["jackpot_position"]) if rows else None
     worst = max(rows, key=lambda x: x["jackpot_position"]) if rows else None
+    latest = _latest_compare_snapshot(coll)
 
     return JSONResponse(content={
         "lottery":      lottery,
@@ -13810,6 +13899,7 @@ def api_validation_accuracy_chart(
         "total_tickets": total_tickets,
         "avg_error_rate": avg_error,
         "avg_error_rate_pct": round(avg_error * 100, 4),
+        "latest_draw": latest,
         "best_draw":    {"draw_id": best["draw_id"], "jackpot_position": best["jackpot_position"], "draw_date": best["draw_date"]} if best else None,
         "worst_draw":   {"draw_id": worst["draw_id"], "jackpot_position": worst["jackpot_position"], "draw_date": worst["draw_date"]} if worst else None,
         "rows":         rows,
@@ -13907,7 +13997,7 @@ def api_validation_accuracy_rows(
         skip,
         limit,
         projection={"_id": 0, "current_id": 1, "pre_id": 1, "date": 1,
-                    "jackpot_position": 1, "source": 1},
+                    "jackpot_position": 1, "error_rate": 1, "source": 1},
     )
 
     draw_probs_map = {
@@ -13923,7 +14013,11 @@ def api_validation_accuracy_rows(
         if not jp:
             continue
         jp = int(jp)
-        error_rate = round(jp / total_tickets, 6)
+        error_rate = r.get("error_rate")
+        if error_rate is None:
+            error_rate = round(jp / total_tickets, 6)
+        else:
+            error_rate = float(error_rate)
         pre_id = str(r.get("pre_id") or "").strip()
         prob_doc = probs_coll.find_one({"draw_id": pre_id}, projection={"source": 1}) if pre_id else None
         model_source = str(prob_doc.get("source") or "unknown") if prob_doc else "unknown"
@@ -14189,19 +14283,16 @@ def api_validation_cross_validation(
     coll_name, total_tickets = compare_map[lottery]
     coll = db[coll_name]
 
-    rows_raw = list(
-        coll.find(
-            {"jackpot_position": {"$ne": None, "$exists": True}},
-            projection={"_id": 0, "current_id": 1, "pre_id": 1, "date": 1, "jackpot_position": 1},
-            sort=[("date", -1)],
-            limit=limit,
-        )
+    rows_raw, _ = _fetch_recent_compare_rows(
+        coll,
+        limit,
+        projection={"_id": 0, "current_id": 1, "pre_id": 1, "date": 1, "jackpot_position": 1},
     )
 
     rows = []
     in_top_1pct = in_top_5pct = in_top_10pct = in_top_25pct = 0
 
-    for r in rows_raw:
+    for r in reversed(rows_raw):
         jp = r.get("jackpot_position")
         if not jp:
             continue
@@ -14381,13 +14472,10 @@ def api_validation_model_performance(
     coll_name, total_tickets = compare_map[lottery]
     coll = db[coll_name]
 
-    rows_raw = list(
-        coll.find(
-            {"jackpot_position": {"$gt": 0}},
-            projection={"_id": 0, "current_id": 1, "pre_id": 1, "date": 1, "jackpot_position": 1},
-            sort=[("date", 1)],
-            limit=limit,
-        )
+    rows_raw, total_in_db = _fetch_recent_compare_rows(
+        coll,
+        limit,
+        projection={"_id": 0, "current_id": 1, "pre_id": 1, "date": 1, "jackpot_position": 1},
     )
 
     error_history: List[int] = []
@@ -14436,6 +14524,7 @@ def api_validation_model_performance(
 
     return JSONResponse(content={
         "lottery": lottery,
+        "total_in_db": total_in_db,
         "accuracy_history": accuracy_history,
         "error_history": error_history,
         "total_draws": len(error_history),
