@@ -1446,6 +1446,9 @@ async def lifespan(app: FastAPI):
         LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION,
     ):
         db[_compare_coll].create_index([("updated_at", -1), ("date", -1), ("current_id", -1)])
+    db["model_feedback_log"].create_index([("lottery", 1), ("draw_id", 1)], unique=True)
+    db["model_feedback_log"].create_index([("lottery", 1), ("updated_at", -1), ("draw_date", -1)])
+    db["model_orc_snapshots"].create_index([("lottery", 1), ("draw_id", 1)], unique=True)
     db[EL_GORDO_BUY_QUEUE_COLLECTION].create_index([("status", 1), ("created_at", 1)])
     # DB-based ticket pool indexes (new architecture)
     for _tc in [EUROMILLONES_TICKETS_COLLECTION, EL_GORDO_TICKETS_COLLECTION, LA_PRIMITIVA_TICKETS_COLLECTION]:
@@ -13284,45 +13287,87 @@ def api_online_learning_history(
     skip: int = Query(0, ge=0),
 ):
     """
-    Return the online learning feedback history for a lottery.
-    Sorted newest draw first (by draw_date, then draw_id).
+    Learning history aligned with compare results (newest first).
 
-    Returns: {lottery, total, rows: [{draw_id, pre_draw_id, error_rate, updated_at, feedback_records}]}
+    Each row is one draw with a compare result. Rows with completed post-draw feedback
+    include model update details; others show as ``feedback_status=pending`` until the
+    feedback loop runs (automatically after compare when an ORC snapshot exists).
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
 
-    coll = db["model_feedback_log"]
-    total = coll.count_documents({"lottery": lottery})
-    rows_raw = list(
-        coll.find(
-            {"lottery": lottery},
-            projection={"_id": 0, "lottery": 1, "draw_id": 1, "pre_draw_id": 1, "draw_date": 1,
-                        "error_rate": 1, "updated_at": 1, "actual_jackpot_position": 1,
-                        "feedback_records": 1, "new_orc_hash": 1},
-        )
+    if lottery not in _VALIDATION_TOTAL_TICKETS:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    compare_coll = db[_validation_compare_collection(lottery)]
+    total_tickets = _VALIDATION_TOTAL_TICKETS[lottery]
+    compare_filt = _compare_rows_filter()
+    total = compare_coll.count_documents(compare_filt)
+
+    compares_raw, _ = _fetch_compare_rows_page(
+        compare_coll,
+        skip,
+        limit,
+        projection={
+            "_id": 0,
+            "current_id": 1,
+            "pre_id": 1,
+            "date": 1,
+            "jackpot_position": 1,
+            "error_rate": 1,
+            "updated_at": 1,
+        },
     )
-    rows = _enrich_feedback_rows(db, lottery, [_item_to_json(r) for r in rows_raw])
 
-    def _feedback_sort_key(row: dict) -> tuple:
-        date = str(row.get("draw_date") or "").strip()[:10]
-        did = str(row.get("draw_id") or "").strip()
-        try:
-            draw_num = int(did)
-        except ValueError:
-            draw_num = 0
-        return (date, draw_num)
+    draw_ids = [str(c.get("current_id") or "").strip() for c in compares_raw if c.get("current_id")]
+    feedback_by_draw: Dict[str, dict] = {}
+    if draw_ids:
+        for fb in db["model_feedback_log"].find(
+            {"lottery": lottery, "draw_id": {"$in": draw_ids}},
+            projection={
+                "_id": 0,
+                "draw_id": 1,
+                "pre_draw_id": 1,
+                "draw_date": 1,
+                "error_rate": 1,
+                "updated_at": 1,
+                "actual_jackpot_position": 1,
+                "feedback_records": 1,
+                "new_orc_hash": 1,
+            },
+        ):
+            feedback_by_draw[str(fb.get("draw_id") or "").strip()] = _item_to_json(fb)
 
-    rows.sort(key=_feedback_sort_key, reverse=True)
-    rows = rows[skip : skip + limit]
+    rows: list[dict] = []
+    for c in compares_raw:
+        cid = str(c.get("current_id") or "").strip()
+        pid = str(c.get("pre_id") or "").strip()
+        jp = int(c.get("jackpot_position") or 0)
+        fb = feedback_by_draw.get(cid)
+        if fb:
+            row = dict(fb)
+            row["pre_draw_id"] = str(row.get("pre_draw_id") or pid)
+            row["feedback_status"] = "complete"
+        else:
+            er = c.get("error_rate")
+            if er is None and jp > 0:
+                er = round(jp / total_tickets, 6)
+            row = {
+                "draw_id": cid,
+                "pre_draw_id": pid,
+                "draw_date": str(c.get("date") or ""),
+                "actual_jackpot_position": jp,
+                "error_rate": float(er) if er is not None else 0.0,
+                "updated_at": str(c.get("updated_at") or ""),
+                "feedback_records": [],
+                "new_orc_hash": "",
+                "feedback_status": "pending",
+            }
+        rows.append(row)
 
-    compare_coll_map = {
-        "euromillones": EUROMILLONES_COMPARE_RESULTS_COLLECTION,
-        "el-gordo":     EL_GORDO_COMPARE_RESULTS_COLLECTION,
-        "la-primitiva": LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION,
-    }
-    compare_filt = {"jackpot_position": {"$gt": 0}, "pre_id": {"$ne": "__synthetic__"}}
-    compare_count = db[compare_coll_map[lottery]].count_documents(compare_filt)
+    rows = _enrich_feedback_rows(db, lottery, rows)
+
+    feedback_count = db["model_feedback_log"].count_documents({"lottery": lottery})
     orc_count = db["model_orc_snapshots"].count_documents({"lottery": lottery})
 
     return JSONResponse(content={
@@ -13332,10 +13377,10 @@ def api_online_learning_history(
         "skip": skip,
         "limit": limit,
         "diagnostics": {
-            "compare_count": compare_count,
+            "compare_count": total,
             "orc_count": orc_count,
-            "feedback_count": total,
-            "pending_feedback": max(0, compare_count - total),
+            "feedback_count": feedback_count,
+            "pending_feedback": max(0, total - feedback_count),
         },
     })
 
@@ -13701,6 +13746,53 @@ def _enrich_compare_result_for_validation(
     return out
 
 
+def _maybe_schedule_post_draw_feedback(db_instance, lottery: str, compare_doc: Dict[str, Any]) -> None:
+    """Run post-draw learning in the background when compare exists and ORC is available."""
+    current_id = str(compare_doc.get("current_id") or "").strip()
+    pre_id = str(compare_doc.get("pre_id") or "").strip()
+    try:
+        jp_int = int(compare_doc.get("jackpot_position") or 0)
+    except (TypeError, ValueError):
+        jp_int = 0
+    if not current_id or not pre_id or pre_id == "__synthetic__" or jp_int <= 0:
+        return
+    if db_instance["model_feedback_log"].find_one(
+        {"lottery": lottery, "draw_id": current_id},
+        projection={"_id": 1},
+    ):
+        return
+    if not db_instance["model_orc_snapshots"].find_one(
+        {"lottery": lottery, "draw_id": pre_id},
+        projection={"_id": 1},
+    ):
+        logging.info(
+            "[feedback-auto] skip %s draw_id=%s: no ORC for pre_id=%s",
+            lottery,
+            current_id,
+            pre_id,
+        )
+        return
+
+    def _run() -> None:
+        try:
+            ol = _import_online_learning()
+            ol.post_draw(lottery=lottery, current_id=current_id, pre_id=pre_id)
+            logging.info("[feedback-auto] completed %s draw_id=%s", lottery, current_id)
+        except Exception as exc:
+            logging.warning(
+                "[feedback-auto] failed %s draw_id=%s: %s",
+                lottery,
+                current_id,
+                exc,
+            )
+
+    threading.Thread(
+        target=_run,
+        daemon=True,
+        name=f"feedback-auto-{lottery}-{current_id}",
+    ).start()
+
+
 def _save_compare_result(db_instance, lottery: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Persist compare result and refresh fields used by /api/validation/*."""
     enriched = _enrich_compare_result_for_validation(db_instance, lottery, result)
@@ -13710,6 +13802,7 @@ def _save_compare_result(db_instance, lottery: str, result: Dict[str, Any]) -> D
         enriched,
         upsert=True,
     )
+    _maybe_schedule_post_draw_feedback(db_instance, lottery, enriched)
     return enriched
 
 

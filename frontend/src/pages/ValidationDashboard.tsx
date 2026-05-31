@@ -114,6 +114,7 @@ interface FeedbackRow {
   updated_at: string;
   actual_jackpot_position: number;
   new_orc_hash: string;
+  feedback_status?: 'complete' | 'pending';
   feedback_records: { model: string; added_estimators?: number; gradient_steps?: number; total_estimators?: number }[];
 }
 
@@ -925,9 +926,9 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
   return (
     <div>
       <p style={{ fontSize: '0.85rem', color: '#666', margin: '0 0 16px', lineHeight: 1.5 }}>
-        Each row is one <strong>post-draw feedback cycle</strong>: after a compare result exists, the system loads the
-        ORC snapshot from the pre-draw, updates GBM/LSTM weights, and logs the result here. Compare results alone do not
-        appear in this tab.
+        Each row is one draw with a <strong>compare result</strong> (newest first). When an ORC snapshot exists for the
+        pre-draw, post-draw learning runs automatically and the row becomes <strong>complete</strong>; otherwise it stays
+        <strong>pending</strong> until you run repair-feedback or the daily pipeline finishes.
       </p>
 
       {diag && (
@@ -1000,7 +1001,7 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem' }}>
               <thead>
                 <tr style={{ background: '#f5f5f5' }}>
-                  {['Draw date', 'Draw ID', 'Pre-draw ID', 'Jackpot position', 'Error rate', 'Models updated'].map(h => (
+                  {['Draw date', 'Draw ID', 'Pre-draw ID', 'Jackpot position', 'Error rate', 'Status / models'].map(h => (
                     <th key={h} style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 600, borderBottom: '1px solid #e0e0e0' }}>{h}</th>
                   ))}
                 </tr>
@@ -1017,17 +1018,24 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
                       {(row.error_rate * 100).toFixed(4)}%
                     </td>
                     <td style={{ padding: '5px 10px', borderBottom: '1px solid #f0f0f0' }}>
-                      {(row.feedback_records || []).map(fr => (
-                        <span key={fr.model} style={{ fontSize: '0.7rem', background: '#e0f2fe', color: '#0369a1',
-                          borderRadius: 4, padding: '1px 5px', marginRight: 4 }}>
-                          {fr.model.split('_').slice(-2).join('_')}
-                          {'added_estimators' in fr && fr.added_estimators != null
-                            ? ` +${fr.added_estimators}`
-                            : 'gradient_steps' in fr && fr.gradient_steps != null
-                              ? ` grad×${fr.gradient_steps}`
-                              : ''}
+                      {row.feedback_status === 'pending' ? (
+                        <span style={{ fontSize: '0.7rem', background: '#fef3c7', color: '#b45309',
+                          borderRadius: 4, padding: '1px 6px' }}>
+                          Pending learning
                         </span>
-                      ))}
+                      ) : (
+                        (row.feedback_records || []).map(fr => (
+                          <span key={fr.model} style={{ fontSize: '0.7rem', background: '#e0f2fe', color: '#0369a1',
+                            borderRadius: 4, padding: '1px 5px', marginRight: 4 }}>
+                            {fr.model.split('_').slice(-2).join('_')}
+                            {'added_estimators' in fr && fr.added_estimators != null
+                              ? ` +${fr.added_estimators}`
+                              : 'gradient_steps' in fr && fr.gradient_steps != null
+                                ? ` grad×${fr.gradient_steps}`
+                                : ''}
+                          </span>
+                        ))
+                      )}
                     </td>
                   </tr>
                 ))}
