@@ -5957,30 +5957,14 @@ def api_euromillones_compare_analysis(
         .skip(skip)
         .limit(limit)
     )
-    rows = []
-    for doc in cursor:
-        date_str = (doc.get("date") or "")[:10]
-        second_positions = doc.get("second_positions") or []
-        third_positions = doc.get("third_positions") or []
-        fourth_positions = doc.get("fourth_positions") or []
-        special_pos = int(doc.get("jackpot_position") or 0) or None  # 5+2
-        pos_5p0 = int(third_positions[0]) if third_positions else None  # 5+0 (client "1st")
-        pos_5p1 = int(second_positions[0]) if second_positions else None  # 5+1 (client "2nd")
-        pos_4p2 = int(fourth_positions[0]) if fourth_positions else None
-        rows.append(
-            {
-                "date": date_str,
-                "current_id": str(doc.get("current_id") or ""),
-                "pre_id": str(doc.get("pre_id") or ""),
-                "special_position": special_pos,
-                "jackpot_position": special_pos,
-                "pos_1th": pos_5p0 if pos_5p0 and pos_5p0 > 0 else 0,
-                "pos_2th": pos_5p1,
-                "pos_3th": pos_4p2,
-                "pos_4th": None,
-            }
-        )
-    rows = _annotate_special_draw_differences(rows, order="desc")
+    rows = [_euromillones_analysis_row_from_doc(doc) for doc in cursor]
+    rows = _annotate_tier1_differences_via_pre_id(
+        db,
+        EUROMILLONES_COMPARE_RESULTS_COLLECTION,
+        rows,
+        map_doc_to_row=_euromillones_analysis_row_from_doc,
+        tier1_from_row=_tier1_special_position_from_row,
+    )
     return JSONResponse(content={"rows": rows, "total": total, "skip": skip, "limit": limit})
 
 
@@ -6151,7 +6135,13 @@ def api_euromillones_compare_analysis_graph(
 
     # Ensure final rows are sorted chronologically.
     out_rows.sort(key=lambda r: (r.get("date") or "", r.get("current_id") or ""))
-    out_rows = _annotate_special_draw_differences(out_rows, order="asc")
+    out_rows = _annotate_tier1_differences_via_pre_id(
+        db,
+        EUROMILLONES_COMPARE_RESULTS_COLLECTION,
+        out_rows,
+        map_doc_to_row=_euromillones_analysis_row_from_doc,
+        tier1_from_row=_tier1_special_position_from_row,
+    )
 
     return JSONResponse(content={"rows": out_rows, "total": total})
 
@@ -6200,7 +6190,12 @@ def api_el_gordo_compare_analysis(
     rows: List[Dict[str, Any]] = []
     for doc in cursor:
         rows.append(_el_gordo_analysis_row_from_compare_doc(doc))
-    rows = _annotate_special_draw_differences(rows, order="desc")
+    rows = _annotate_tier1_differences_via_pre_id(
+        db,
+        EL_GORDO_COMPARE_RESULTS_COLLECTION,
+        rows,
+        map_doc_to_row=_el_gordo_analysis_row_from_compare_doc,
+    )
     return JSONResponse(content={"rows": rows, "total": total, "skip": skip, "limit": limit})
 
 
@@ -6334,7 +6329,12 @@ def api_el_gordo_compare_analysis_graph(
         out_rows.append(last_row)
 
     out_rows.sort(key=lambda r: (r.get("date") or "", r.get("current_id") or ""))
-    out_rows = _annotate_special_draw_differences(out_rows, order="asc")
+    out_rows = _annotate_tier1_differences_via_pre_id(
+        db,
+        EL_GORDO_COMPARE_RESULTS_COLLECTION,
+        out_rows,
+        map_doc_to_row=_el_gordo_analysis_row_from_compare_doc,
+    )
 
     return JSONResponse(content={"rows": out_rows, "total": total})
 
@@ -6376,39 +6376,14 @@ def api_la_primitiva_compare_analysis(
         .skip(skip)
         .limit(limit)
     )
-    rows: List[Dict[str, Any]] = []
-    for doc in cursor:
-        date_str = (doc.get("date") or "")[:10]
-        cats = doc.get("categories") or []
-        # Build lookup (main_hits, reintegro_hit) -> first_position from categories items
-        cat_by_key: Dict[Tuple[int, int], int] = {}
-        if isinstance(cats, list):
-            for c in cats:
-                if not isinstance(c, dict):
-                    continue
-                hm = int(c.get("main_hits") or 0)
-                rh = int(c.get("reintegro_hit") or 0)
-                fp = int(c.get("first_position") or 0)
-                cat_by_key[(hm, rh)] = fp
-        # Derive pos_1th..pos_5th from categories (1ª=6-0, 2ª=5-1, 3ª=5-0, 4ª=4-0, 5ª=3-0)
-        positions = [cat_by_key.get(key) for key in _LA_PRIMITIVA_ANALYSIS_KEYS]
-        special_pos = int(doc.get("special_position") or 0) or None
-        pos_1th = positions[0] if positions[0] is not None and positions[0] > 0 else 0
-        rows.append(
-            {
-                "date": date_str,
-                "current_id": str(doc.get("current_id") or ""),
-                "pre_id": str(doc.get("pre_id") or ""),
-                "jackpot_position": int(doc.get("jackpot_position") or 0) or None,
-                "special_position": special_pos,
-                "pos_1th": pos_1th,
-                "pos_2th": positions[1] if positions[1] and positions[1] > 0 else None,
-                "pos_3th": positions[2] if positions[2] and positions[2] > 0 else None,
-                "pos_4th": positions[3] if positions[3] and positions[3] > 0 else None,
-                "pos_5th": positions[4] if positions[4] and positions[4] > 0 else None,
-            }
-        )
-    rows = _annotate_special_draw_differences(rows, order="desc")
+    rows = [_la_primitiva_analysis_row_from_doc(doc) for doc in cursor]
+    rows = _annotate_tier1_differences_via_pre_id(
+        db,
+        LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION,
+        rows,
+        map_doc_to_row=_la_primitiva_analysis_row_from_doc,
+        tier1_from_row=_tier1_special_position_from_row,
+    )
     return JSONResponse(content={"rows": rows, "total": total, "skip": skip, "limit": limit})
 
 
@@ -6567,7 +6542,13 @@ def api_la_primitiva_compare_analysis_graph(
         out_rows.append(last_row)
 
     out_rows.sort(key=lambda r: (r.get("date") or "", r.get("current_id") or ""))
-    out_rows = _annotate_special_draw_differences(out_rows, order="asc")
+    out_rows = _annotate_tier1_differences_via_pre_id(
+        db,
+        LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION,
+        out_rows,
+        map_doc_to_row=_la_primitiva_analysis_row_from_doc,
+        tier1_from_row=_tier1_special_position_from_row,
+    )
 
     return JSONResponse(content={"rows": out_rows, "total": total})
 
@@ -13426,49 +13407,196 @@ def _compare_difference(special: Any, first: Any) -> Optional[int]:
     return s - f
 
 
+def _tier1_position_from_row(row: Dict[str, Any]) -> Optional[int]:
+    """El Gordo: 1ª (5+1) — pos_1th / jackpot."""
+    for key in ("pos_1th", "jackpot_position", "special_position"):
+        v = row.get(key)
+        if isinstance(v, int) and v > 0:
+            return v
+        if v is not None and str(v).strip():
+            try:
+                n = int(v)
+                if n > 0:
+                    return n
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _tier1_special_position_from_row(row: Dict[str, Any]) -> Optional[int]:
+    """Euromillones / La Primitiva: Special (jackpot) tier for diff column."""
+    for key in ("special_position", "jackpot_position", "pos_1th"):
+        v = row.get(key)
+        if isinstance(v, int) and v > 0:
+            return v
+        if v is not None and str(v).strip():
+            try:
+                n = int(v)
+                if n > 0:
+                    return n
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _draw_id_lookup_variants(draw_id: str) -> List[Any]:
+    """Mongo keys for id_sorteo may be stored as str or int."""
+    s = str(draw_id or "").strip()
+    if not s:
+        return []
+    variants: List[Any] = [s]
+    if s.isdigit():
+        variants.append(int(s))
+    return variants
+
+
+def _annotate_tier1_differences_via_pre_id(
+    db_instance,
+    collection_name: str,
+    rows: List[Dict[str, Any]],
+    *,
+    map_doc_to_row: Any,
+    tier1_from_row: Any = None,
+) -> List[Dict[str, Any]]:
+    """
+    Set difference_prev_special = current 1ª minus previous draw 1ª.
+
+    Uses each row's pre_id (previous draw) and looks up that draw in compare_results,
+    so pagination does not leave gaps at page boundaries.
+    """
+    if not rows or db_instance is None:
+        return rows
+
+    extract_tier1 = tier1_from_row or _tier1_position_from_row
+    coll = db_instance[collection_name]
+    lookup_ids: List[Any] = []
+    seen: set[str] = set()
+    for r in rows:
+        for v in _draw_id_lookup_variants(str(r.get("pre_id") or "")):
+            sig = f"{type(v).__name__}:{v}"
+            if sig not in seen:
+                seen.add(sig)
+                lookup_ids.append(v)
+
+    tier1_by_current: Dict[str, int] = {}
+    if lookup_ids:
+        for doc in coll.find({"current_id": {"$in": lookup_ids}}):
+            mapped = map_doc_to_row(doc)
+            cid = str(doc.get("current_id") or "")
+            t1 = extract_tier1(mapped)
+            if t1:
+                tier1_by_current[cid] = t1
+                for v in _draw_id_lookup_variants(cid):
+                    tier1_by_current[str(v)] = t1
+
+    for r in rows:
+        curr = extract_tier1(r)
+        pid = str(r.get("pre_id") or "").strip()
+        prev: Optional[int] = None
+        if pid:
+            prev = tier1_by_current.get(pid)
+            if prev is None:
+                for v in _draw_id_lookup_variants(pid):
+                    prev = tier1_by_current.get(str(v))
+                    if prev is not None:
+                        break
+        if prev is None and (r.get("date") or ""):
+            date_str = (r.get("date") or "")[:10]
+            prev_doc = coll.find_one(
+                {"date": {"$lt": date_str}},
+                sort=[("date", -1)],
+                projection={"_id": 0},
+            )
+            if prev_doc:
+                prev = extract_tier1(map_doc_to_row(prev_doc))
+
+        r["prev_special_position"] = prev
+        r["difference_prev_special"] = (
+            int(curr) - int(prev) if curr and prev else None
+        )
+    return rows
+
+
+def _euromillones_analysis_row_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+    date_str = (doc.get("date") or "")[:10]
+    second_positions = doc.get("second_positions") or []
+    third_positions = doc.get("third_positions") or []
+    fourth_positions = doc.get("fourth_positions") or []
+    special_pos = int(doc.get("jackpot_position") or 0) or None
+    pos_5p0 = int(third_positions[0]) if third_positions else None
+    pos_5p1 = int(second_positions[0]) if second_positions else None
+    pos_4p2 = int(fourth_positions[0]) if fourth_positions else None
+    return {
+        "date": date_str,
+        "current_id": str(doc.get("current_id") or ""),
+        "pre_id": str(doc.get("pre_id") or ""),
+        "special_position": special_pos,
+        "jackpot_position": special_pos,
+        "pos_1th": pos_5p0 if pos_5p0 and pos_5p0 > 0 else 0,
+        "pos_2th": pos_5p1,
+        "pos_3th": pos_4p2,
+        "pos_4th": None,
+    }
+
+
+def _la_primitiva_analysis_row_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+    date_str = (doc.get("date") or "")[:10]
+    cats = doc.get("categories") or []
+    cat_by_key: Dict[Tuple[int, int], int] = {}
+    if isinstance(cats, list):
+        for c in cats:
+            if not isinstance(c, dict):
+                continue
+            hm = int(c.get("main_hits") or 0)
+            rh = int(c.get("reintegro_hit") or 0)
+            fp = int(c.get("first_position") or 0)
+            cat_by_key[(hm, rh)] = fp
+    positions = [cat_by_key.get(key) for key in _LA_PRIMITIVA_ANALYSIS_KEYS]
+    special_pos = int(doc.get("special_position") or 0) or None
+    pos_1th = positions[0] if positions[0] is not None and positions[0] > 0 else 0
+    return {
+        "date": date_str,
+        "current_id": str(doc.get("current_id") or ""),
+        "pre_id": str(doc.get("pre_id") or ""),
+        "jackpot_position": int(doc.get("jackpot_position") or 0) or None,
+        "special_position": special_pos,
+        "pos_1th": pos_1th,
+        "pos_2th": positions[1] if positions[1] and positions[1] > 0 else None,
+        "pos_3th": positions[2] if positions[2] and positions[2] > 0 else None,
+        "pos_4th": positions[3] if positions[3] and positions[3] > 0 else None,
+        "pos_5th": positions[4] if positions[4] and positions[4] > 0 else None,
+    }
+
+
 def _annotate_special_draw_differences(
     rows: List[Dict[str, Any]],
     *,
     order: str,
 ) -> List[Dict[str, Any]]:
     """
-    Add cross-draw difference fields based on Special position.
-
-    order='desc' means rows are newest -> oldest.
-    order='asc' means rows are oldest -> newest.
+    Legacy: adjacent-row diff only (kept for internal samples). Prefer
+    _annotate_tier1_differences_via_pre_id for paginated analysis APIs.
     """
     if not rows:
         return rows
 
-    def _tier1_pos(row: Dict[str, Any]) -> Any:
-        """1ª categoría (5+1): prefer pos_1th, then legacy jackpot/special fields."""
-        for key in ("pos_1th", "jackpot_position", "special_position"):
-            v = row.get(key)
-            if isinstance(v, int) and v > 0:
-                return v
-        return None
-
     if order == "desc":
         for i, row in enumerate(rows):
-            curr = _tier1_pos(row)
-            nxt = _tier1_pos(rows[i + 1]) if i + 1 < len(rows) else None
-            row["prev_special_position"] = nxt if isinstance(nxt, int) and nxt > 0 else None
+            curr = _tier1_position_from_row(row)
+            nxt = _tier1_position_from_row(rows[i + 1]) if i + 1 < len(rows) else None
+            row["prev_special_position"] = nxt
             row["difference_prev_special"] = (
-                int(curr) - int(nxt)
-                if isinstance(curr, int) and curr > 0 and isinstance(nxt, int) and nxt > 0
-                else None
+                int(curr) - int(nxt) if curr and nxt else None
             )
     else:
-        prev = None
+        prev_val: Optional[int] = None
         for row in rows:
-            curr = _tier1_pos(row)
-            row["prev_special_position"] = prev if isinstance(prev, int) and prev > 0 else None
+            curr = _tier1_position_from_row(row)
+            row["prev_special_position"] = prev_val
             row["difference_prev_special"] = (
-                int(curr) - int(prev)
-                if isinstance(curr, int) and curr > 0 and isinstance(prev, int) and prev > 0
-                else None
+                int(curr) - int(prev_val) if curr and prev_val else None
             )
-            prev = curr if isinstance(curr, int) and curr > 0 else None
+            prev_val = curr
     return rows
 
 
