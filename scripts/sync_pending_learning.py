@@ -5,11 +5,13 @@ Create or refresh pending Learning history rows for recent draws.
 Calls POST /api/online-learning/sync-pending per lottery (public endpoint).
 
 Default: Euromillones + La Primitiva, last 30 draw pairs.
+Uses **existing** compare rows only (no training progress / TXT required).
 
 Examples:
   python scripts/sync_pending_learning.py
   python scripts/sync_pending_learning.py --lottery euromillones --last 24
-  python scripts/sync_pending_learning.py --api-url http://localhost:8000 --no-compare
+  # New draws only — needs train progress + full wheel:
+  python scripts/sync_pending_learning.py --run-compare --api-url http://localhost:8000
 """
 
 from __future__ import annotations
@@ -49,9 +51,9 @@ def main() -> None:
     )
     parser.add_argument("--last", type=int, default=30, help="Recent draw pairs per lottery")
     parser.add_argument(
-        "--no-compare",
+        "--run-compare",
         action="store_true",
-        help="Only refresh existing compares (do not run slow full-wheel compare)",
+        help="Run full-wheel compare when missing (needs train progress; not for old data)",
     )
     args = parser.parse_args()
 
@@ -65,7 +67,7 @@ def main() -> None:
     for lottery in lotteries:
         url = (
             f"{base}/api/online-learning/sync-pending"
-            f"?lottery={lottery}&last={args.last}&run_compare={str(not args.no_compare).lower()}"
+            f"?lottery={lottery}&last={args.last}&run_compare={str(args.run_compare).lower()}"
         )
         print(f"\n=== {lottery} (last {args.last}) ===")
         try:
@@ -77,6 +79,7 @@ def main() -> None:
                 continue
             print(
                 f"pairs={data.get('pairs_checked')} refreshed={data.get('refreshed')} "
+                f"skipped_no_compare={data.get('skipped_no_compare')} "
                 f"new_compares={data.get('compared_new')} feedback_scheduled={data.get('feedback_scheduled')}"
             )
             diag = data.get("diagnostics") or {}

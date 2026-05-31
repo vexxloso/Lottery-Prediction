@@ -13403,17 +13403,22 @@ def api_online_learning_sync_pending(
     lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
     last: int = Query(30, ge=1, le=100),
     run_compare: bool = Query(
-        True,
-        description="Run full-wheel compare when missing (slow if TXT is large)",
+        False,
+        description="Run full-wheel compare when missing (needs train progress + TXT; not for old data)",
     ),
 ):
     """
-    Ensure recent draws appear in Learning history (compare + pending/complete rows).
+    Refresh learning/validation fields from **existing** compare results.
 
-    For each of the last ``last`` draw pairs from the feature table:
-    - Refreshes existing compare docs (validation fields + ``updated_at``)
-    - Optionally runs full-wheel compare when missing
-    - Schedules post-draw feedback when ORC exists and feedback is missing
+    Default (``run_compare=false``): only reads Mongo compare rows — no training
+    progress or full-wheel TXT required (correct for old historical data).
+
+    For each recent feature draw pair:
+    - Finds compare by (current_id, pre_id), or by current_id only for legacy rows
+    - Re-saves validation metrics and schedules feedback if ORC exists
+    - Skips pairs with no compare (does not error)
+
+    Set ``run_compare=true`` only for new draws that have train progress + wheel file.
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
@@ -13434,6 +13439,7 @@ def api_online_learning_sync_pending(
 
     refreshed = 0
     compared = 0
+    skipped_no_compare = 0
     feedback_scheduled = 0
     errors: List[str] = []
 
@@ -13442,7 +13448,12 @@ def api_online_learning_sync_pending(
         pre_id = pair["pre_id"]
         label = f"{current_id} (pre={pre_id})"
         try:
-            doc = _find_compare_doc(compare_coll, current_id, pre_id)
+            doc = _find_compare_for_draw(
+                compare_coll,
+                current_id,
+                pre_id,
+                allow_current_id_only=not run_compare,
+            )
             if doc is None and run_compare:
                 try:
                     runner(current_id, pre_id, db)
@@ -13455,15 +13466,16 @@ def api_online_learning_sync_pending(
                     errors.append(f"{label}: compare — {exc}")
                     continue
             elif doc is None:
-                errors.append(f"{label}: no compare result (enable run_compare or run full wheel)")
+                skipped_no_compare += 1
                 continue
 
             if doc:
+                effective_pre_id = str(doc.get("pre_id") or pre_id).strip()
                 before_fb = _feedback_log_exists(db, lottery, current_id)
                 _save_compare_result(db, lottery, doc)
                 refreshed += 1
                 if not before_fb and db["model_orc_snapshots"].find_one(
-                    {"lottery": lottery, "draw_id": pre_id},
+                    {"lottery": lottery, "draw_id": effective_pre_id},
                     projection={"_id": 1},
                 ):
                     feedback_scheduled += 1
@@ -13480,6 +13492,7 @@ def api_online_learning_sync_pending(
             "pairs_checked": len(pairs),
             "refreshed": refreshed,
             "compared_new": compared,
+            "skipped_no_compare": skipped_no_compare,
             "feedback_scheduled": feedback_scheduled,
             "errors": errors,
             "diagnostics": {
@@ -13840,6 +13853,36 @@ def _compare_pair_keys(current_id: str, pre_id: str) -> List[Tuple[Any, Any]]:
 def _find_compare_doc(coll, current_id: str, pre_id: str) -> Optional[Dict[str, Any]]:
     for ck, pk in _compare_pair_keys(current_id, pre_id):
         doc = coll.find_one({"current_id": ck, "pre_id": pk})
+        if doc:
+            return doc
+    return None
+
+
+def _find_compare_for_draw(
+    coll,
+    current_id: str,
+    pre_id: str,
+    *,
+    allow_current_id_only: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """
+    Load a compare row for learning/validation sync.
+
+    Tries exact (current_id, pre_id) first. Old data may have been saved with a
+    different pre_id than today's feature row — when ``allow_current_id_only``,
+    fall back to the newest compare for ``current_id`` only (no training progress).
+    """
+    doc = _find_compare_doc(coll, current_id, pre_id)
+    if doc:
+        return doc
+    if not allow_current_id_only:
+        return None
+    filt = _compare_rows_filter()
+    for ck in _draw_id_variants(current_id):
+        doc = coll.find_one(
+            {**filt, "current_id": ck},
+            sort=[("updated_at", -1), ("date", -1), ("current_id", -1)],
+        )
         if doc:
             return doc
     return None

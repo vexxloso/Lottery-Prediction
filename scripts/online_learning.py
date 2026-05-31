@@ -609,6 +609,18 @@ def post_draw(lottery: str, current_id: str, pre_id: str) -> dict:
         compare = db[cfg["compare_col"]].find_one({"current_id": ck, "pre_id": pk})
         if compare:
             break
+    if not compare:
+        filt = {"jackpot_position": {"$gt": 0}, "pre_id": {"$ne": "__synthetic__"}}
+        cids: list = [current_id]
+        if str(current_id).isdigit():
+            cids.append(int(current_id))
+        for ck in cids:
+            compare = db[cfg["compare_col"]].find_one(
+                {**filt, "current_id": ck},
+                sort=[("updated_at", -1), ("date", -1)],
+            )
+            if compare:
+                break
     client.close()
 
     if not compare:
