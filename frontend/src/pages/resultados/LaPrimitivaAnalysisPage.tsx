@@ -221,7 +221,7 @@ export function LaPrimitivaAnalysisPage() {
       )}
       {rows.length > 0 && (
         <p style={{ margin: '0 0 0.5rem', fontSize: '0.82rem', color: '#666' }}>
-          <strong>Diff vs prev draw (Special)</strong> — Special position of current draw minus previous draw.
+          <strong>Diff vs prev draw (Special)</strong> — current Special minus previous draw (negative = moved earlier in the wheel).
         </p>
       )}
       {rows.length > 0 && (

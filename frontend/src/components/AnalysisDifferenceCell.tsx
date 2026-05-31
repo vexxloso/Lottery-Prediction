@@ -1,4 +1,4 @@
-import { differenceFromRow, formatPosition } from '../utils/compareAnalysis';
+import { differenceFromRow, formatDifference } from '../utils/compareAnalysis';
 
 type Props = {
   row: {
@@ -12,9 +12,11 @@ type Props = {
 export function AnalysisDifferenceCell({ row }: Props) {
   const diff = differenceFromRow(row);
   if (diff == null) return <td>—</td>;
+  const color =
+    diff > 0 ? '#16a34a' : diff < 0 ? '#dc2626' : 'var(--color-text-muted)';
   return (
-    <td style={{ fontWeight: 600, color: '#7c3aed' }}>
-      {formatPosition(diff)}
+    <td style={{ fontWeight: 600, color }}>
+      {formatDifference(diff)}
     </td>
   );
 }

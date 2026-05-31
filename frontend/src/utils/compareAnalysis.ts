@@ -5,6 +5,12 @@ export function formatPosition(value: number | null | undefined): string {
   return Number(value).toLocaleString();
 }
 
+/** Signed gap between draws (can be negative when the tier moved earlier in the wheel). */
+export function formatDifference(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return '—';
+  return Number(value).toLocaleString();
+}
+
 export function computeDifference(
   special: number | null | undefined,
   prevSpecial: number | null | undefined,
