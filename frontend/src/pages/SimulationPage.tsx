@@ -340,7 +340,7 @@ export function SimulationPage() {
     }
     let cancelled = false;
     const params = new URLSearchParams({ current_id: drawId, pre_id: prevId });
-    const getUrl = `${API_URL}/api/euromillones/compare/full-wheel?${params.toString()}`;
+    const cachedUrl = `${API_URL}/api/euromillones/compare/cached?${params.toString()}`;
     const reorderUrl = `${API_URL}/api/euromillones/compare/full-wheel/reorder?${params.toString()}`;
 
     const applyEuromillonesPayload = (data: Record<string, unknown>) => {
@@ -370,7 +370,7 @@ export function SimulationPage() {
       setEuromillonesFullWheelError('');
       try {
         const outcome = await loadFullWheelCompare({
-          getUrl,
+          cachedUrl,
           reorderUrl,
           isCancelled: () => cancelled,
         });
@@ -461,7 +461,7 @@ export function SimulationPage() {
           return;
         }
 
-        const reorderRes = await fetch(reorderUrl, { method: 'POST' });
+        const reorderRes = await fetch(`${reorderUrl}&force=true`, { method: 'POST', cache: 'no-store' });
         const reorderData = (await reorderRes.json().catch(() => ({}))) as Record<string, unknown>;
         if (!cancelled && reorderRes.ok && parseJackpot(reorderData)) {
           applyComparePayload(reorderData);
@@ -537,7 +537,7 @@ export function SimulationPage() {
     setLaPrimitivaFullWheelLoading(true);
     setLaPrimitivaFullWheelError('');
     const params = new URLSearchParams({ current_id: drawId, pre_id: prevId });
-    const getUrl = `${API_URL}/api/la-primitiva/compare/full-wheel?${params.toString()}`;
+    const cachedUrl = `${API_URL}/api/la-primitiva/compare/cached?${params.toString()}`;
     const reorderUrl = `${API_URL}/api/la-primitiva/compare/full-wheel/reorder?${params.toString()}`;
 
     const applyLaPrimitivaPayload = (data: Record<string, unknown>) => {
@@ -561,7 +561,7 @@ export function SimulationPage() {
       setLaPrimitivaFullWheelError('');
       try {
         const outcome = await loadFullWheelCompare({
-          getUrl,
+          cachedUrl,
           reorderUrl,
           isCancelled: () => cancelled,
         });

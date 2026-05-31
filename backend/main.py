@@ -2464,6 +2464,8 @@ _PUBLIC_API_PATHS = {
     "/api/euromillones/compare/full-wheel",
     "/api/el-gordo/compare/full-wheel",
     "/api/el-gordo/compare/cached",
+    "/api/euromillones/compare/cached",
+    "/api/la-primitiva/compare/cached",
     "/api/la-primitiva/compare/full-wheel",
     # Online learning + train reset (daily automation / backfill scripts)
     "/api/online-learning/pre-draw",
@@ -4773,32 +4775,137 @@ def _euromillones_full_wheel_compare(
     return result
 
 
+def _draw_id_variants(value: Any) -> List[Any]:
+    """String and int forms for Mongo keys (id_sorteo stored both ways)."""
+    s = str(value or "").strip()
+    if not s:
+        return []
+    out: List[Any] = [s]
+    if s.isdigit():
+        out.append(int(s))
+    return out
+
+
+def _compare_pair_keys(current_id: str, pre_id: str) -> List[Tuple[Any, Any]]:
+    keys: List[Tuple[Any, Any]] = []
+    seen: set = set()
+    for ck in _draw_id_variants(current_id):
+        for pk in _draw_id_variants(pre_id):
+            pair = (ck, pk)
+            if pair not in seen:
+                seen.add(pair)
+                keys.append(pair)
+    return keys
+
+
+def _find_compare_doc(coll, current_id: str, pre_id: str) -> Optional[Dict[str, Any]]:
+    for ck, pk in _compare_pair_keys(current_id, pre_id):
+        doc = coll.find_one({"current_id": ck, "pre_id": pk})
+        if doc:
+            return doc
+    return None
+
+
+def _compare_jackpot_value(doc: Optional[Dict[str, Any]]) -> Optional[int]:
+    if not doc:
+        return None
+    for key in ("jackpot_position", "special_position"):
+        raw = doc.get(key)
+        if raw is None:
+            continue
+        try:
+            val = int(raw)
+            if val > 0:
+                return val
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _compare_result_ready(doc: Optional[Dict[str, Any]]) -> bool:
+    return _compare_jackpot_value(doc) is not None
+
+
+def _delete_compare_pair_variants(coll, current_id: str, pre_id: str) -> int:
+    deleted = 0
+    for ck, pk in _compare_pair_keys(current_id, pre_id):
+        res = coll.delete_many({"current_id": ck, "pre_id": pk})
+        deleted += res.deleted_count
+    return deleted
+
+
+def _prepare_reorder_compare_cache(
+    coll,
+    current_id: str,
+    pre_id: str,
+    *,
+    force: bool,
+) -> Optional[Dict[str, Any]]:
+    """Drop invalid/stale cache; return ready doc unless ``force`` recalculate."""
+    existing = _find_compare_doc(coll, current_id, pre_id)
+    if existing and not _compare_result_ready(existing):
+        _delete_compare_pair_variants(coll, current_id, pre_id)
+        return None
+    if existing and force:
+        _delete_compare_pair_variants(coll, current_id, pre_id)
+        return None
+    if existing and _compare_result_ready(existing):
+        return existing
+    return None
+
+
+_compare_slots_busy: set[str] = set()
+_compare_slot_lock = threading.Lock()
+
+
+def _compare_slot_busy(lottery_api: str) -> bool:
+    key = lottery_api.replace("-", "_")
+    with _compare_slot_lock:
+        return key in _compare_slots_busy
+
+
+def _try_acquire_compare_slot(lottery_api: str) -> bool:
+    key = lottery_api.replace("-", "_")
+    with _compare_slot_lock:
+        if key in _compare_slots_busy:
+            return False
+        _compare_slots_busy.add(key)
+        return True
+
+
+def _release_compare_slot(lottery_api: str) -> None:
+    key = lottery_api.replace("-", "_")
+    with _compare_slot_lock:
+        _compare_slots_busy.discard(key)
+
+
+def _full_wheel_path_for_pre_id(
+    db_instance, progress_collection: str, pre_id: str
+) -> Optional[str]:
+    coll = db_instance[progress_collection]
+    progress_doc = None
+    for variant in _draw_id_variants(pre_id):
+        progress_doc = coll.find_one({"cutoff_draw_id": variant})
+        if progress_doc:
+            break
+        progress_doc = coll.find_one({"probs_draw_id": variant})
+        if progress_doc:
+            break
+    if not progress_doc:
+        return None
+    path = (progress_doc.get("full_wheel_file_path") or "").strip()
+    if path and os.path.isfile(path):
+        return path
+    return None
+
+
 def _find_el_gordo_compare_doc(
     db_instance, current_id: str, pre_id: str
 ) -> Optional[Dict[str, Any]]:
     """Load saved compare from MongoDB (string or int id_sorteo keys)."""
     coll = db_instance[EL_GORDO_COMPARE_RESULTS_COLLECTION]
-    cid = current_id.strip()
-    pid = pre_id.strip()
-    keys: List[Tuple[Any, Any]] = [(cid, pid)]
-    if cid.isdigit():
-        ic = int(cid)
-        keys.append((ic, pid))
-        if pid.isdigit():
-            ip = int(pid)
-            keys.extend([(cid, ip), (ic, ip)])
-    elif pid.isdigit():
-        keys.append((cid, int(pid)))
-    seen: set[Tuple[str, str]] = set()
-    for ck, pk in keys:
-        sig = (str(ck), str(pk))
-        if sig in seen:
-            continue
-        seen.add(sig)
-        doc = coll.find_one({"current_id": ck, "pre_id": pk})
-        if doc and doc.get("jackpot_position") is not None:
-            return doc
-    return None
+    doc = _find_compare_doc(coll, current_id.strip(), pre_id.strip())
+    return doc if _compare_result_ready(doc) else None
 
 
 def _el_gordo_full_wheel_compare(
@@ -5251,9 +5358,8 @@ def api_euromillones_compare_full_wheel(
     pre_id_clean = pre_id.strip()
     coll_compare = db[EUROMILLONES_COMPARE_RESULTS_COLLECTION]
 
-    # 1) If there is already a compare result for this (current_id, pre_id), return it.
-    existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
-    if existing:
+    existing = _find_compare_doc(coll_compare, current_id_clean, pre_id_clean)
+    if existing and _compare_result_ready(existing):
         out = {k: v for k, v in existing.items() if k != "_id"}
         return JSONResponse(content=_item_to_json(out))
 
@@ -5265,6 +5371,50 @@ def api_euromillones_compare_full_wheel(
         raise
     except Exception as e:
         raise HTTPException(500, detail=f"Euromillones compare failed: {e}")
+
+
+@app.get("/api/euromillones/compare/cached")
+def api_euromillones_compare_cached(
+    current_id: str = Query(..., description="id_sorteo of the draw (result)."),
+    pre_id: str = Query(..., description="cutoff_draw_id for the full wheel run."),
+):
+    """Return saved compare only (no TXT scan). Used by prediction UI polling."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    doc = _find_compare_doc(
+        db[EUROMILLONES_COMPARE_RESULTS_COLLECTION],
+        current_id.strip(),
+        pre_id.strip(),
+    )
+    if not _compare_result_ready(doc):
+        raise HTTPException(
+            404,
+            detail="No cached Euromillones compare for this draw pair; run reorder first",
+        )
+    out = {k: v for k, v in doc.items() if k != "_id"}
+    return JSONResponse(content=_item_to_json(out))
+
+
+@app.get("/api/la-primitiva/compare/cached")
+def api_la_primitiva_compare_cached(
+    current_id: str = Query(..., description="id_sorteo of the La Primitiva draw (result)."),
+    pre_id: str = Query(..., description="cutoff_draw_id for the full wheel run."),
+):
+    """Return saved compare only (no TXT scan). Used by prediction UI polling."""
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    doc = _find_compare_doc(
+        db[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION],
+        current_id.strip(),
+        pre_id.strip(),
+    )
+    if not _compare_result_ready(doc):
+        raise HTTPException(
+            404,
+            detail="No cached La Primitiva compare for this draw pair; run reorder first",
+        )
+    out = {k: v for k, v in doc.items() if k != "_id"}
+    return JSONResponse(content=_item_to_json(out))
 
 
 @app.get("/api/el-gordo/compare/cached")
@@ -5301,9 +5451,8 @@ def api_la_primitiva_compare_full_wheel(
     pre_id_clean = pre_id.strip()
     coll_compare = db[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION]
 
-    # 1) Existing real compare (current_id, pre_id)
-    existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
-    if existing:
+    existing = _find_compare_doc(coll_compare, current_id_clean, pre_id_clean)
+    if existing and _compare_result_ready(existing):
         out = {k: v for k, v in existing.items() if k != "_id"}
         return JSONResponse(content=_item_to_json(out))
 
@@ -5360,13 +5509,14 @@ def _probs_list_to_dict(probs: list) -> dict:
 def api_euromillones_compare_reorder(
     current_id: str = Query(..., description="id_sorteo of the draw to evaluate (result)."),
     pre_id: str = Query(..., description="cutoff_draw_id for the training run used to rank tickets."),
+    force: bool = Query(False, description="Delete cached compare and recalculate"),
 ):
     """
     DB-based compare: rank existing tickets by model score, find jackpot position.
 
-    First call (no tickets in DB): generates ALL C(50,5)*C(12,2) tickets and stores them.
-    Subsequent calls: updates scores only — no regeneration.
-    Falls back to TXT-based compare if DB approach fails.
+    Runs in a background thread (202). Uses full-wheel TXT when available (low RAM),
+    otherwise streams the ticket pool from Mongo without loading all tickets into memory.
+    Bootstrap tickets separately via POST /api/euromillones/tickets/bootstrap.
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
@@ -5376,8 +5526,10 @@ def api_euromillones_compare_reorder(
 
     # 1) Return cached result if available
     coll_compare = db[EUROMILLONES_COMPARE_RESULTS_COLLECTION]
-    existing = _find_compare_doc(coll_compare, current_id_clean, pre_id_clean)
-    if existing and (existing.get("jackpot_position") or existing.get("special_position")):
+    existing = _prepare_reorder_compare_cache(
+        coll_compare, current_id_clean, pre_id_clean, force=force
+    )
+    if existing:
         out = {k: v for k, v in existing.items() if k != "_id"}
         return JSONResponse(content=_item_to_json(out))
 
@@ -5437,9 +5589,36 @@ def api_euromillones_compare_reorder(
         except Exception as e:
             raise HTTPException(400, detail=f"Probabilities not found and TXT fallback failed: {e}")
 
-    tickets_coll = db[EUROMILLONES_TICKETS_COLLECTION]
-    if tickets_coll.count_documents({"lottery": "euromillones"}) > 0:
+    if _compare_slot_busy("euromillones"):
+        raise HTTPException(
+            503,
+            detail="Compare already running for euromillones. Poll GET /api/euromillones/compare/cached.",
+        )
+
+    def _run_compare():
+        if not _try_acquire_compare_slot("euromillones"):
+            logging.warning("[reorder/euromillones] compare slot already taken")
+            return
         try:
+            if _full_wheel_path_for_pre_id(db, EUROMILLONES_TRAIN_PROGRESS_COLLECTION, pre_id_clean):
+                try:
+                    result = _euromillones_full_wheel_compare(current_id_clean, pre_id_clean, db)
+                    logging.info(
+                        "[reorder/euromillones] TXT compare done jackpot_position=%s",
+                        result.get("jackpot_position"),
+                    )
+                    return
+                except Exception as e:
+                    logging.warning("[reorder/euromillones] TXT compare failed, trying DB: %s", e)
+
+            tickets_coll = db[EUROMILLONES_TICKETS_COLLECTION]
+            if tickets_coll.count_documents({"lottery": "euromillones"}) == 0:
+                logging.error(
+                    "[reorder/euromillones] ticket pool empty — bootstrap via "
+                    "POST /api/euromillones/tickets/bootstrap (skipped during compare to avoid OOM)"
+                )
+                return
+
             update_euromillones_ranking(db, pre_id_clean, draw_date, mains_probs, stars_probs)
             result = compare_euromillones_from_db(
                 db=db,
@@ -5451,38 +5630,15 @@ def api_euromillones_compare_reorder(
                 draw_date=draw_date,
                 ticket_cost_eur=EUROMILLONES_TICKET_COST_EUR,
             )
-            saved = _save_compare_result(db, "euromillones", result)
-            if saved.get("jackpot_position"):
-                return JSONResponse(content=_item_to_json(saved))
-        except Exception as e:
-            logging.warning(
-                "[reorder/euromillones] sync compare failed, using background: %s", e
-            )
-
-    # Run compare in background thread — returns 202 (bootstrap or slow path).
-    def _run_compare():
-        try:
-            tickets_coll = db[EUROMILLONES_TICKETS_COLLECTION]
-            ticket_count = tickets_coll.count_documents({"lottery": "euromillones"})
-            if ticket_count == 0:
-                logging.info("[reorder/euromillones] bootstrapping tickets")
-                bootstrap_euromillones_tickets(db)
-            else:
-                update_euromillones_ranking(db, pre_id_clean, draw_date, mains_probs, stars_probs)
-            result = compare_euromillones_from_db(
-                db=db, current_id=current_id_clean, pre_id=pre_id_clean,
-                main_draw=main_draw, star_draw=star_draw, prize_map=prize_map,
-                draw_date=draw_date, ticket_cost_eur=EUROMILLONES_TICKET_COST_EUR,
-            )
             _save_compare_result(db, "euromillones", result)
-            logging.info("[reorder/euromillones] done jackpot_position=%s", result.get("jackpot_position"))
+            logging.info(
+                "[reorder/euromillones] DB compare done jackpot_position=%s",
+                result.get("jackpot_position"),
+            )
         except Exception as e:
             logging.exception("[reorder/euromillones] background compare failed: %s", e)
-            # Try TXT fallback
-            try:
-                _euromillones_full_wheel_compare(current_id_clean, pre_id_clean, db)
-            except Exception:
-                pass
+        finally:
+            _release_compare_slot("euromillones")
 
     threading.Thread(target=_run_compare, daemon=True).start()
     return JSONResponse(
@@ -5496,13 +5652,14 @@ def api_euromillones_compare_reorder(
 def api_el_gordo_compare_reorder(
     current_id: str = Query(..., description="id_sorteo of the El Gordo draw to evaluate (result)."),
     pre_id: str = Query(..., description="cutoff_draw_id for the training run used to rank tickets."),
+    force: bool = Query(False, description="Delete cached compare and recalculate"),
 ):
     """
     DB-based compare for El Gordo: rank existing tickets by model score, find jackpot position.
 
-    First call (no tickets in DB): generates ALL C(54,5)*10 tickets and stores them.
-    Subsequent calls: updates scores only — no regeneration.
-    Falls back to TXT-based compare if DB approach fails.
+    Runs in a background thread (202). Uses full-wheel TXT when available (low RAM),
+    otherwise streams the ticket pool from Mongo without loading all tickets into memory.
+    Bootstrap tickets separately via POST /api/el-gordo/tickets/bootstrap.
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
@@ -5510,8 +5667,10 @@ def api_el_gordo_compare_reorder(
     current_id_clean = current_id.strip()
     pre_id_clean = pre_id.strip()
 
-    # 1) Return cached result if available
-    existing = _find_el_gordo_compare_doc(db, current_id_clean, pre_id_clean)
+    coll_compare = db[EL_GORDO_COMPARE_RESULTS_COLLECTION]
+    existing = _prepare_reorder_compare_cache(
+        coll_compare, current_id_clean, pre_id_clean, force=force
+    )
     if existing:
         out = {k: v for k, v in existing.items() if k != "_id"}
         return JSONResponse(content=_item_to_json(out))
@@ -5560,9 +5719,36 @@ def api_el_gordo_compare_reorder(
         except Exception as e:
             raise HTTPException(400, detail=f"Probabilities not found and TXT fallback failed: {e}")
 
-    tickets_coll = db[EL_GORDO_TICKETS_COLLECTION]
-    if tickets_coll.count_documents({"lottery": "el_gordo"}) > 0:
+    if _compare_slot_busy("el-gordo"):
+        raise HTTPException(
+            503,
+            detail="Compare already running for el-gordo. Poll GET /api/el-gordo/compare/cached.",
+        )
+
+    def _run_compare():
+        if not _try_acquire_compare_slot("el-gordo"):
+            logging.warning("[reorder/el-gordo] compare slot already taken")
+            return
         try:
+            if _full_wheel_path_for_pre_id(db, EL_GORDO_TRAIN_PROGRESS_COLLECTION, pre_id_clean):
+                try:
+                    result = _el_gordo_full_wheel_compare(current_id_clean, pre_id_clean, db)
+                    logging.info(
+                        "[reorder/el-gordo] TXT compare done jackpot_position=%s",
+                        result.get("jackpot_position"),
+                    )
+                    return
+                except Exception as e:
+                    logging.warning("[reorder/el-gordo] TXT compare failed, trying DB: %s", e)
+
+            tickets_coll = db[EL_GORDO_TICKETS_COLLECTION]
+            if tickets_coll.count_documents({"lottery": "el_gordo"}) == 0:
+                logging.error(
+                    "[reorder/el-gordo] ticket pool empty — bootstrap via "
+                    "POST /api/el-gordo/tickets/bootstrap (skipped during compare to avoid OOM)"
+                )
+                return
+
             update_el_gordo_ranking(db, pre_id_clean, draw_date, mains_probs, clave_probs)
             result = compare_el_gordo_from_db(
                 db=db,
@@ -5572,33 +5758,15 @@ def api_el_gordo_compare_reorder(
                 clave_draw=clave_draw,
                 draw_date=draw_date,
             )
-            saved = _save_compare_result(db, "el-gordo", result)
-            if saved.get("jackpot_position"):
-                return JSONResponse(content=_item_to_json(saved))
-        except Exception as e:
-            logging.warning("[reorder/el-gordo] sync compare failed, using background: %s", e)
-
-    def _run_compare():
-        try:
-            tickets_coll = db[EL_GORDO_TICKETS_COLLECTION]
-            ticket_count = tickets_coll.count_documents({"lottery": "el_gordo"})
-            if ticket_count == 0:
-                logging.info("[reorder/el-gordo] bootstrapping tickets")
-                bootstrap_el_gordo_tickets(db)
-            else:
-                update_el_gordo_ranking(db, pre_id_clean, draw_date, mains_probs, clave_probs)
-            result = compare_el_gordo_from_db(
-                db=db, current_id=current_id_clean, pre_id=pre_id_clean,
-                main_draw=main_draw, clave_draw=clave_draw, draw_date=draw_date,
-            )
             _save_compare_result(db, "el-gordo", result)
-            logging.info("[reorder/el-gordo] done jackpot_position=%s", result.get("jackpot_position"))
+            logging.info(
+                "[reorder/el-gordo] DB compare done jackpot_position=%s",
+                result.get("jackpot_position"),
+            )
         except Exception as e:
             logging.exception("[reorder/el-gordo] background compare failed: %s", e)
-            try:
-                _el_gordo_full_wheel_compare(current_id_clean, pre_id_clean, db)
-            except Exception:
-                pass
+        finally:
+            _release_compare_slot("el-gordo")
 
     threading.Thread(target=_run_compare, daemon=True).start()
     return JSONResponse(
@@ -5612,13 +5780,14 @@ def api_el_gordo_compare_reorder(
 def api_la_primitiva_compare_reorder(
     current_id: str = Query(..., description="id_sorteo of the La Primitiva draw to evaluate (result)."),
     pre_id: str = Query(..., description="cutoff_draw_id for the training run used to rank tickets."),
+    force: bool = Query(False, description="Delete cached compare and recalculate"),
 ):
     """
     DB-based compare for La Primitiva: rank existing tickets by model score, find jackpot position.
 
-    First call (no tickets in DB): generates ALL C(49,6)*10 tickets and stores them.
-    Subsequent calls: updates scores only — no regeneration.
-    Falls back to TXT-based compare if DB approach fails.
+    Runs in a background thread (202). Uses full-wheel TXT when available (low RAM),
+    otherwise streams the ticket pool from Mongo without loading all tickets into memory.
+    Bootstrap tickets separately via POST /api/la-primitiva/tickets/bootstrap.
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
@@ -5628,9 +5797,10 @@ def api_la_primitiva_compare_reorder(
 
     # 1) Return cached result if available
     coll_compare = db[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION]
-    existing = _find_compare_doc(coll_compare, current_id_clean, pre_id_clean)
-    jp_cached = existing.get("jackpot_position") if existing else None
-    if existing and (jp_cached or existing.get("special_position")):
+    existing = _prepare_reorder_compare_cache(
+        coll_compare, current_id_clean, pre_id_clean, force=force
+    )
+    if existing:
         out = {k: v for k, v in existing.items() if k != "_id"}
         return JSONResponse(content=_item_to_json(out))
 
@@ -5700,9 +5870,36 @@ def api_la_primitiva_compare_reorder(
         except Exception as e:
             raise HTTPException(400, detail=f"Probabilities not found and TXT fallback failed: {e}")
 
-    tickets_coll = db[LA_PRIMITIVA_TICKETS_COLLECTION]
-    if tickets_coll.count_documents({"lottery": "la_primitiva"}) > 0:
+    if _compare_slot_busy("la-primitiva"):
+        raise HTTPException(
+            503,
+            detail="Compare already running for la-primitiva. Poll GET /api/la-primitiva/compare/cached.",
+        )
+
+    def _run_compare():
+        if not _try_acquire_compare_slot("la-primitiva"):
+            logging.warning("[reorder/la-primitiva] compare slot already taken")
+            return
         try:
+            if _full_wheel_path_for_pre_id(db, LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION, pre_id_clean):
+                try:
+                    result = _la_primitiva_full_wheel_compare(current_id_clean, pre_id_clean, db)
+                    logging.info(
+                        "[reorder/la-primitiva] TXT compare done jackpot_position=%s",
+                        result.get("jackpot_position") or result.get("special_position"),
+                    )
+                    return
+                except Exception as e:
+                    logging.warning("[reorder/la-primitiva] TXT compare failed, trying DB: %s", e)
+
+            tickets_coll = db[LA_PRIMITIVA_TICKETS_COLLECTION]
+            if tickets_coll.count_documents({"lottery": "la_primitiva"}) == 0:
+                logging.error(
+                    "[reorder/la-primitiva] ticket pool empty — bootstrap via "
+                    "POST /api/la-primitiva/tickets/bootstrap (skipped during compare to avoid OOM)"
+                )
+                return
+
             update_la_primitiva_ranking(db, pre_id_clean, draw_date, mains_probs, reintegro_probs)
             result = compare_la_primitiva_from_db(
                 db=db,
@@ -5713,36 +5910,15 @@ def api_la_primitiva_compare_reorder(
                 complementario_draw=complementario,
                 draw_date=draw_date,
             )
-            saved = _save_compare_result(db, "la-primitiva", result)
-            if saved.get("jackpot_position") or saved.get("special_position"):
-                return JSONResponse(content=_item_to_json(saved))
-        except Exception as e:
-            logging.warning(
-                "[reorder/la-primitiva] sync compare failed, using background: %s", e
-            )
-
-    def _run_compare():
-        try:
-            tickets_coll = db[LA_PRIMITIVA_TICKETS_COLLECTION]
-            ticket_count = tickets_coll.count_documents({"lottery": "la_primitiva"})
-            if ticket_count == 0:
-                logging.info("[reorder/la-primitiva] bootstrapping tickets")
-                bootstrap_la_primitiva_tickets(db)
-            else:
-                update_la_primitiva_ranking(db, pre_id_clean, draw_date, mains_probs, reintegro_probs)
-            result = compare_la_primitiva_from_db(
-                db=db, current_id=current_id_clean, pre_id=pre_id_clean,
-                main_draw=main_draw, reintegro_draw=reintegro_draw,
-                complementario_draw=complementario, draw_date=draw_date,
-            )
             _save_compare_result(db, "la-primitiva", result)
-            logging.info("[reorder/la-primitiva] done jackpot_position=%s", result.get("jackpot_position"))
+            logging.info(
+                "[reorder/la-primitiva] DB compare done jackpot_position=%s",
+                result.get("jackpot_position") or result.get("special_position"),
+            )
         except Exception as e:
             logging.exception("[reorder/la-primitiva] background compare failed: %s", e)
-            try:
-                _la_primitiva_full_wheel_compare(current_id_clean, pre_id_clean, db)
-            except Exception:
-                pass
+        finally:
+            _release_compare_slot("la-primitiva")
 
     threading.Thread(target=_run_compare, daemon=True).start()
     return JSONResponse(
@@ -13863,37 +14039,6 @@ def _validation_compare_collection(lottery: str) -> str:
     }[lottery]
 
 
-def _draw_id_variants(value: Any) -> List[Any]:
-    """String and int forms for Mongo keys (id_sorteo stored both ways)."""
-    s = str(value or "").strip()
-    if not s:
-        return []
-    out: List[Any] = [s]
-    if s.isdigit():
-        out.append(int(s))
-    return out
-
-
-def _compare_pair_keys(current_id: str, pre_id: str) -> List[Tuple[Any, Any]]:
-    keys: List[Tuple[Any, Any]] = []
-    seen: set = set()
-    for ck in _draw_id_variants(current_id):
-        for pk in _draw_id_variants(pre_id):
-            pair = (ck, pk)
-            if pair not in seen:
-                seen.add(pair)
-                keys.append(pair)
-    return keys
-
-
-def _find_compare_doc(coll, current_id: str, pre_id: str) -> Optional[Dict[str, Any]]:
-    for ck, pk in _compare_pair_keys(current_id, pre_id):
-        doc = coll.find_one({"current_id": ck, "pre_id": pk})
-        if doc:
-            return doc
-    return None
-
-
 def _find_compare_for_draw(
     coll,
     current_id: str,
@@ -13922,14 +14067,6 @@ def _find_compare_for_draw(
         if doc:
             return doc
     return None
-
-
-def _delete_compare_pair_variants(coll, current_id: str, pre_id: str) -> int:
-    deleted = 0
-    for ck, pk in _compare_pair_keys(current_id, pre_id):
-        res = coll.delete_many({"current_id": ck, "pre_id": pk})
-        deleted += res.deleted_count
-    return deleted
 
 
 def _feedback_log_exists(db_instance, lottery: str, draw_id: str) -> bool:

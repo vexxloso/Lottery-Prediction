@@ -13,23 +13,31 @@ Per-draw probability snapshots (tiny — ~2KB per draw):
   el_gordo_draw_probs      { draw_id, draw_date, mains_probs:{n:p}, clave_probs:{n:p} }
   la_primitiva_draw_probs  { draw_id, draw_date, mains_probs:{n:p}, rein_probs:{n:p} }
 
-Compare flow (no ranking stored — computed on-the-fly):
+Compare flow (streaming — safe for VPS):
   1. Load prob snapshot for pre_id from draw_probs collection.
-  2. Stream tickets from tickets collection.
-  3. Score each ticket using stored probs, sort in memory, find jackpot.
+  2. Stream tickets in batches; spill sorted batches to temp disk files.
+  3. K-way merge by score (constant RAM); find jackpot without loading all tickets.
 
 This avoids storing 139M scores per draw (which would be terabytes).
 Instead we store ~60 numbers per draw and recompute scores at query time.
 """
 from __future__ import annotations
 
+import heapq
+import json
 import logging
 import math
+import os
+import shutil
+import tempfile
 from datetime import datetime as dt
 from itertools import combinations
 from typing import Any, Callable, Dict, Generator, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger("lottery.ticket_db")
+
+# Score + spill batches to disk during compare (avoids loading 140M tickets into RAM).
+COMPARE_SCORE_BATCH_SIZE = int(os.getenv("COMPARE_SCORE_BATCH_SIZE", "200000"))
 
 EUROMILLONES_MAINS = list(range(1, 51))
 EUROMILLONES_STARS = list(range(1, 13))
@@ -76,6 +84,112 @@ def _compute_score(
     else:
         s += math.log(max(secondary_probs.get(int(secondary), 1e-6), 1e-9))
     return s
+
+
+def _write_score_batch(path: str, batch: List[Tuple[float, int, Any]]) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        for score, pos, payload in batch:
+            fh.write(json.dumps([score, pos, payload], separators=(",", ":")) + "\n")
+
+
+class _JsonlBatchReader:
+    """One sorted batch on disk; only the current line is held in memory."""
+
+    __slots__ = ("path", "_fh", "head")
+
+    def __init__(self, path: str):
+        self.path = path
+        self._fh = open(path, encoding="utf-8")
+        self.head = self._read_next()
+
+    def _read_next(self) -> Optional[Tuple[float, int, Any]]:
+        fh = self._fh
+        if fh is None:
+            return None
+        while True:
+            line = fh.readline()
+            if not line:
+                fh.close()
+                self._fh = None
+                return None
+            line = line.strip()
+            if not line:
+                continue
+            score, pos, payload = json.loads(line)
+            return float(score), int(pos), payload
+
+    def advance(self) -> None:
+        self.head = self._read_next()
+
+    def close(self) -> None:
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+
+
+def _stream_tickets_by_score(
+    coll,
+    lottery: str,
+    projection: dict,
+    score_fn: Callable[[dict], float],
+    payload_fn: Callable[[dict], Any],
+    *,
+    batch_size: int = COMPARE_SCORE_BATCH_SIZE,
+) -> Generator[Tuple[int, float, Any], None, None]:
+    """
+    Yield (rank, score, payload) in global score-desc / position-asc order.
+    Uses temp disk batches + line-by-line k-way merge (constant RAM).
+    """
+    tmp_dir = tempfile.mkdtemp(prefix=f"compare_{lottery}_")
+    batch_paths: List[str] = []
+    readers: List[_JsonlBatchReader] = []
+    try:
+        batch: List[Tuple[float, int, Any]] = []
+        cursor = coll.find({"lottery": lottery}, projection=projection).batch_size(5000)
+        for doc in cursor:
+            pos = int(doc.get("position") or 0)
+            score = score_fn(doc)
+            batch.append((score, pos, payload_fn(doc)))
+            if len(batch) >= batch_size:
+                batch.sort(key=lambda x: (-x[0], x[1]))
+                path = os.path.join(tmp_dir, f"{len(batch_paths)}.jsonl")
+                _write_score_batch(path, batch)
+                batch_paths.append(path)
+                batch = []
+                logger.info("[compare-stream/%s] spilled batch %d", lottery, len(batch_paths))
+        if batch:
+            batch.sort(key=lambda x: (-x[0], x[1]))
+            path = os.path.join(tmp_dir, f"{len(batch_paths)}.jsonl")
+            _write_score_batch(path, batch)
+            batch_paths.append(path)
+
+        if not batch_paths:
+            return
+
+        readers = [_JsonlBatchReader(p) for p in batch_paths]
+        heap: List[Tuple[float, int, int]] = []
+        for ri, reader in enumerate(readers):
+            if reader.head is not None:
+                sc, pos, _ = reader.head
+                heap.append((-sc, pos, ri))
+        heapq.heapify(heap)
+
+        rank = 0
+        while heap:
+            neg_sc, pos, ri = heapq.heappop(heap)
+            reader = readers[ri]
+            assert reader.head is not None
+            sc, pos, payload = reader.head
+            reader.advance()
+            rank += 1
+            yield rank, sc, payload
+            if reader.head is not None:
+                sc2, pos2, _ = reader.head
+                heapq.heappush(heap, (-sc2, pos2, ri))
+    finally:
+        for reader in readers:
+            reader.close()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ── Initial scores from feature row ──────────────────────────────────────────
@@ -134,7 +248,14 @@ def load_draw_probs(
     db, collection: str, draw_id: str, secondary_key: str = "secondary_probs",
 ) -> Tuple[Dict[int, float], Dict[int, float]]:
     """Load probability snapshot for a draw. Returns ({n:p}, {n:p})."""
-    doc = db[collection].find_one({"draw_id": draw_id})
+    doc = None
+    draw_key = str(draw_id or "").strip()
+    for key in (draw_key, int(draw_key) if draw_key.isdigit() else None):
+        if key is None:
+            continue
+        doc = db[collection].find_one({"draw_id": key})
+        if doc:
+            break
     if not doc:
         return {}, {}
     mains = {int(k): float(v) for k, v in (doc.get("mains_probs") or {}).items()}
@@ -222,35 +343,40 @@ def compare_euromillones_from_db(
     prize_map: Dict[Tuple[int, int], float],
     draw_date: Optional[str], ticket_cost_eur: float = 2.50,
 ) -> Dict[str, Any]:
-    """Load probs for pre_id, score all tickets in memory, find jackpot position."""
+    """Stream-score tickets (disk-spill batches) — safe for full 140M pool on VPS."""
     mains_probs, stars_probs = load_draw_probs(db, "euromillones_draw_probs", pre_id, "stars_probs")
     if not mains_probs:
         raise ValueError(f"No probability snapshot found for draw_id={pre_id!r}")
 
     tickets_coll = db["euromillones_tickets"]
     main_set = set(main_draw)
-    star_set  = set(star_draw)
+    star_set = set(star_draw)
 
-    # Score all tickets and sort
-    scored: List[Tuple[float, List[int], List[int]]] = []
-    for doc in tickets_coll.find({"lottery": "euromillones"},
-                                  projection={"_id": 0, "mains": 1, "stars": 1}):
-        s = _compute_score(doc["mains"], doc["stars"], mains_probs, stars_probs)
-        scored.append((s, doc["mains"], doc["stars"]))
-    scored.sort(key=lambda x: x[0], reverse=True)
+    def score_fn(doc: dict) -> float:
+        return _compute_score(doc["mains"], doc["stars"], mains_probs, stars_probs)
 
-    _CATEGORY_ORDER = [(5,2),(5,1),(5,0),(4,2),(4,1),(4,0),(3,2),(3,1),(3,0),(2,2),(2,1),(1,2),(2,0)]
-    _CATEGORY_LABELS = ["1th(5+2)","2th(5+1)","3th(5+0)","4th(4+2)","5th(4+1)","6th(4+0)",
-                        "7th(3+2)","8th(3+1)","9th(3+0)","10th(2+2)","11th(2+1)","12th(1+2)","13th(2+0)"]
+    def payload_fn(doc: dict) -> Tuple[List[int], List[int]]:
+        return doc["mains"], doc["stars"]
 
-    category_stats: Dict[Tuple[int,int], Tuple[int,float]] = {}
+    _CATEGORY_ORDER = [(5, 2), (5, 1), (5, 0), (4, 2), (4, 1), (4, 0), (3, 2), (3, 1), (3, 0), (2, 2), (2, 1), (1, 2), (2, 0)]
+    _CATEGORY_LABELS = ["1th(5+2)", "2th(5+1)", "3th(5+0)", "4th(4+2)", "5th(4+1)", "6th(4+0)",
+                        "7th(3+2)", "8th(3+1)", "9th(3+0)", "10th(2+2)", "11th(2+1)", "12th(1+2)", "13th(2+0)"]
+
+    category_stats: Dict[Tuple[int, int], Tuple[int, float]] = {}
     total_earning = 0.0
     jackpot_position: Optional[int] = None
     second_positions: List[int] = []
-    third_positions:  List[int] = []
+    third_positions: List[int] = []
     fourth_positions: List[int] = []
 
-    for rank, (_, mains, stars) in enumerate(scored, 1):
+    logger.info("[compare-stream/euromillones] start current_id=%s pre_id=%s", current_id, pre_id)
+    for rank, _, (mains, stars) in _stream_tickets_by_score(
+        tickets_coll,
+        "euromillones",
+        {"_id": 0, "position": 1, "mains": 1, "stars": 1},
+        score_fn,
+        payload_fn,
+    ):
         hits_main = sum(1 for n in mains if n in main_set)
         hits_star = sum(1 for n in stars if n in star_set)
         prize = prize_map.get((hits_main, hits_star), 0.0)
@@ -258,11 +384,15 @@ def compare_euromillones_from_db(
         key = (hits_main, hits_star)
         prev = category_stats.get(key, (0, 0.0))
         category_stats[key] = (prev[0] + 1, prev[1] + prize)
-        if hits_main == 5 and hits_star == 1: second_positions.append(rank)
-        elif hits_main == 5 and hits_star == 0: third_positions.append(rank)
-        elif hits_main == 4 and hits_star == 2: fourth_positions.append(rank)
+        if hits_main == 5 and hits_star == 1:
+            second_positions.append(rank)
+        elif hits_main == 5 and hits_star == 0:
+            third_positions.append(rank)
+        elif hits_main == 4 and hits_star == 2:
+            fourth_positions.append(rank)
         if hits_main == 5 and hits_star == 2:
-            jackpot_position = rank; break
+            jackpot_position = rank
+            break
 
     if jackpot_position is None:
         raise ValueError("Jackpot (5+2) not found")
@@ -273,6 +403,7 @@ def compare_euromillones_from_db(
         count, earning = category_stats.get((hm, hs), (0, 0.0))
         categories_out.append({"category": label, "count": count, "earning": round(earning, 2)})
 
+    logger.info("[compare-stream/euromillones] done jackpot_position=%s", jackpot_position)
     return {
         "current_id": current_id, "date": draw_date, "pre_id": pre_id,
         "jackpot_position": jackpot_position,
@@ -327,19 +458,25 @@ def compare_el_gordo_from_db(
     tickets_coll = db["el_gordo_tickets"]
     main_set = set(main_draw)
 
-    scored: List[Tuple[float, List[int], int]] = []
-    for doc in tickets_coll.find({"lottery": "el_gordo"},
-                                  projection={"_id": 0, "mains": 1, "clave": 1}):
-        s = _compute_score(doc["mains"], doc["clave"], mains_probs, clave_probs)
-        scored.append((s, doc["mains"], doc["clave"]))
-    scored.sort(key=lambda x: x[0], reverse=True)
+    def score_fn(doc: dict) -> float:
+        return _compute_score(doc["mains"], doc["clave"], mains_probs, clave_probs)
 
-    category_stats: Dict[Tuple[int,int], Tuple[int,int]] = {}
+    def payload_fn(doc: dict) -> Tuple[List[int], int]:
+        return doc["mains"], int(doc["clave"])
+
+    category_stats: Dict[Tuple[int, int], Tuple[int, int]] = {}
     jackpot_position = pos_2th = pos_3th = pos_4th = pos_5th = pos_6th = None
     _tier_keys = ((5, 1), (5, 0), (4, 1), (4, 0), (3, 1), (3, 0), (2, 1), (2, 0), (0, 1))
 
-    for rank, (_, mains, clave) in enumerate(scored, 1):
-        hits_main  = sum(1 for n in mains if n in main_set)
+    logger.info("[compare-stream/el-gordo] start current_id=%s pre_id=%s", current_id, pre_id)
+    for rank, _, (mains, clave) in _stream_tickets_by_score(
+        tickets_coll,
+        "el_gordo",
+        {"_id": 0, "position": 1, "mains": 1, "clave": 1},
+        score_fn,
+        payload_fn,
+    ):
+        hits_main = sum(1 for n in mains if n in main_set)
         hits_clave = 1 if clave == clave_draw else 0
         key = (hits_main, hits_clave)
         prev_count, prev_first = category_stats.get(key, (0, rank))
@@ -366,11 +503,14 @@ def compare_el_gordo_from_db(
         {"category": f"{hm}+{hc}", "main_hits": hm, "clave_hit": hc, "first_position": fp, "count": cnt}
         for (hm, hc), (cnt, fp) in sorted(category_stats.items(), key=lambda x: (-x[0][0], -x[0][1]))
     ]
-    return {"current_id": current_id, "date": draw_date, "pre_id": pre_id,
-            "jackpot_position": jackpot_position,
-            "pos_2th": pos_2th, "pos_3th": pos_3th, "pos_4th": pos_4th,
-            "pos_5th": pos_5th, "pos_6th": pos_6th,
-            "categories": categories_out, "source": "db"}
+    logger.info("[compare-stream/el-gordo] done jackpot_position=%s", jackpot_position)
+    return {
+        "current_id": current_id, "date": draw_date, "pre_id": pre_id,
+        "jackpot_position": jackpot_position,
+        "pos_2th": pos_2th, "pos_3th": pos_3th, "pos_4th": pos_4th,
+        "pos_5th": pos_5th, "pos_6th": pos_6th,
+        "categories": categories_out, "source": "db",
+    }
 
 
 # ── La Primitiva ──────────────────────────────────────────────────────────────
@@ -429,39 +569,110 @@ def compare_la_primitiva_from_db(
 
     tickets_coll = db["la_primitiva_tickets"]
     main_set = set(main_draw)
+    comp_set = {int(complementario_draw)} if complementario_draw is not None else set()
 
-    scored: List[Tuple[float, List[int], int]] = []
-    for doc in tickets_coll.find({"lottery": "la_primitiva"},
-                                  projection={"_id": 0, "mains": 1, "reintegro": 1}):
-        s = _compute_score(doc["mains"], doc["reintegro"], mains_probs, rein_probs)
-        scored.append((s, doc["mains"], doc["reintegro"]))
-    scored.sort(key=lambda x: x[0], reverse=True)
+    def score_fn(doc: dict) -> float:
+        return _compute_score(doc["mains"], doc["reintegro"], mains_probs, rein_probs)
 
-    category_stats: Dict[Tuple[int,int], Tuple[int,int]] = {}
-    jackpot_position = pos_2th = pos_3th = pos_4th = None
+    def payload_fn(doc: dict) -> Tuple[List[int], int]:
+        return doc["mains"], int(doc["reintegro"])
 
-    for rank, (_, mains, rein) in enumerate(scored, 1):
+    category_stats: Dict[Tuple[int, int], Tuple[int, int]] = {}
+    special_position: Optional[int] = None
+    pos_1th: Optional[int] = None
+    pos_2th = pos_3th = pos_4th = pos_5th = None
+
+    logger.info("[compare-stream/la-primitiva] start current_id=%s pre_id=%s", current_id, pre_id)
+    for rank, _, (mains, rein) in _stream_tickets_by_score(
+        tickets_coll,
+        "la_primitiva",
+        {"_id": 0, "position": 1, "mains": 1, "reintegro": 1},
+        score_fn,
+        payload_fn,
+    ):
         hits_main = sum(1 for n in mains if n in main_set)
         hits_rein = 1 if rein == reintegro_draw else 0
-        key = (hits_main, hits_rein)
-        prev_count, prev_first = category_stats.get(key, (0, rank))
-        category_stats[key] = (prev_count + 1, prev_first if prev_count > 0 else rank)
-        if hits_main == 6: jackpot_position = rank; break
-        if hits_main == 5 and complementario_draw is not None and complementario_draw in mains and pos_2th is None: pos_2th = rank
-        if hits_main == 5 and pos_3th is None: pos_3th = rank
-        if hits_main == 4 and pos_4th is None: pos_4th = rank
+        has_complementario = bool(comp_set and any(n in comp_set for n in mains))
 
-    if jackpot_position is None:
-        raise ValueError("Jackpot not found")
+        key: Optional[Tuple[int, int]] = None
+        if hits_main == 6 and hits_rein:
+            key = (6, 1)
+        elif hits_main == 6:
+            key = (6, 0)
+        elif hits_main == 5 and has_complementario:
+            key = (5, 1)
+        elif hits_main == 5:
+            key = (5, 0)
+        elif hits_main == 4:
+            key = (4, 0)
+        elif hits_main == 3:
+            key = (3, 0)
 
-    categories_out = [
-        {"category": f"{hm}+{hr}", "main_hits": hm, "reintegro_hit": hr, "first_position": fp, "count": cnt}
-        for (hm, hr), (cnt, fp) in sorted(category_stats.items(), key=lambda x: (-x[0][0], -x[0][1]))
+        if key is not None:
+            prev_count, prev_first = category_stats.get(key, (0, rank))
+            category_stats[key] = (prev_count + 1, prev_first if prev_count > 0 else rank)
+
+        if hits_main == 6 and hits_rein and special_position is None:
+            special_position = rank
+        if hits_main == 6 and pos_1th is None:
+            pos_1th = rank
+        elif hits_main == 5 and has_complementario and pos_2th is None:
+            pos_2th = rank
+        elif hits_main == 5 and pos_3th is None:
+            pos_3th = rank
+        elif hits_main == 4 and pos_4th is None:
+            pos_4th = rank
+        elif hits_main == 3 and pos_5th is None:
+            pos_5th = rank
+
+        if special_position and pos_2th and pos_3th and pos_4th and pos_5th:
+            break
+
+    if special_position is None:
+        raise ValueError("Jackpot (6 mains + reintegro) not found")
+
+    ordered_keys: List[Tuple[Tuple[int, int], str]] = [
+        ((6, 1), "Especial (6 aciertos + R)"),
+        ((6, 0), "1ª (6 aciertos)"),
+        ((5, 1), "2ª (5 + C)"),
+        ((5, 0), "3ª (5 aciertos)"),
+        ((4, 0), "4ª (4 aciertos)"),
+        ((3, 0), "5ª (3 aciertos)"),
     ]
-    return {"current_id": current_id, "date": draw_date, "pre_id": pre_id,
-            "jackpot_position": jackpot_position,
-            "pos_2th": pos_2th, "pos_3th": pos_3th, "pos_4th": pos_4th,
-            "categories": categories_out, "total_categories": len(categories_out), "source": "db"}
+    categories_out: List[Dict[str, Any]] = []
+    for cat_key, label in ordered_keys:
+        hm, hr = cat_key
+        count, first_pos = category_stats.get(cat_key, (0, 0))
+        categories_out.append(
+            {
+                "category": label,
+                "main_hits": hm,
+                "reintegro_hit": hr,
+                "first_position": first_pos,
+                "count": count,
+            }
+        )
+
+    logger.info(
+        "[compare/la-primitiva] done jackpot=%s scanned=%s",
+        special_position,
+        rank,
+    )
+    return {
+        "current_id": current_id,
+        "date": draw_date,
+        "pre_id": pre_id,
+        "jackpot_position": special_position,
+        "special_position": special_position,
+        "pos_1th": pos_1th,
+        "pos_2th": pos_2th,
+        "pos_3th": pos_3th,
+        "pos_4th": pos_4th,
+        "pos_5th": pos_5th,
+        "categories": categories_out,
+        "total_categories": len(categories_out),
+        "source": "db",
+    }
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

@@ -14,31 +14,42 @@ export function parseCompareJackpot(data: Record<string, unknown>): number | nul
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Load full-wheel compare: GET cache → POST reorder → poll GET until jackpot is ready.
- * Handles 202 Accepted from reorder (background compare).
+ * Load full-wheel compare:
+ * 1) GET cached (valid saved result only, 404 if missing)
+ * 2) POST reorder (force recalc when no valid cache)
+ * 3) Poll GET cached until jackpot appears (handles 202 background job)
  */
 export async function loadFullWheelCompare(opts: {
-  getUrl: string;
+  cachedUrl: string;
   reorderUrl: string;
   isCancelled: () => boolean;
   pollAttempts?: number;
   pollIntervalMs?: number;
 }): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; error: string }> {
-  const pollAttempts = opts.pollAttempts ?? 45;
+  const pollAttempts = opts.pollAttempts ?? 60;
   const pollIntervalMs = opts.pollIntervalMs ?? 2000;
 
-  const getOnce = async (): Promise<{ res: Response; data: Record<string, unknown> }> => {
-    const res = await fetch(opts.getUrl, { method: 'GET', cache: 'no-store' });
+  const getCached = async (): Promise<{ res: Response; data: Record<string, unknown> }> => {
+    const res = await fetch(opts.cachedUrl, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+    });
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     return { res, data };
   };
 
-  const cached = await getOnce();
+  const cached = await getCached();
   if (!opts.isCancelled() && cached.res.ok && parseCompareJackpot(cached.data)) {
     return { ok: true, data: cached.data };
   }
 
-  const reorderRes = await fetch(opts.reorderUrl, { method: 'POST', cache: 'no-store' });
+  const reorderSep = opts.reorderUrl.includes('?') ? '&' : '?';
+  const reorderRes = await fetch(`${opts.reorderUrl}${reorderSep}force=true`, {
+    method: 'POST',
+    cache: 'no-store',
+    headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+  });
   const reorderData = (await reorderRes.json().catch(() => ({}))) as Record<string, unknown>;
 
   if (!opts.isCancelled() && reorderRes.ok && parseCompareJackpot(reorderData)) {
@@ -51,7 +62,7 @@ export async function loadFullWheelCompare(opts: {
       if (opts.isCancelled()) {
         return { ok: false, error: 'Cancelled' };
       }
-      const polled = await getOnce();
+      const polled = await getCached();
       if (polled.res.ok && parseCompareJackpot(polled.data)) {
         return { ok: true, data: polled.data };
       }
@@ -59,7 +70,7 @@ export async function loadFullWheelCompare(opts: {
     return {
       ok: false,
       error:
-        'Comparación en segundo plano. Espera un momento y recarga, o revisa los logs del backend.',
+        'Compare sigue calculándose. Revisa logs: sudo journalctl -u lottery-backend -f',
     };
   }
 
@@ -73,6 +84,6 @@ export async function loadFullWheelCompare(opts: {
     ok: false,
     error:
       detail ??
-      'No se pudo calcular la comparación. Comprueba train progress y full wheel para el pre_id.',
+      'No se pudo calcular la comparación. Comprueba train progress para el pre_id.',
   };
 }
