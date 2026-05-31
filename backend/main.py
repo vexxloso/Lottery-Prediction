@@ -5376,8 +5376,8 @@ def api_euromillones_compare_reorder(
 
     # 1) Return cached result if available
     coll_compare = db[EUROMILLONES_COMPARE_RESULTS_COLLECTION]
-    existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
-    if existing and existing.get("jackpot_position") is not None:
+    existing = _find_compare_doc(coll_compare, current_id_clean, pre_id_clean)
+    if existing and (existing.get("jackpot_position") or existing.get("special_position")):
         out = {k: v for k, v in existing.items() if k != "_id"}
         return JSONResponse(content=_item_to_json(out))
 
@@ -5422,6 +5422,8 @@ def api_euromillones_compare_reorder(
         # Fall back to train_progress
         coll_progress = db[EUROMILLONES_TRAIN_PROGRESS_COLLECTION]
         progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+        if not progress_doc and pre_id_clean.isdigit():
+            progress_doc = coll_progress.find_one({"cutoff_draw_id": int(pre_id_clean)})
         if not progress_doc:
             progress_doc = coll_progress.find_one({"probs_draw_id": pre_id_clean})
         if progress_doc:
@@ -5435,8 +5437,29 @@ def api_euromillones_compare_reorder(
         except Exception as e:
             raise HTTPException(400, detail=f"Probabilities not found and TXT fallback failed: {e}")
 
-    # Run compare in background thread — returns 202 immediately so HTTP doesn't time out.
-    # Automation script polls GET /compare/full-wheel until result appears.
+    tickets_coll = db[EUROMILLONES_TICKETS_COLLECTION]
+    if tickets_coll.count_documents({"lottery": "euromillones"}) > 0:
+        try:
+            update_euromillones_ranking(db, pre_id_clean, draw_date, mains_probs, stars_probs)
+            result = compare_euromillones_from_db(
+                db=db,
+                current_id=current_id_clean,
+                pre_id=pre_id_clean,
+                main_draw=main_draw,
+                star_draw=star_draw,
+                prize_map=prize_map,
+                draw_date=draw_date,
+                ticket_cost_eur=EUROMILLONES_TICKET_COST_EUR,
+            )
+            saved = _save_compare_result(db, "euromillones", result)
+            if saved.get("jackpot_position"):
+                return JSONResponse(content=_item_to_json(saved))
+        except Exception as e:
+            logging.warning(
+                "[reorder/euromillones] sync compare failed, using background: %s", e
+            )
+
+    # Run compare in background thread — returns 202 (bootstrap or slow path).
     def _run_compare():
         try:
             tickets_coll = db[EUROMILLONES_TICKETS_COLLECTION]
@@ -5522,6 +5545,8 @@ def api_el_gordo_compare_reorder(
     if not mains_probs:
         coll_progress = db[EL_GORDO_TRAIN_PROGRESS_COLLECTION]
         progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+        if not progress_doc and pre_id_clean.isdigit():
+            progress_doc = coll_progress.find_one({"cutoff_draw_id": int(pre_id_clean)})
         if not progress_doc:
             progress_doc = coll_progress.find_one({"probs_draw_id": pre_id_clean})
         if progress_doc:
@@ -5535,7 +5560,24 @@ def api_el_gordo_compare_reorder(
         except Exception as e:
             raise HTTPException(400, detail=f"Probabilities not found and TXT fallback failed: {e}")
 
-    # Run in background thread — returns 202 immediately
+    tickets_coll = db[EL_GORDO_TICKETS_COLLECTION]
+    if tickets_coll.count_documents({"lottery": "el_gordo"}) > 0:
+        try:
+            update_el_gordo_ranking(db, pre_id_clean, draw_date, mains_probs, clave_probs)
+            result = compare_el_gordo_from_db(
+                db=db,
+                current_id=current_id_clean,
+                pre_id=pre_id_clean,
+                main_draw=main_draw,
+                clave_draw=clave_draw,
+                draw_date=draw_date,
+            )
+            saved = _save_compare_result(db, "el-gordo", result)
+            if saved.get("jackpot_position"):
+                return JSONResponse(content=_item_to_json(saved))
+        except Exception as e:
+            logging.warning("[reorder/el-gordo] sync compare failed, using background: %s", e)
+
     def _run_compare():
         try:
             tickets_coll = db[EL_GORDO_TICKETS_COLLECTION]
@@ -5586,8 +5628,9 @@ def api_la_primitiva_compare_reorder(
 
     # 1) Return cached result if available
     coll_compare = db[LA_PRIMITIVA_COMPARE_RESULTS_COLLECTION]
-    existing = coll_compare.find_one({"current_id": current_id_clean, "pre_id": pre_id_clean})
-    if existing and existing.get("jackpot_position") is not None:
+    existing = _find_compare_doc(coll_compare, current_id_clean, pre_id_clean)
+    jp_cached = existing.get("jackpot_position") if existing else None
+    if existing and (jp_cached or existing.get("special_position")):
         out = {k: v for k, v in existing.items() if k != "_id"}
         return JSONResponse(content=_item_to_json(out))
 
@@ -5630,10 +5673,7 @@ def api_la_primitiva_compare_reorder(
 
     draw_date = (draw.get("fecha_sorteo") or "")[:10] or None
 
-    # 3) Load probabilities from training progress
-    coll_progress = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
-    progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
-    # 3) Load probabilities — check draw_probs collection first, then train_progress
+    # 3) Load probabilities — draw_probs first, then train_progress
     mains_probs: Dict[str, Any] = {}
     reintegro_probs: Dict[str, Any] = {}
 
@@ -5645,6 +5685,8 @@ def api_la_primitiva_compare_reorder(
     if not mains_probs:
         coll_progress = db[LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION]
         progress_doc = coll_progress.find_one({"cutoff_draw_id": pre_id_clean})
+        if not progress_doc and pre_id_clean.isdigit():
+            progress_doc = coll_progress.find_one({"cutoff_draw_id": int(pre_id_clean)})
         if not progress_doc:
             progress_doc = coll_progress.find_one({"probs_draw_id": pre_id_clean})
         if progress_doc:
@@ -5658,7 +5700,27 @@ def api_la_primitiva_compare_reorder(
         except Exception as e:
             raise HTTPException(400, detail=f"Probabilities not found and TXT fallback failed: {e}")
 
-    # Run in background thread — returns 202 immediately
+    tickets_coll = db[LA_PRIMITIVA_TICKETS_COLLECTION]
+    if tickets_coll.count_documents({"lottery": "la_primitiva"}) > 0:
+        try:
+            update_la_primitiva_ranking(db, pre_id_clean, draw_date, mains_probs, reintegro_probs)
+            result = compare_la_primitiva_from_db(
+                db=db,
+                current_id=current_id_clean,
+                pre_id=pre_id_clean,
+                main_draw=main_draw,
+                reintegro_draw=reintegro_draw,
+                complementario_draw=complementario,
+                draw_date=draw_date,
+            )
+            saved = _save_compare_result(db, "la-primitiva", result)
+            if saved.get("jackpot_position") or saved.get("special_position"):
+                return JSONResponse(content=_item_to_json(saved))
+        except Exception as e:
+            logging.warning(
+                "[reorder/la-primitiva] sync compare failed, using background: %s", e
+            )
+
     def _run_compare():
         try:
             tickets_coll = db[LA_PRIMITIVA_TICKETS_COLLECTION]
