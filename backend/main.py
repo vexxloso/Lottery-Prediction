@@ -4984,22 +4984,29 @@ def _el_gordo_analysis_row_from_compare_doc(doc: Dict[str, Any]) -> Dict[str, An
                 pass
         return _el_gordo_category_first_position(cats, hm, hc)
 
-    jackpot_pos = int(doc.get("jackpot_position") or 0) or None
-    pos_5p0 = _pos("pos_2th", 5, 0)
+    # pos_1th..pos_8th = official 1ª..8ª (5+1 through 2+0); no separate "special" tier.
+    pos_1th = _pos("jackpot_position", 5, 1)
+    pos_2th = _pos("pos_2th", 5, 0)
+    pos_3th = _pos("pos_3th", 4, 1)
+    pos_4th = _pos("pos_4th", 4, 0)
+    pos_5th = _pos("pos_5th", 3, 1)
+    pos_6th = _pos("pos_6th", 3, 0)
+    pos_7th = _el_gordo_category_first_position(cats, 2, 1)
+    pos_8th = _el_gordo_category_first_position(cats, 2, 0)
     return {
         "date": date_str,
         "current_id": str(doc.get("current_id") or ""),
         "pre_id": str(doc.get("pre_id") or ""),
-        "special_position": jackpot_pos,
-        "jackpot_position": jackpot_pos,
-        "pos_1th": pos_5p0 if pos_5p0 else 0,
-        "pos_2th": _pos("pos_3th", 4, 1),
-        "pos_3th": _pos("pos_4th", 4, 0),
-        "pos_4th": _pos("pos_5th", 3, 1),
-        "pos_5th": _pos("pos_6th", 3, 0),
-        "pos_6th": _el_gordo_category_first_position(cats, 2, 1),
-        "pos_7th": _el_gordo_category_first_position(cats, 2, 0),
-        "pos_8th": _el_gordo_category_first_position(cats, 0, 1),
+        "jackpot_position": pos_1th,
+        "special_position": pos_1th,
+        "pos_1th": pos_1th,
+        "pos_2th": pos_2th,
+        "pos_3th": pos_3th,
+        "pos_4th": pos_4th,
+        "pos_5th": pos_5th,
+        "pos_6th": pos_6th,
+        "pos_7th": pos_7th,
+        "pos_8th": pos_8th,
         "categories": cats,
     }
 
@@ -13433,10 +13440,18 @@ def _annotate_special_draw_differences(
     if not rows:
         return rows
 
+    def _tier1_pos(row: Dict[str, Any]) -> Any:
+        """1ª categoría (5+1): prefer pos_1th, then legacy jackpot/special fields."""
+        for key in ("pos_1th", "jackpot_position", "special_position"):
+            v = row.get(key)
+            if isinstance(v, int) and v > 0:
+                return v
+        return None
+
     if order == "desc":
         for i, row in enumerate(rows):
-            curr = row.get("special_position")
-            nxt = rows[i + 1].get("special_position") if i + 1 < len(rows) else None
+            curr = _tier1_pos(row)
+            nxt = _tier1_pos(rows[i + 1]) if i + 1 < len(rows) else None
             row["prev_special_position"] = nxt if isinstance(nxt, int) and nxt > 0 else None
             row["difference_prev_special"] = (
                 int(curr) - int(nxt)
@@ -13446,7 +13461,7 @@ def _annotate_special_draw_differences(
     else:
         prev = None
         for row in rows:
-            curr = row.get("special_position")
+            curr = _tier1_pos(row)
             row["prev_special_position"] = prev if isinstance(prev, int) and prev > 0 else None
             row["difference_prev_special"] = (
                 int(curr) - int(prev)

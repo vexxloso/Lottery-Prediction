@@ -32,7 +32,7 @@ type AnalysisRowElGordo = {
   jackpot_position: number;
   prev_special_position?: number | null;
   difference_prev_special?: number | null;
-  pos_1th: number;
+  pos_1th: number | null;
   pos_2th: number | null;
   pos_3th: number | null;
   pos_4th: number | null;
@@ -110,12 +110,12 @@ export function ElGordoAnalysisPage() {
         })
         .map((r) => ({
           label: r.date || r.current_id,
-          special_position: r.special_position ?? r.jackpot_position ?? null,
-          pos_1th: r.pos_1th || null,
-          difference_prev_special: differenceFromRow(r),
+          pos_1th: r.pos_1th ?? r.jackpot_position ?? null,
           pos_2th: r.pos_2th,
+          difference_prev_1a: differenceFromRow(r),
           pos_3th: r.pos_3th,
           pos_4th: r.pos_4th,
+          pos_5th: r.pos_5th,
         })),
     [activeRowsForGraph],
   );
@@ -238,7 +238,7 @@ export function ElGordoAnalysisPage() {
                 <th>Fecha</th>
                 <th>1ª (5+1)</th>
                 <th>2ª (5+0)</th>
-                <th>Diff vs prev draw (Special)</th>
+                <th>Diff vs prev draw (1ª)</th>
                 <th>3ª (4+1)</th>
                 <th>4ª (4+0)</th>
                 <th>5ª (3+1)</th>
@@ -251,10 +251,9 @@ export function ElGordoAnalysisPage() {
               {rows.map((r) => (
                   <tr key={`${r.date}-${r.current_id}-${r.pre_id}`}>
                     <td>{r.date || '—'}</td>
-                    <td>{formatPosition(r.special_position ?? r.jackpot_position)}</td>
-                    <td>{formatPosition(r.pos_1th)}</td>
-                    <AnalysisDifferenceCell row={r} />
+                    <td>{formatPosition(r.pos_1th ?? r.jackpot_position)}</td>
                     <td>{formatPosition(r.pos_2th)}</td>
+                    <AnalysisDifferenceCell row={r} />
                     <td>{formatPosition(r.pos_3th)}</td>
                     <td>{formatPosition(r.pos_4th)}</td>
                     <td>{formatPosition(r.pos_5th)}</td>
@@ -282,8 +281,8 @@ export function ElGordoAnalysisPage() {
       <Drawer
         title={
           graphMode === 'range2004'
-            ? 'Gráfico de posiciones (1ª–4ª) — 2004–hoy (máx. 100 sorteos)'
-            : 'Gráfico de posiciones (1ª–4ª) — página actual'
+            ? 'Gráfico de posiciones (1ª–5ª) — 2004–hoy (máx. 100 sorteos)'
+            : 'Gráfico de posiciones (1ª–5ª) — página actual'
         }
         placement="right"
         width="100%"
@@ -302,11 +301,12 @@ export function ElGordoAnalysisPage() {
                 <YAxis />
                 <Tooltip />
                 <Legend />
-                <Line type="monotone" dataKey="special_position" name="Special (5+1)" stroke="#7c3aed" dot={false} />
-                <Line type="monotone" dataKey="pos_1th" name="1ª (5+0)" stroke="#dc2626" dot={false} />
-                <Line type="monotone" dataKey="difference_prev_special" name="Special diff vs prev draw" stroke="#9333ea" strokeDasharray="4 4" dot={false} />
-                <Line type="monotone" dataKey="pos_2th" name="2ª (4+1)" stroke="#f59e0b" dot={false} />
-                <Line type="monotone" dataKey="pos_3th" name="3ª (4+0)" stroke="#2563eb" dot={false} />
+                <Line type="monotone" dataKey="pos_1th" name="1ª (5+1)" stroke="#7c3aed" dot={false} />
+                <Line type="monotone" dataKey="pos_2th" name="2ª (5+0)" stroke="#dc2626" dot={false} />
+                <Line type="monotone" dataKey="difference_prev_1a" name="Diff 1ª vs prev draw" stroke="#9333ea" strokeDasharray="4 4" dot={false} />
+                <Line type="monotone" dataKey="pos_3th" name="3ª (4+1)" stroke="#f59e0b" dot={false} />
+                <Line type="monotone" dataKey="pos_4th" name="4ª (4+0)" stroke="#2563eb" dot={false} />
+                <Line type="monotone" dataKey="pos_5th" name="5ª (3+1)" stroke="#16a34a" dot={false} />
               </LineChart>
             </ResponsiveContainer>
           </div>

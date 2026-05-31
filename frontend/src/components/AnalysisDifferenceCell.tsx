@@ -8,7 +8,7 @@ type Props = {
   };
 };
 
-/** Renders current Special minus previous draw Special. */
+/** Renders 1ª (top tier) position minus previous draw 1ª position. */
 export function AnalysisDifferenceCell({ row }: Props) {
   const diff = differenceFromRow(row);
   if (diff == null) return <td>—</td>;

@@ -1,4 +1,4 @@
-/** Client metric: gap between Special position and previous draw's Special position. */
+/** Client metric: gap between 1ª tier position and the previous draw's 1ª position. */
 
 export function formatPosition(value: number | null | undefined): string {
   if (value == null || value <= 0) return '—';
