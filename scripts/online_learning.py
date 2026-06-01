@@ -39,7 +39,7 @@ import os
 import struct
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import joblib
 import numpy as np
@@ -110,6 +110,32 @@ LOTTERY_CONFIG = {
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _draw_id_variants(value: Any) -> List[Any]:
+    s = str(value or "").strip()
+    if not s:
+        return []
+    out: List[Any] = [s]
+    if s.isdigit():
+        out.append(int(s))
+    return out
+
+
+def _find_progress_doc(db, progress_col: str, cutoff_draw_id: str) -> Optional[dict]:
+    for variant in _draw_id_variants(cutoff_draw_id):
+        doc = db[progress_col].find_one({"cutoff_draw_id": variant})
+        if doc:
+            return doc
+    return None
+
+
+def _find_orc_doc(db, lottery: str, draw_id: str) -> Optional[dict]:
+    for variant in _draw_id_variants(draw_id):
+        doc = db[ORC_COLLECTION].find_one({"lottery": lottery, "draw_id": variant})
+        if doc:
+            return doc
+    return None
 
 
 # ── SHA-256 helpers ───────────────────────────────────────────────────────────
@@ -183,7 +209,7 @@ def generate_orc(lottery: str, draw_id: str, txt_path: Optional[str] = None) -> 
 
     result = {
         "lottery":    lottery,
-        "draw_id":    draw_id,
+        "draw_id":    str(draw_id).strip(),
         "orc_path":   orc_path,
         "orc_hash":   orc_hash,
         "txt_path":   txt_path,
@@ -195,7 +221,7 @@ def generate_orc(lottery: str, draw_id: str, txt_path: Optional[str] = None) -> 
     client = MongoClient(MONGO_URI)
     db = client[MONGO_DB]
     db[ORC_COLLECTION].replace_one(
-        {"lottery": lottery, "draw_id": draw_id},
+        {"lottery": lottery, "draw_id": str(draw_id).strip()},
         result,
         upsert=True,
     )
@@ -473,7 +499,7 @@ def apply_feedback_loop(
     db = client[MONGO_DB]
 
     # 1. Find the .orc snapshot for pre_draw_id
-    orc_doc = db[ORC_COLLECTION].find_one({"lottery": lottery, "draw_id": pre_draw_id})
+    orc_doc = _find_orc_doc(db, lottery, pre_draw_id)
     if not orc_doc:
         client.close()
         raise RuntimeError(f"No ORC snapshot found for {lottery} pre_draw_id={pre_draw_id}")
@@ -573,7 +599,7 @@ def pre_draw(lottery: str, cutoff_draw_id: str) -> dict:
     # Find the TXT file path from train_progress
     client = MongoClient(MONGO_URI)
     db = client[MONGO_DB]
-    prog = db[cfg["progress_col"]].find_one({"cutoff_draw_id": cutoff_draw_id})
+    prog = _find_progress_doc(db, cfg["progress_col"], cutoff_draw_id)
     client.close()
 
     txt_path = None

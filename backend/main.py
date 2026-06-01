@@ -2474,6 +2474,7 @@ _PUBLIC_API_PATHS = {
     "/api/validation/rebuild-metrics",
     "/api/online-learning/history",
     "/api/online-learning/sync-pending",
+    "/api/online-learning/repair-feedback",
     "/api/online-learning/orc-snapshots",
     "/api/train/reset",
     # DB-based reorder/compare endpoints (new architecture)
@@ -13716,6 +13717,246 @@ def api_online_learning_sync_pending(
     )
 
 
+_TRAIN_PROGRESS_COLLECTION_BY_LOTTERY: Dict[str, str] = {
+    "euromillones": EUROMILLONES_TRAIN_PROGRESS_COLLECTION,
+    "el-gordo": EL_GORDO_TRAIN_PROGRESS_COLLECTION,
+    "la-primitiva": LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION,
+}
+
+_repair_feedback_busy: set[str] = set()
+_repair_feedback_lock = threading.Lock()
+
+
+def _train_progress_doc(db_instance, lottery: str, cutoff_draw_id: str) -> Optional[Dict[str, Any]]:
+    coll = db_instance[_TRAIN_PROGRESS_COLLECTION_BY_LOTTERY[lottery]]
+    for variant in _draw_id_variants(cutoff_draw_id):
+        doc = coll.find_one({"cutoff_draw_id": variant})
+        if doc:
+            return doc
+    return None
+
+
+def _train_pipeline_ready(doc: Optional[Dict[str, Any]]) -> bool:
+    if not doc:
+        return False
+    if doc.get("rules_applied"):
+        return True
+    return str(doc.get("pipeline_status") or "").lower() == "done"
+
+
+def _wait_train_pipeline_done(
+    db_instance,
+    lottery: str,
+    cutoff_draw_id: str,
+    *,
+    timeout_seconds: int = 45 * 60,
+) -> None:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        doc = _train_progress_doc(db_instance, lottery, cutoff_draw_id)
+        if doc and _train_pipeline_ready(doc):
+            return
+        if doc and str(doc.get("pipeline_status") or "").lower() == "error":
+            raise RuntimeError(str(doc.get("pipeline_error") or "train pipeline error"))
+        time.sleep(8)
+    raise RuntimeError(f"Train pipeline timeout for cutoff={cutoff_draw_id}")
+
+
+def _start_train_pipeline(lottery: str, cutoff_draw_id: str) -> None:
+    cid = cutoff_draw_id.strip()
+    if lottery == "euromillones":
+        api_euromillones_run_pipeline(cutoff_draw_id=cid)
+    elif lottery == "el-gordo":
+        api_el_gordo_run_pipeline(cutoff_draw_id=cid)
+    elif lottery == "la-primitiva":
+        api_la_primitiva_run_pipeline(cutoff_draw_id=cid)
+    else:
+        raise ValueError(f"Unknown lottery: {lottery}")
+
+
+def _ensure_orc_for_pre_draw(
+    db_instance,
+    lottery: str,
+    pre_id: str,
+    *,
+    ensure_train: bool,
+) -> None:
+    """Create ORC snapshot for pre_id when missing (train if needed, no full wheel)."""
+    if _orc_exists_for_pre_draw(db_instance, lottery, pre_id):
+        return
+
+    doc = _train_progress_doc(db_instance, lottery, pre_id)
+    if not _train_pipeline_ready(doc):
+        if not ensure_train:
+            raise RuntimeError(
+                f"No ORC for pre_id={pre_id} and train pipeline not ready "
+                f"(set ensure_train=true or run train for this cutoff first)"
+            )
+        _start_train_pipeline(lottery, pre_id)
+        _wait_train_pipeline_done(db_instance, lottery, pre_id)
+
+    api_ranking_save_draw_probs(lottery=lottery, draw_id=pre_id)
+    ol = _import_online_learning()
+    ol.pre_draw(lottery=lottery, cutoff_draw_id=pre_id.strip())
+    if not _orc_exists_for_pre_draw(db_instance, lottery, pre_id):
+        raise RuntimeError(f"pre_draw did not create ORC for pre_id={pre_id}")
+
+
+def _run_repair_feedback_chain(
+    db_instance,
+    lottery: str,
+    pairs: List[Dict[str, str]],
+    *,
+    ensure_train: bool,
+) -> Dict[str, Any]:
+    """
+    Process draw pairs oldest-first so each post-draw feedback creates the ORC
+    the next draw needs (pre_id chain).
+    """
+    compare_coll = db_instance[_validation_compare_collection(lottery)]
+    ol = _import_online_learning()
+    repaired = 0
+    skipped_complete = 0
+    skipped_no_compare = 0
+    orc_created = 0
+    errors: List[str] = []
+
+    for pair in pairs:
+        current_id = pair["current_id"]
+        pre_id = pair["pre_id"]
+        label = f"{current_id} (pre={pre_id})"
+
+        if _feedback_log_exists(db_instance, lottery, current_id):
+            skipped_complete += 1
+            continue
+
+        doc = _find_compare_for_draw(
+            compare_coll,
+            current_id,
+            pre_id,
+            allow_current_id_only=True,
+        )
+        if not doc:
+            skipped_no_compare += 1
+            continue
+
+        effective_pre_id = str(doc.get("pre_id") or pre_id).strip()
+        try:
+            had_orc = _orc_exists_for_pre_draw(db_instance, lottery, effective_pre_id)
+            if not had_orc:
+                _ensure_orc_for_pre_draw(
+                    db_instance,
+                    lottery,
+                    effective_pre_id,
+                    ensure_train=ensure_train,
+                )
+                orc_created += 1
+
+            ol.post_draw(
+                lottery=lottery,
+                current_id=current_id,
+                pre_id=effective_pre_id,
+            )
+            _save_compare_result(
+                db_instance,
+                lottery,
+                doc,
+                touch_updated_at=False,
+            )
+            repaired += 1
+            logging.info("[repair-feedback] completed %s %s", lottery, label)
+        except Exception as exc:
+            logging.exception("[repair-feedback] failed %s: %s", label, exc)
+            errors.append(f"{label}: {exc}")
+
+    return {
+        "repaired": repaired,
+        "orc_created": orc_created,
+        "skipped_complete": skipped_complete,
+        "skipped_no_compare": skipped_no_compare,
+        "errors": errors,
+    }
+
+
+@app.post("/api/online-learning/repair-feedback")
+def api_online_learning_repair_feedback(
+    lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
+    last: int = Query(24, ge=1, le=50),
+    ensure_train: bool = Query(
+        True,
+        description="When ORC is missing for pre_id, run train pipeline + pre-draw ORC (no full wheel)",
+    ),
+    background: bool = Query(
+        True,
+        description="Run in background thread (recommended — train+feedback can take many minutes)",
+    ),
+):
+    """
+    Backfill learning history for recent draws with compare but no feedback.
+
+    Processes pairs **oldest first** so ORC snapshots chain correctly:
+    feedback for draw N creates ORC(N), which draw N+1 needs as pre_id.
+
+    Fixes **Compare only (legacy)** and **Pending learning** rows in learning history.
+    """
+    if db is None:
+        raise HTTPException(500, detail="Database not connected")
+    if lottery not in _VALIDATION_TOTAL_TICKETS:
+        raise HTTPException(400, detail=f"Unknown lottery: {lottery}")
+
+    pairs = _load_recent_draw_pairs(db, lottery, last)
+    if not pairs:
+        raise HTTPException(404, detail=f"No draw pairs found for {lottery}")
+
+    with _repair_feedback_lock:
+        if lottery in _repair_feedback_busy:
+            raise HTTPException(
+                503,
+                detail=f"Repair already running for {lottery}. Wait and refresh learning history.",
+            )
+
+    if not background:
+        with _repair_feedback_lock:
+            _repair_feedback_busy.add(lottery)
+        try:
+            result = _run_repair_feedback_chain(db, lottery, pairs, ensure_train=ensure_train)
+            return JSONResponse(content={"lottery": lottery, "pairs": len(pairs), **result})
+        finally:
+            with _repair_feedback_lock:
+                _repair_feedback_busy.discard(lottery)
+
+    def _run() -> None:
+        with _repair_feedback_lock:
+            _repair_feedback_busy.add(lottery)
+        try:
+            result = _run_repair_feedback_chain(db, lottery, pairs, ensure_train=ensure_train)
+            logging.info("[repair-feedback] %s finished: %s", lottery, result)
+        except Exception as exc:
+            logging.exception("[repair-feedback] %s failed: %s", lottery, exc)
+        finally:
+            with _repair_feedback_lock:
+                _repair_feedback_busy.discard(lottery)
+
+    threading.Thread(
+        target=_run,
+        daemon=True,
+        name=f"repair-feedback-{lottery}",
+    ).start()
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "started",
+            "lottery": lottery,
+            "pairs": len(pairs),
+            "message": (
+                f"Repair running for last {len(pairs)} draw pair(s) (oldest first). "
+                "Refresh learning history in a few minutes. Check logs: journalctl -u lottery-backend -f"
+            ),
+        },
+    )
+
+
 @app.get("/api/online-learning/orc-snapshots")
 def api_online_learning_orc_snapshots(
     lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
@@ -14347,10 +14588,7 @@ def _maybe_schedule_post_draw_feedback(db_instance, lottery: str, compare_doc: D
         return
     if _feedback_log_exists(db_instance, lottery, current_id):
         return
-    if not db_instance["model_orc_snapshots"].find_one(
-        {"lottery": lottery, "draw_id": pre_id},
-        projection={"_id": 1},
-    ):
+    if not _orc_exists_for_pre_draw(db_instance, lottery, pre_id):
         logging.info(
             "[feedback-auto] skip %s draw_id=%s: no ORC for pre_id=%s",
             lottery,

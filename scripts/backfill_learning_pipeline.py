@@ -26,7 +26,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
 _scripts_dir = os.path.dirname(os.path.abspath(__file__))
 if _scripts_dir not in sys.path:
@@ -149,10 +149,23 @@ def _compare_exists(db, lottery: str, current_id: str, pre_id: str) -> bool:
     return jp is not None and int(jp) > 0
 
 
+def _draw_id_variants(value: Any) -> List[Any]:
+    s = str(value or "").strip()
+    if not s:
+        return []
+    out: List[Any] = [s]
+    if s.isdigit():
+        out.append(int(s))
+    return out
+
+
 def _orc_exists(db, lottery: str, draw_id: str) -> bool:
+    variants = _draw_id_variants(draw_id)
+    if not variants:
+        return False
     return (
         db["model_orc_snapshots"].find_one(
-            {"lottery": lottery, "draw_id": draw_id},
+            {"lottery": lottery, "draw_id": {"$in": variants}},
             projection={"_id": 1},
         )
         is not None

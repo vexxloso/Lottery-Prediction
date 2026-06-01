@@ -10,6 +10,8 @@ Uses **existing** compare rows only (no training progress / TXT required).
 Examples:
   python scripts/sync_pending_learning.py
   python scripts/sync_pending_learning.py --lottery euromillones --last 24
+  # Full backfill (ORC + feedback) for legacy/pending rows:
+  python scripts/sync_pending_learning.py --repair --lottery la-primitiva --last 24
   # New draws only — needs train progress + full wheel:
   python scripts/sync_pending_learning.py --run-compare --api-url http://localhost:8000
 """
@@ -55,6 +57,11 @@ def main() -> None:
         action="store_true",
         help="Run full-wheel compare when missing (needs train progress; not for old data)",
     )
+    parser.add_argument(
+        "--repair",
+        action="store_true",
+        help="Run repair-feedback backfill (train ORC if needed + post-draw feedback, oldest first)",
+    )
     args = parser.parse_args()
 
     lotteries = args.lottery or ["euromillones", "la-primitiva"]
@@ -65,17 +72,25 @@ def main() -> None:
 
     failed = 0
     for lottery in lotteries:
+        endpoint = "repair-feedback" if args.repair else "sync-pending"
         url = (
-            f"{base}/api/online-learning/sync-pending"
-            f"?lottery={lottery}&last={args.last}&run_compare={str(args.run_compare).lower()}"
+            f"{base}/api/online-learning/{endpoint}"
+            f"?lottery={lottery}&last={args.last}"
         )
-        print(f"\n=== {lottery} (last {args.last}) ===")
+        if not args.repair:
+            url += f"&run_compare={str(args.run_compare).lower()}"
+        print(f"\n=== {lottery} (last {args.last}, {endpoint}) ===")
         try:
-            res = session.post(url, timeout=3600)
+            res = session.post(url, timeout=3600 if args.repair else 600)
             data = res.json() if res.content else {}
-            if not res.ok:
+            if not res.ok and res.status_code not in (202,):
                 print(f"ERROR {res.status_code}: {data.get('detail', res.text[:300])}")
                 failed += 1
+                continue
+            if args.repair:
+                print(data.get("message") or data)
+                if res.status_code == 202:
+                    print("(running in background — check journalctl -u lottery-backend -f)")
                 continue
             print(
                 f"pairs={data.get('pairs_checked')} refreshed={data.get('refreshed')} "

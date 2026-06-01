@@ -892,16 +892,14 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
   const [error, setError] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+  const [repairBusy, setRepairBusy] = useState(false);
+  const [repairMsg, setRepairMsg] = useState('');
 
-  useEffect(() => {
-    setPage(1);
-  }, [lottery]);
-
-  useEffect(() => {
+  const loadHistory = () => {
     setLoading(true);
     setError('');
     const skip = (page - 1) * pageSize;
-    fetch(`${API_URL}/api/online-learning/history?lottery=${lottery}&skip=${skip}&limit=${pageSize}`, { cache: 'no-store' })
+    return fetch(`${API_URL}/api/online-learning/history?lottery=${lottery}&skip=${skip}&limit=${pageSize}`, { cache: 'no-store' })
       .then(async r => {
         const body = await r.json();
         if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
@@ -913,11 +911,41 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
         setError(String(e.message || e));
       })
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    setPage(1);
+  }, [lottery]);
+
+  useEffect(() => {
+    loadHistory();
   }, [lottery, page, pageSize]);
 
   const handlePageChange = (nextPage: number, nextPageSize: number) => {
     setPage(nextPage);
     setPageSize(nextPageSize);
+  };
+
+  const needsBackfill = (data?.rows || []).filter(
+    r => r.feedback_status === 'legacy' || r.feedback_status === 'pending'
+  ).length;
+
+  const runRepairBackfill = async () => {
+    setRepairBusy(true);
+    setRepairMsg('');
+    try {
+      const r = await fetch(
+        `${API_URL}/api/online-learning/repair-feedback?lottery=${lottery}&last=24`,
+        { method: 'POST' }
+      );
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.detail || body.message || `HTTP ${r.status}`);
+      setRepairMsg(body.message || 'Backfill started. Refresh this page in a few minutes.');
+    } catch (e) {
+      setRepairMsg(String((e as Error).message || e));
+    } finally {
+      setRepairBusy(false);
+    }
   };
 
   if (loading && !data) return <div style={{ color: '#888', padding: 16 }}>Loading learning history...</div>;
@@ -930,10 +958,38 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
     <div>
       <p style={{ fontSize: '0.85rem', color: '#666', margin: '0 0 16px', lineHeight: 1.5 }}>
         Sorted by <strong>draw date</strong> (newest first). <strong>Complete</strong> = model feedback ran.
-        <strong>Legacy (compare only)</strong> = old data with compare in DB but no ORC (normal for history).
-        <strong>Pending</strong> = compare + ORC exist, feedback not run yet. <strong>No compare</strong> = latest draw
-        has no compare row yet (run daily automation or compare with train progress).
+        <strong> Legacy (compare only)</strong> = compare saved but no ORC for that pre-draw (learning never ran).
+        Use <strong>Backfill learning</strong> below to fix recent rows. <strong>Pending</strong> = ORC exists,
+        feedback not run yet. <strong>No compare</strong> = no compare row yet.
       </p>
+
+      {(needsBackfill > 0 || repairMsg) && (
+        <div style={{ marginBottom: 16, padding: '12px 14px', background: '#eff6ff', border: '1px solid #bfdbfe',
+          borderRadius: 8, fontSize: '0.82rem', lineHeight: 1.55 }}>
+          {needsBackfill > 0 && (
+            <div style={{ marginBottom: repairMsg ? 10 : 0 }}>
+              <strong>{needsBackfill}</strong> draw{needsBackfill !== 1 ? 's' : ''} on this page need learning backfill
+              (legacy or pending).
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={runRepairBackfill}
+            disabled={repairBusy}
+            style={{
+              padding: '6px 14px', borderRadius: 6, border: 'none', cursor: repairBusy ? 'wait' : 'pointer',
+              background: color, color: '#fff', fontWeight: 600, fontSize: '0.8rem',
+            }}
+          >
+            {repairBusy ? 'Starting backfill…' : 'Backfill learning (last 24 draws)'}
+          </button>
+          {repairMsg && (
+            <div style={{ marginTop: 10, color: repairMsg.includes('failed') || repairMsg.includes('HTTP') ? '#b91c1c' : '#1d4ed8' }}>
+              {repairMsg}
+            </div>
+          )}
+        </div>
+      )}
 
       {diag && (
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
@@ -945,7 +1001,7 @@ function OnlineLearningSection({ lottery, color }: { lottery: LotterySlug; color
             sub="post-draw learning runs logged" />
           {diag.pending_feedback > 0 && (
             <StatCard label="Missing feedback" value={fmt(diag.pending_feedback)} color="#ef4444"
-              sub="mostly legacy compares (compare only, no ORC)" />
+              sub="legacy or pending — use Backfill learning" />
           )}
           {diag.latest_feature_draw && (
             <StatCard
