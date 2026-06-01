@@ -72,6 +72,16 @@ def _request_json(session: requests.Session, method: str, url: str, timeout: int
     return data
 
 
+def _next_draw_date(session: requests.Session, base_url: str, cfg: LotteryConfig) -> Optional[str]:
+    url = f"{base_url}/api/metadata/next-draws"
+    data = _request_json(session, "GET", url)
+    for item in data.get("items") or []:
+        if isinstance(item, dict) and item.get("lottery") == cfg.api_slug:
+            nd = str(item.get("next_draw_date") or "").strip()
+            return nd.split(" ")[0][:10] if nd else None
+    return None
+
+
 def _latest_feature_ids(session: requests.Session, base_url: str, cfg: LotteryConfig) -> tuple[str, str, Optional[str]]:
     url = f"{base_url}/api/{cfg.api_slug}/feature-model?limit=1&skip=0"
     data = _request_json(session, "GET", url)
@@ -126,34 +136,46 @@ def _wait_full_wheel_done(session: requests.Session, base_url: str, cfg: Lottery
 
 def _ensure_pipeline(session: requests.Session, base_url: str, cfg: LotteryConfig, cutoff_draw_id: str) -> None:
     """
-    Always retrain the pipeline for cutoff_draw_id using ALL draws from the second onward.
-    We reset the pipeline_status so it retrains with the latest accumulated data,
-    rather than skipping if rules_applied is already True from a previous run.
+    Run train pipeline when not already done for this cutoff.
+
+    Does NOT call train/reset — reset deletes train_progress and forces full-wheel regeneration.
     """
-    # Reset the pipeline so it retrains with all draws up to current_id
-    reset_url = f"{base_url}/api/train/reset?lottery={cfg.api_slug}&delete_files=false&delete_compare=false"
-    try:
-        _request_json(session, "POST", reset_url, timeout=30)
-        print(f"[{cfg.name}] Pipeline reset for cutoff={cutoff_draw_id} (continuous retraining)")
-    except Exception as e:
-        print(f"[{cfg.name}] WARNING: pipeline reset failed ({e}), proceeding anyway")
+    progress = _get_progress(session, base_url, cfg, cutoff_draw_id) or {}
+    if progress.get("rules_applied") or str(progress.get("pipeline_status") or "").lower() == "done":
+        print(f"[{cfg.name}] Pipeline already done for cutoff={cutoff_draw_id}, skipping retrain")
+        return
+    if str(progress.get("pipeline_status") or "").lower() == "running":
+        print(f"[{cfg.name}] Pipeline already running for cutoff={cutoff_draw_id}, waiting")
+        _wait_pipeline_done(session, base_url, cfg, cutoff_draw_id)
+        return
 
     url = f"{base_url}/api/{cfg.api_slug}/train/run-pipeline?cutoff_draw_id={cutoff_draw_id}"
     data = _request_json(session, "POST", url)
     status = str(data.get("status") or "")
     print(f"[{cfg.name}] Pipeline trigger: status={status or 'unknown'} cutoff={cutoff_draw_id}")
+    if status == "done":
+        print(f"[{cfg.name}] Pipeline already complete")
+        return
     _wait_pipeline_done(session, base_url, cfg, cutoff_draw_id)
-    print(f"[{cfg.name}] Pipeline done (retrained with all draws up to {cutoff_draw_id})")
+    print(f"[{cfg.name}] Pipeline done for cutoff={cutoff_draw_id}")
 
 
 def _ensure_full_wheel(
     session: requests.Session, base_url: str, cfg: LotteryConfig, cutoff_draw_id: str, draw_date: Optional[str]
 ) -> None:
     progress = _get_progress(session, base_url, cfg, cutoff_draw_id) or {}
-    if str(progress.get("full_wheel_status") or "").lower() == "done" and str(
-        progress.get("full_wheel_file_path") or ""
-    ).strip():
-        print(f"[{cfg.name}] Full wheel already ready for cutoff={cutoff_draw_id}")
+    fw_status = str(progress.get("full_wheel_status") or "").lower()
+    fw_path = str(progress.get("full_wheel_file_path") or "").strip()
+    fw_date = str(progress.get("full_wheel_draw_date") or "").strip()[:10]
+    want_date = (draw_date or "").strip()[:10]
+    date_ok = not want_date or not fw_date or fw_date == want_date
+    if fw_status in ("done", "waiting") and fw_path and date_ok:
+        print(
+            f"[{cfg.name}] Full wheel already ready for cutoff={cutoff_draw_id} "
+            f"(status={fw_status}, draw_date={fw_date or 'n/a'})"
+        )
+        if fw_status == "waiting":
+            _wait_full_wheel_done(session, base_url, cfg, cutoff_draw_id)
         return
 
     params = f"cutoff_draw_id={cutoff_draw_id}"
@@ -162,7 +184,13 @@ def _ensure_full_wheel(
     url = f"{base_url}/api/{cfg.api_slug}/train/full-wheel?{params}"
     data = _request_json(session, "POST", url, timeout=60)
     status = str(data.get("status") or "")
+    msg = str(data.get("message") or "")
     print(f"[{cfg.name}] Full wheel trigger: status={status or 'unknown'} cutoff={cutoff_draw_id}")
+    if status in ("done", "waiting") and "already exists" in msg.lower():
+        print(f"[{cfg.name}] Full wheel skipped (already on server)")
+        if status == "waiting":
+            _wait_full_wheel_done(session, base_url, cfg, cutoff_draw_id)
+        return
     _wait_full_wheel_done(session, base_url, cfg, cutoff_draw_id)
     print(f"[{cfg.name}] Full wheel done")
 
@@ -239,29 +267,31 @@ def run_once(base_url: str) -> None:
     print(f"[automation] Start cycle base_url={base_url}")
     for cfg in LOTTERIES:
         try:
-            current_id, pre_id, draw_date = _latest_feature_ids(session, base_url, cfg)
-            print(f"[{cfg.name}] Feature latest: current_id={current_id}, pre_id={pre_id}, draw_date={draw_date}")
+            current_id, pre_id, last_draw_date = _latest_feature_ids(session, base_url, cfg)
+            next_draw = _next_draw_date(session, base_url, cfg)
+            print(
+                f"[{cfg.name}] Feature latest: current_id={current_id}, pre_id={pre_id}, "
+                f"last_draw_date={last_draw_date}, next_draw_date={next_draw}"
+            )
 
-            # Step 1: run pipeline (train model, compute probs, build pool)
+            # Step 1: train pipeline for last completed draw (cutoff = current_id)
             _ensure_pipeline(session, base_url, cfg, current_id)
 
-            # Step 2: save probability snapshot for current_id to draw_probs collection
-            # (used by Study Progress Dashboard — lightweight, instant)
+            # Step 2: save probability snapshot for last draw
             _save_draw_probs(session, base_url, cfg, current_id)
 
-            # Step 3: generate TXT full wheel file (original system)
-            _ensure_full_wheel(session, base_url, cfg, current_id, draw_date)
+            # Step 3: full wheel for NEXT draw (do not pass last draw date — API defaults to next_draw_date)
+            _ensure_full_wheel(session, base_url, cfg, current_id, next_draw)
 
-            # Step 4: pre-draw ORC snapshot — captures model state AFTER full wheel is ready
-            # so both .txt and .orc share the same SHA-256 validation hash
+            # Step 4: ORC snapshot before next draw (cutoff = last draw id)
             _trigger_pre_draw_orc(session, base_url, cfg, current_id)
 
-            # Step 5: compare using TXT file — fast sequential read
-            _trigger_compare(session, base_url, cfg, current_id, pre_id)
-
-            # Step 6: post-draw feedback loop — update model weights based on actual draw result
-            # This is the continuous learning step: model accumulates knowledge with each draw
-            _trigger_post_draw_feedback(session, base_url, cfg, current_id, pre_id)
+            # Step 5–6: post-draw learning for last completed draw only
+            try:
+                _trigger_compare(session, base_url, cfg, current_id, pre_id)
+                _trigger_post_draw_feedback(session, base_url, cfg, current_id, pre_id)
+            except Exception as learn_exc:
+                print(f"[{cfg.name}] WARNING: compare/feedback skipped: {learn_exc}")
 
         except Exception as e:
             print(f"[{cfg.name}] ERROR: {e}")

@@ -383,39 +383,25 @@ export function Dashboard() {
   useEffect(() => {
     const loadSampleTickets = async () => {
       try {
-        // For the homepage cards we want a small sample of tickets
-        // taken directly from the TXT-based betting pools, mirroring
-        // what the Apuestas pages show (limit 20 per lottery).
-        const [euRes, laRes, elRes] = await Promise.all([
-          fetch(`${API_URL}/api/euromillones/betting/pool-from-file?limit=20`),
-          fetch(`${API_URL}/api/la-primitiva/betting/pool-from-file?limit=20`),
-          fetch(`${API_URL}/api/el-gordo/betting/pool-from-file?limit=20`),
-        ]);
-
-        const [euData, laData, elData] = await Promise.all([
-          euRes.json().catch(() => ({})),
-          laRes.json().catch(() => ({})),
-          elRes.json().catch(() => ({})),
-        ]);
-
-        if (!euRes.ok && !laRes.ok && !elRes.ok) {
+        const res = await fetch(`${API_URL}/api/dashboard/sample-tickets?count=20`, {
+          cache: 'no-store',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
           setSampleTickets(null);
           return;
         }
-
+        const map = (slug: 'euromillones' | 'la-primitiva' | 'el-gordo') => {
+          const block = data[slug] ?? {};
+          return {
+            last_draw_date: (block.next_draw_date ?? block.draw_date ?? null) as string | null,
+            tickets: Array.isArray(block.tickets) ? block.tickets : [],
+          };
+        };
         setSampleTickets({
-          euromillones: {
-            last_draw_date: (euData.draw_date ?? null) as string | null,
-            tickets: Array.isArray(euData.tickets) ? euData.tickets : [],
-          },
-          'la-primitiva': {
-            last_draw_date: (laData.draw_date ?? null) as string | null,
-            tickets: Array.isArray(laData.tickets) ? laData.tickets : [],
-          },
-          'el-gordo': {
-            last_draw_date: (elData.draw_date ?? null) as string | null,
-            tickets: Array.isArray(elData.tickets) ? elData.tickets : [],
-          },
+          euromillones: map('euromillones'),
+          'la-primitiva': map('la-primitiva'),
+          'el-gordo': map('el-gordo'),
         });
       } catch {
         setSampleTickets(null);

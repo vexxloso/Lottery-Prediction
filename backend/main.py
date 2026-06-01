@@ -1907,6 +1907,48 @@ def _resolve_full_wheel_dates_for_api(lottery_slug: str, draw_date_override: str
     return iso, _fw_compact_from_iso(iso)
 
 
+def _train_progress_full_wheel_ready(
+    doc: Optional[Dict[str, Any]],
+    *,
+    draw_date_iso: Optional[str] = None,
+) -> bool:
+    """True when a usable full-wheel TXT already exists for the requested draw date."""
+    if not doc:
+        return False
+    status = str(doc.get("full_wheel_status") or "").lower()
+    if status == "waiting":
+        return True
+    if status != "done":
+        return False
+    path = (doc.get("full_wheel_file_path") or "").strip()
+    if not path or not os.path.isfile(path):
+        return False
+    if int(doc.get("full_wheel_total_tickets") or 0) <= 0:
+        return False
+    if draw_date_iso:
+        want = draw_date_iso.strip()[:10]
+        have = (doc.get("full_wheel_draw_date") or "").strip()[:10]
+        if have and want and have != want:
+            return False
+    return True
+
+
+def _full_wheel_already_response(doc: Dict[str, Any], cutoff_draw_id: str) -> JSONResponse:
+    return JSONResponse(
+        content={
+            "status": str(doc.get("full_wheel_status") or "done"),
+            "cutoff_draw_id": cutoff_draw_id,
+            "draw_date": doc.get("full_wheel_draw_date"),
+            "file_path": doc.get("full_wheel_file_path"),
+            "total_tickets": doc.get("full_wheel_total_tickets"),
+            "good_tickets": doc.get("full_wheel_good_tickets"),
+            "bad_tickets": doc.get("full_wheel_bad_tickets"),
+            "message": "Full wheel already exists for this cutoff/draw date; skipped regeneration.",
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def _fw_line_position(raw: str) -> Optional[int]:
     """1-based COMBO position from a full-wheel TXT line (legacy or id-prefixed)."""
     p = [x.strip() for x in raw.split(";")]
@@ -2185,9 +2227,9 @@ def _resolve_full_wheel_txt_path_for_export(lottery_slug: str, cutoff_draw_id: s
     if cid:
         doc = coll.find_one({"cutoff_draw_id": cid}) or (coll.find_one({"cutoff_draw_id": int(cid)}) if cid.isdigit() else None)
     if doc is None:
-        doc = _resolve_latest_train_progress_doc(slug)
+        doc = _resolve_next_draw_train_progress_doc(slug)
     if not doc:
-        raise HTTPException(404, detail=f"No train_progress found for {slug} (last_draw_date)")
+        raise HTTPException(404, detail=f"No train_progress found for {slug} (next_draw_date)")
     path = (doc.get("full_wheel_file_path") or "").strip()
     if not path or not os.path.isfile(path):
         raise HTTPException(404, detail="Full wheel file not found on disk")
@@ -2306,10 +2348,46 @@ def _csv_prepare_job_worker(job_id: str) -> None:
                 _csv_prepare_jobs[job_id]["updated_at"] = time.time()
 
 
+def _resolve_train_progress_by_draw_date(lottery_slug: str, date_str: str | None):
+    """Find train_progress for a YYYY-MM-DD draw date (full_wheel_draw_date or probs_fecha_sorteo)."""
+    if db is None or not date_str:
+        return None
+    slug = (lottery_slug or "").strip().lower()
+    coll_name = (
+        EUROMILLONES_TRAIN_PROGRESS_COLLECTION
+        if slug == "euromillones"
+        else EL_GORDO_TRAIN_PROGRESS_COLLECTION
+        if slug == "el-gordo"
+        else LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION
+        if slug == "la-primitiva"
+        else None
+    )
+    if not coll_name:
+        return None
+    d = date_str.strip()[:10]
+    coll = db[coll_name]
+    return coll.find_one({"full_wheel_draw_date": d}) or coll.find_one({"probs_fecha_sorteo": d})
+
+
+def _resolve_next_draw_train_progress_doc(lottery_slug: str):
+    """
+    Train progress for the upcoming draw (homepage / next prediction).
+    Prefer scraper_metadata.next_draw_date; fallback to latest pipeline doc.
+    """
+    if db is None:
+        return None
+    slug = (lottery_slug or "").strip().lower()
+    next_d = (_get_next_draw_date(slug) or "").strip()[:10]
+    doc = _resolve_train_progress_by_draw_date(slug, next_d) if next_d else None
+    if doc:
+        return doc
+    return _resolve_latest_train_progress_doc(lottery_slug)
+
+
 def _resolve_latest_train_progress_doc(lottery_slug: str):
     """
-    Resolve the latest train_progress document for a lottery for scraper_metadata.last_draw_date.
-    Primary lookup uses probs_fecha_sorteo == last_draw_date[:10]. Fallback: newest by pipeline_started_at.
+    Resolve train_progress for the last completed draw (scraper_metadata.last_draw_date).
+    Fallback: newest by pipeline_started_at.
     """
     if db is None:
         return None
@@ -2496,6 +2574,9 @@ _PUBLIC_API_PATHS = {
     "/api/ranking/study-progress",
     "/api/ranking/study-summary",
     "/api/ranking/save-draw-probs",
+    "/api/metadata/next-draws",
+    "/api/dashboard/sample-tickets",
+    "/api/train/latest",
     # Public download endpoints for native browser download (Chrome progress UI).
     "/api/euromillones/full-wheel/export",
     "/api/el-gordo/full-wheel/export",
@@ -2640,30 +2721,71 @@ def api_dashboard_sample_tickets(
     count: int = Query(10, ge=1, le=20, description="Number of random tickets per lottery"),
 ):
     """
-    For homepage alert: get last_draw_date from scraper_metadata per lottery,
-    find *train_progress by probs_fecha_sorteo === last_draw_date,
-    return random `count` tickets from candidate_pool for each lottery.
+    Homepage sample: tickets for the **next** draw prediction.
+
+    Resolves train_progress by scraper_metadata.next_draw_date (full_wheel_draw_date),
+    then returns random tickets from candidate_pool or top lines from the full-wheel TXT.
     """
     if db is None:
         raise HTTPException(500, detail="Database not connected")
     result = {}
-    for lottery_slug, coll_name in [
+    for lottery_slug, _coll_name in [
         ("euromillones", EUROMILLONES_TRAIN_PROGRESS_COLLECTION),
         ("la-primitiva", LA_PRIMITIVA_TRAIN_PROGRESS_COLLECTION),
         ("el-gordo", EL_GORDO_TRAIN_PROGRESS_COLLECTION),
     ]:
-        last_draw_date = _get_last_draw_date(lottery_slug)
-        date_str = (last_draw_date or "").strip()[:10] if last_draw_date else None
-        tickets = []
-        if date_str:
-            coll = db[coll_name]
-            doc = coll.find_one({"probs_fecha_sorteo": date_str}, projection=["candidate_pool"])
-            pool = doc.get("candidate_pool") or [] if doc else []
-            if pool:
-                n = min(count, len(pool))
-                tickets = list(random.sample(pool, n))
+        next_draw_date = (_get_next_draw_date(lottery_slug) or "").strip()[:10] or None
+        last_draw_date = (_get_last_draw_date(lottery_slug) or "").strip()[:10] or None
+        tickets: List[Any] = []
+        doc = _resolve_next_draw_train_progress_doc(lottery_slug)
+        pool = (doc or {}).get("candidate_pool") or []
+        if pool:
+            n = min(count, len(pool))
+            tickets = list(random.sample(pool, n))
+        elif doc and (doc.get("full_wheel_file_path") or "").strip():
+            path = (doc.get("full_wheel_file_path") or "").strip()
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    for _ in range(count):
+                        line = fh.readline()
+                        if not line:
+                            break
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if lottery_slug == "euromillones":
+                            sp = _fw_split_euromillones_line(line)
+                            if sp:
+                                _, ms, ss = sp
+                                tickets.append({
+                                    "mains": [int(x) for x in ms.split(",") if x],
+                                    "stars": [int(x) for x in ss.split(",") if x],
+                                })
+                        elif lottery_slug == "la-primitiva":
+                            sp = _fw_split_la_primitiva_line(line)
+                            if sp:
+                                _, ms, rs = sp
+                                row: Dict[str, Any] = {
+                                    "mains": [int(x) for x in ms.split(",") if x],
+                                }
+                                if rs is not None and str(rs).strip() != "":
+                                    row["reintegro"] = int(rs)
+                                tickets.append(row)
+                        else:
+                            sp = _fw_split_el_gordo_line(line)
+                            if sp:
+                                _, ms, cs = sp
+                                tickets.append({
+                                    "mains": [int(x) for x in ms.split(",") if x],
+                                    "clave": int(cs) if str(cs).strip() != "" else None,
+                                })
+            except OSError:
+                tickets = []
         result[lottery_slug] = {
-            "last_draw_date": date_str,
+            "next_draw_date": next_draw_date,
+            "last_draw_date": last_draw_date,
+            "draw_date": next_draw_date,
+            "cutoff_draw_id": str((doc or {}).get("cutoff_draw_id") or ""),
             "tickets": tickets,
         }
     return JSONResponse(
@@ -3401,9 +3523,13 @@ def api_el_gordo_betting_pool_from_file(
     cutoff = (cutoff_draw_id or "").strip() or None
 
     if not date_str and not cutoff:
-        last = (_get_last_draw_date("el-gordo") or "").strip()
-        if last:
-            date_str = last[:10]
+        next_d = (_get_next_draw_date("el-gordo") or "").strip()
+        if next_d:
+            date_str = next_d[:10]
+        else:
+            last = (_get_last_draw_date("el-gordo") or "").strip()
+            if last:
+                date_str = last[:10]
 
     doc = None
     if cutoff:
@@ -4391,11 +4517,15 @@ def api_euromillones_betting_pool_from_file(
     date_str = (draw_date or "").strip()[:10] or None
     cutoff = (cutoff_draw_id or "").strip() or None
 
-    # Fallback to last_draw_date if neither provided.
+    # Default: next draw prediction pool (not last completed draw).
     if not date_str and not cutoff:
-        last = (_get_last_draw_date("euromillones") or "").strip()
-        if last:
-            date_str = last[:10]
+        next_d = (_get_next_draw_date("euromillones") or "").strip()
+        if next_d:
+            date_str = next_d[:10]
+        else:
+            last = (_get_last_draw_date("euromillones") or "").strip()
+            if last:
+                date_str = last[:10]
 
     doc = None
     if cutoff:
@@ -7144,9 +7274,9 @@ def api_euromillones_full_wheel_export(
     if cid:
         doc = coll.find_one({"cutoff_draw_id": cid}) or (coll.find_one({"cutoff_draw_id": int(cid)}) if cid.isdigit() else None)
     if doc is None:
-        doc = _resolve_latest_train_progress_doc("euromillones")
+        doc = _resolve_next_draw_train_progress_doc("euromillones")
     if not doc:
-        raise HTTPException(404, detail="No train_progress found for euromillones (last_draw_date)")
+        raise HTTPException(404, detail="No train_progress found for euromillones (next_draw_date)")
     path = (doc.get("full_wheel_file_path") or "").strip()
     total = int(doc.get("full_wheel_total_tickets") or 0)
     if not path or not os.path.isfile(path):
@@ -7180,9 +7310,9 @@ def api_el_gordo_full_wheel_export(
     if cid:
         doc = coll.find_one({"cutoff_draw_id": cid}) or (coll.find_one({"cutoff_draw_id": int(cid)}) if cid.isdigit() else None)
     if doc is None:
-        doc = _resolve_latest_train_progress_doc("el-gordo")
+        doc = _resolve_next_draw_train_progress_doc("el-gordo")
     if not doc:
-        raise HTTPException(404, detail="No train_progress found for el-gordo (last_draw_date)")
+        raise HTTPException(404, detail="No train_progress found for el-gordo (next_draw_date)")
     path = (doc.get("full_wheel_file_path") or "").strip()
     total = int(doc.get("full_wheel_total_tickets") or 0)
     if not path or not os.path.isfile(path):
@@ -7216,9 +7346,9 @@ def api_la_primitiva_full_wheel_export(
     if cid:
         doc = coll.find_one({"cutoff_draw_id": cid}) or (coll.find_one({"cutoff_draw_id": int(cid)}) if cid.isdigit() else None)
     if doc is None:
-        doc = _resolve_latest_train_progress_doc("la-primitiva")
+        doc = _resolve_next_draw_train_progress_doc("la-primitiva")
     if not doc:
-        raise HTTPException(404, detail="No train_progress found for la-primitiva (last_draw_date)")
+        raise HTTPException(404, detail="No train_progress found for la-primitiva (next_draw_date)")
     path = (doc.get("full_wheel_file_path") or "").strip()
     total = int(doc.get("full_wheel_total_tickets") or 0)
     if not path or not os.path.isfile(path):
@@ -7466,16 +7596,25 @@ def api_train_reset(
 def api_train_latest(
     lottery: str = Query(..., description="euromillones | el-gordo | la-primitiva"),
 ):
-    """Return latest train_progress for scraper_metadata.last_draw_date (if any)."""
+    """Return train_progress for the next draw prediction (full wheel keyed by next_draw_date)."""
     if db is None:
         raise HTTPException(500, detail="Database not connected")
     lot = (lottery or "").strip().lower()
     if lot not in ("euromillones", "el-gordo", "la-primitiva"):
         raise HTTPException(400, detail="lottery must be one of: euromillones, el-gordo, la-primitiva")
     last = (_get_last_draw_date(lot) or "").strip()[:10] or None
-    doc = _resolve_latest_train_progress_doc(lot)
+    next_d = (_get_next_draw_date(lot) or "").strip()[:10] or None
+    doc = _resolve_next_draw_train_progress_doc(lot)
     if not doc:
-        return JSONResponse(content={"lottery": lot, "last_draw_date": last, "exists": False, "progress": None})
+        return JSONResponse(
+            content={
+                "lottery": lot,
+                "last_draw_date": last,
+                "next_draw_date": next_d,
+                "exists": False,
+                "progress": None,
+            }
+        )
     progress = {
         "cutoff_draw_id": str(doc.get("cutoff_draw_id") or ""),
         "probs_fecha_sorteo": (doc.get("probs_fecha_sorteo") or ""),
@@ -7486,7 +7625,15 @@ def api_train_latest(
         "full_wheel_total_tickets": doc.get("full_wheel_total_tickets"),
         "full_wheel_draw_date": doc.get("full_wheel_draw_date"),
     }
-    return JSONResponse(content={"lottery": lot, "last_draw_date": last, "exists": True, "progress": progress})
+    return JSONResponse(
+        content={
+            "lottery": lot,
+            "last_draw_date": last,
+            "next_draw_date": next_d,
+            "exists": True,
+            "progress": progress,
+        }
+    )
 
 @app.post("/api/euromillones/betting/bought")
 async def api_euromillones_betting_bought(request: Request):
@@ -8627,11 +8774,15 @@ def api_la_primitiva_betting_pool_from_file(
     date_str = (draw_date or "").strip()[:10] or None
     cutoff = (cutoff_draw_id or "").strip() or None
 
-    # Fallback to last_draw_date if neither provided.
+    # Default: next draw prediction pool (not last completed draw).
     if not date_str and not cutoff:
-        last = (_get_last_draw_date("la-primitiva") or "").strip()
-        if last:
-            date_str = last[:10]
+        next_d = (_get_next_draw_date("la-primitiva") or "").strip()
+        if next_d:
+            date_str = next_d[:10]
+        else:
+            last = (_get_last_draw_date("la-primitiva") or "").strip()
+            if last:
+                date_str = last[:10]
 
     doc = None
     if cutoff:
@@ -10382,35 +10533,16 @@ def api_la_primitiva_full_wheel(
     if not doc:
         raise HTTPException(404, detail="Progress not found for this cutoff_draw_id")
 
-    status = doc.get("full_wheel_status")
-    if status == "waiting":
-        print(
-            f"[la-prim-fullwheel] skip start for cutoff_draw_id={cid!r} because status={status!r}",
-            flush=True,
+    date_iso, date_compact = _resolve_full_wheel_dates_for_api("la-primitiva", draw_date)
+    date_str = date_iso
+
+    if _train_progress_full_wheel_ready(doc, draw_date_iso=date_str):
+        logging.info(
+            "[la-primitiva/full-wheel] skip regenerate cutoff=%s draw_date=%s",
+            cid,
+            date_str,
         )
-        return JSONResponse(
-            content={
-                "status": "waiting",
-                "cutoff_draw_id": cid,
-                "message": "Full wheel generation already in progress for this cutoff_draw_id.",
-            }
-        )
-    if status == "done" and doc.get("full_wheel_file_path"):
-        print(
-            f"[la-prim-fullwheel] skip regenerate for cutoff_draw_id={cid!r} because file already exists",
-            flush=True,
-        )
-        return JSONResponse(
-            content={
-                "status": "done",
-                "cutoff_draw_id": cid,
-                "draw_date": doc.get("full_wheel_draw_date"),
-                "file_path": doc.get("full_wheel_file_path"),
-                "total_tickets": doc.get("full_wheel_total_tickets"),
-                "good_tickets": doc.get("full_wheel_good_tickets"),
-                "bad_tickets": doc.get("full_wheel_bad_tickets"),
-            }
-        )
+        return _full_wheel_already_response(doc, cid)
 
     filtered_mains = doc.get("filtered_mains_probs") or []
     if not filtered_mains or len(filtered_mains) < 6:
@@ -10425,9 +10557,6 @@ def api_la_primitiva_full_wheel(
             400,
             detail="Pool too small to build La Primitiva tickets (need at least 6 distinct mains).",
         )
-
-    date_iso, date_compact = _resolve_full_wheel_dates_for_api("la-primitiva", draw_date)
-    date_str = date_iso
 
     now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     # Reserve generation slot atomically: only transition to waiting if not already waiting.
@@ -10862,6 +10991,14 @@ def api_euromillones_full_wheel(
     date_iso, date_compact = _resolve_full_wheel_dates_for_api("euromillones", draw_date)
     date_str = date_iso
 
+    if _train_progress_full_wheel_ready(doc, draw_date_iso=date_str):
+        logging.info(
+            "[euromillones/full-wheel] skip regenerate cutoff=%s draw_date=%s",
+            cid,
+            date_str,
+        )
+        return _full_wheel_already_response(doc, cid)
+
     # Mark status as waiting/running and launch background job so it survives UI refresh.
     now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     coll.update_one(
@@ -10987,6 +11124,14 @@ def api_el_gordo_full_wheel(
 
     date_iso, date_compact = _resolve_full_wheel_dates_for_api("el-gordo", draw_date)
     date_str = date_iso
+
+    if _train_progress_full_wheel_ready(doc, draw_date_iso=date_str):
+        logging.info(
+            "[el-gordo/full-wheel] skip regenerate cutoff=%s draw_date=%s",
+            cid,
+            date_str,
+        )
+        return _full_wheel_already_response(doc, cid)
 
     now = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     coll.update_one(
